@@ -113,6 +113,7 @@ jobs:
     env:
       REDIS_ENABLED: "false"
       DATABASE_URL: postgresql://stockscanner:stockscanner@localhost:5432/stockscanner
+      SG_UNIVERSE_SOURCE_URL: ${{ matrix.market == 'SG' && 'https://api.sgx.com/securities/v1.1?excludetypes=bonds' || '' }}
 
     steps:
       - uses: actions/checkout@v4
