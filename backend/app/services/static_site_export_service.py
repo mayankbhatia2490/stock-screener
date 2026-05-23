@@ -72,17 +72,6 @@ STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET: dict[str, dict[str, int | None]] = {
 STATIC_DEFAULT_SCAN_FILTERS_FALLBACK: dict[str, int | None] = {"minVolume": None}
 
 
-def resolve_static_default_filters(market: str | None) -> dict[str, int | None]:
-    """Return the per-market default scan filters, or the no-op fallback."""
-
-    code = (market or "").upper()
-    return dict(
-        STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET.get(
-            code, STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
-        )
-    )
-
-
 STATIC_CHART_PRESET_TOP_N = 200
 STATIC_CHART_TOP_N_GROUPS = 50
 STATIC_GROUP_DETAIL_HISTORY_DAYS = 100
@@ -681,7 +670,7 @@ class StaticSiteExportService:
         serialized_rows = [self._serialize_scan_row(row) for row in rows]
         self._annotate_percentile_ranks(serialized_rows)
         serialized_rows = self._sort_static_scan_rows(serialized_rows)
-        resolved_default_filters = resolve_static_default_filters(market)
+        resolved_default_filters = self.resolve_static_default_filters(market)
         default_filtered_rows = self._apply_static_default_filters(
             serialized_rows, default_filters=resolved_default_filters
         )
@@ -1952,6 +1941,19 @@ class StaticSiteExportService:
                     row_idx, _ = ranked[idx]
                     rows[row_idx][dst_field] = percentile
                 pos = end + 1
+
+    @staticmethod
+    def resolve_static_default_filters(
+        market: str | None,
+    ) -> dict[str, int | None]:
+        """Return the per-market default scan filters, or the no-op fallback."""
+
+        code = (market or "").upper()
+        return dict(
+            STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET.get(
+                code, STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
+            )
+        )
 
     @staticmethod
     def _apply_static_default_filters(

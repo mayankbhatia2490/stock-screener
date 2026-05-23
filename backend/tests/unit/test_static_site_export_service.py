@@ -22,7 +22,6 @@ from app.services.static_site_export_service import (
     STATIC_SITE_SCHEMA_VERSION,
     StaticSiteSectionUnavailableError,
     StaticSiteExportService,
-    resolve_static_default_filters,
 )
 
 
@@ -507,11 +506,12 @@ def test_export_scan_bundle_chunks_large_result_sets(service_and_session_factory
 
 
 def test_resolve_static_default_filters_returns_per_market_threshold():
-    assert resolve_static_default_filters("US") == {"minVolume": 100_000_000}
-    assert resolve_static_default_filters("sg") == {"minVolume": 1_300_000}
-    assert resolve_static_default_filters("HK") == STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET["HK"]
-    assert resolve_static_default_filters("ZZ") == STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
-    assert resolve_static_default_filters(None) == STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
+    resolve = StaticSiteExportService.resolve_static_default_filters
+    assert resolve("US") == {"minVolume": 100_000_000}
+    assert resolve("sg") == {"minVolume": 1_300_000}
+    assert resolve("HK") == STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET["HK"]
+    assert resolve("ZZ") == STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
+    assert resolve(None) == STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
 
 
 def test_export_scan_bundle_uses_sg_threshold_for_sg_market(
