@@ -57,15 +57,40 @@ class RSSparklineCalculator:
             }
 
         try:
-            # Get last 30 trading days (most recent data)
-            stock_last_30 = stock_prices.iloc[-self.SPARKLINE_DAYS:].values
-            spy_last_30 = spy_prices.iloc[-self.SPARKLINE_DAYS:].values
+            # Get last 30 trading days (most recent data) as float so NaN/Inf
+            # checks are consistent regardless of source dtype.
+            stock_last_30 = np.asarray(
+                stock_prices.iloc[-self.SPARKLINE_DAYS:].values, dtype=float
+            )
+            spy_last_30 = np.asarray(
+                spy_prices.iloc[-self.SPARKLINE_DAYS:].values, dtype=float
+            )
 
-            # Calculate RS ratio (stock / SPY)
-            rs_ratio = stock_last_30 / spy_last_30
+            # Calculate RS ratio (stock / SPY). Suppress the divide-by-zero
+            # warning so the downstream NaN/Inf scrubbing path stays quiet.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rs_ratio = stock_last_30 / spy_last_30
 
-            # Handle any NaN or inf values
-            rs_ratio = np.nan_to_num(rs_ratio, nan=1.0, posinf=1.0, neginf=1.0)
+            # If the window contains no finite samples, bail out to None.
+            # Previously NaN/Inf were rewritten to 1.0, which after the
+            # normalization step (divide by rs_ratio[0]) produced a large
+            # spike on the affected bar — most visible on markets where the
+            # raw ratio is far from 1 (e.g. CN stock_CNY / CSI300 ≈ 0.01,
+            # so a planted 1.0 became a ~100× spike on the latest date).
+            finite_mask = np.isfinite(rs_ratio)
+            if not finite_mask.any():
+                logger.debug("All-non-finite RS series; returning None sparkline")
+                return {
+                    "rs_data": None,
+                    "rs_trend": 0,
+                }
+
+            # Replace non-finite values with the first finite sample so the
+            # series is fully finite and the trailing bar flattens to the
+            # leading level (which normalization will collapse to 1.0)
+            # instead of producing a spike.
+            first_finite = float(rs_ratio[np.argmax(finite_mask)])
+            rs_ratio = np.where(finite_mask, rs_ratio, first_finite)
 
             # Normalize to start at 1.0 if requested (better for visual comparison)
             if normalize and rs_ratio[0] != 0:
@@ -89,6 +114,16 @@ class RSSparklineCalculator:
 
             # Round values for JSON storage efficiency (4 decimal places)
             rs_data = [round(float(v), 4) for v in rs_ratio]
+
+            # Final safety net: if rounding/normalization produced any
+            # non-finite value, collapse the whole payload to None so the
+            # schema sanitizer drops it cleanly.
+            if not all(np.isfinite(v) for v in rs_data):
+                logger.debug("Non-finite values after normalization; returning None sparkline")
+                return {
+                    "rs_data": None,
+                    "rs_trend": 0,
+                }
 
             return {
                 "rs_data": rs_data,
