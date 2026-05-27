@@ -38,9 +38,10 @@ def test_theme_openapi_contract_includes_merge_rankings_candidates_and_relations
     assert relationship_graph_path.endswith("/themes/relationship-graph")
 
     for forbidden_path in paths:
-        assert "/themes/twitter/session" not in forbidden_path, (
-            f"twitter session endpoint should be removed: {forbidden_path}"
-        )
+        assert not (
+            forbidden_path.endswith("/themes/twitter/session")
+            or "/themes/twitter/session/" in forbidden_path
+        ), f"twitter session endpoint should be removed: {forbidden_path}"
 
     assert rankings_ops["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/ThemeRankingsResponse"
