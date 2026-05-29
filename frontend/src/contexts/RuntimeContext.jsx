@@ -149,6 +149,7 @@ export const DEFAULT_CAPABILITIES = {
   bootstrap_state: 'not_started',
   market_catalog: DEFAULT_MARKET_CATALOG,
   supported_markets: DEFAULT_SUPPORTED_MARKETS,
+  universe_options: null,
   api_base_path: '/api',
 };
 
@@ -196,6 +197,9 @@ export function mergeBootstrapCapabilities(previous, data) {
     market_catalog: data.market_catalog
       ?? previous?.market_catalog
       ?? DEFAULT_CAPABILITIES.market_catalog,
+    universe_options: data.universe_options
+      ?? previous?.universe_options
+      ?? DEFAULT_CAPABILITIES.universe_options,
     supported_markets: data.supported_markets
       ?? previous?.supported_markets
       ?? supportedMarketsFromCatalog(data.market_catalog)
@@ -307,6 +311,7 @@ export function RuntimeProvider({ children }) {
     const features = capabilities.features ?? DEFAULT_CAPABILITIES.features;
     const auth = capabilities.auth ?? DEFAULT_CAPABILITIES.auth;
     const marketCatalog = capabilities.market_catalog ?? DEFAULT_CAPABILITIES.market_catalog;
+    const universeOptions = capabilities.universe_options ?? DEFAULT_CAPABILITIES.universe_options;
     const supportedMarkets = capabilities.supported_markets
       ?? supportedMarketsFromCatalog(marketCatalog)
       ?? supportedMarketsFromCatalog(DEFAULT_MARKET_CATALOG);
@@ -316,6 +321,7 @@ export function RuntimeProvider({ children }) {
       auth,
       features,
       marketCatalog,
+      universeOptions,
       runtimeReady,
       uiSnapshots: capabilities.ui_snapshots ?? DEFAULT_CAPABILITIES.ui_snapshots,
       scanDefaults: capabilities.scan_defaults ?? DEFAULT_SCAN_DEFAULTS,
