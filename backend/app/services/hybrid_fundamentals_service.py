@@ -29,6 +29,10 @@ from app.domain.providers.data_plan import (
     ProviderDataPlan,
     provider_data_plan_registry,
 )
+from .provider_adapters.fundamentals_plan_executor import (
+    fundamentals_plan_uses_single_symbol_route,
+    resolve_fundamentals_plan_for_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +143,14 @@ class HybridFundamentalsService:
         symbol: str,
         market_by_symbol: Optional[Dict[str, str]] = None,
     ) -> ProviderDataPlan:
-        return provider_data_plan_registry.plan_for(
+        return resolve_fundamentals_plan_for_symbol(
+            symbol,
             self._market_for_symbol(symbol, market_by_symbol),
-            DATASET_FUNDAMENTALS,
+            plan_resolver=lambda market, mic=None: provider_data_plan_registry.plan_for(
+                market,
+                DATASET_FUNDAMENTALS,
+                mic=mic,
+            ),
         )
 
     def _should_use_data_source_route(
@@ -150,12 +159,7 @@ class HybridFundamentalsService:
         market_by_symbol: Optional[Dict[str, str]] = None,
     ) -> bool:
         plan = self._fundamentals_plan_for_symbol(symbol, market_by_symbol)
-        if not plan.providers:
-            return False
-        return plan.providers[0] in {
-            routing_policy.PROVIDER_AKSHARE,
-            routing_policy.PROVIDER_KRX,
-        }
+        return fundamentals_plan_uses_single_symbol_route(plan)
 
     def _get_data_source_service(self):
         if self._data_source_service is None:

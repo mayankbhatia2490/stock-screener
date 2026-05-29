@@ -105,3 +105,11 @@ def test_price_plan_mic_override_can_disable_yfinance_fallback() -> None:
     assert bjse.mic == "XBSE"
     assert bjse.providers == (PROVIDER_AKSHARE, PROVIDER_BAOSTOCK)
     assert not bjse.allows(PROVIDER_YFINANCE)
+
+
+def test_fundamentals_plan_mic_override_can_disable_yfinance_fallback() -> None:
+    bjse = provider_data_plan_registry.plan_for("CN", DATASET_FUNDAMENTALS, mic="XBSE")
+
+    assert bjse.mic == "XBSE"
+    assert bjse.providers == (PROVIDER_AKSHARE, PROVIDER_BAOSTOCK)
+    assert not bjse.allows(PROVIDER_YFINANCE)

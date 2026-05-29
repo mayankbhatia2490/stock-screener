@@ -226,6 +226,10 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
         ("SG", DATASET_PRICES): (_yf(batch_size=50),),
     },
     overrides={
+        ("CN", "XBSE", DATASET_FUNDAMENTALS): (
+            ProviderPlanStep(PROVIDER_AKSHARE, batch_size=500, fallback=False),
+            ProviderPlanStep(PROVIDER_BAOSTOCK, batch_size=500),
+        ),
         ("CN", "XBSE", DATASET_PRICES): (
             ProviderPlanStep(PROVIDER_AKSHARE, batch_size=500, fallback=False),
             ProviderPlanStep(PROVIDER_BAOSTOCK, batch_size=500),

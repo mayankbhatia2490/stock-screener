@@ -152,8 +152,8 @@ class TestPhase3PolicyFiltering:
             "version": PLAN_VERSION,
             "dataset": DATASET_FUNDAMENTALS,
             "market": "CN",
-            "mic": None,
-            "providers": ["akshare", "baostock", "yfinance"],
+            "mic": "XBSE",
+            "providers": ["akshare", "baostock"],
         }
 
     def test_mixed_cn_batch_only_sends_non_cn_symbols_to_yfinance(self):

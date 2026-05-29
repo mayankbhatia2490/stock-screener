@@ -132,6 +132,24 @@ class TestGetFundamentalsPolicyGate:
         assert result["market"] == "CN"
         assert result["currency"] == "CNY"
 
+    def test_china_bjse_plan_disables_yfinance_fallback_by_mic(self):
+        cn = MagicMock()
+        cn.core_fundamentals.return_value = {"market_cap": 1_000}
+        cn.statement_fundamentals.return_value = {"revenue_current": 10_000}
+        svc = _make_service(cn_market_data_service=cn)
+
+        result = svc.get_fundamentals("920118.BJ", market="CN")
+
+        svc.yfinance_service.get_fundamentals.assert_not_called()
+        assert result["yfinance_status"] == "disabled_for_beijing"
+        assert result["provider_data_plan"] == {
+            "version": PLAN_VERSION,
+            "dataset": DATASET_FUNDAMENTALS,
+            "market": "CN",
+            "mic": "XBSE",
+            "providers": ["akshare", "baostock"],
+        }
+
     def test_korea_market_respects_disabled_yfinance_fallback(self):
         krx = MagicMock()
         krx.core_fundamentals.return_value = {"market_cap": 1_000, "pe_ratio": 9.5}
