@@ -13,6 +13,11 @@ from typing import Any, Optional, Dict, Callable
 from datetime import datetime, date
 from sqlalchemy.orm import Session
 
+from app.domain.providers.data_plan import (
+    DATASET_FUNDAMENTALS,
+    provider_data_plan_registry,
+)
+
 try:
     import redis  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - exercised in desktop packaging
@@ -489,6 +494,9 @@ class FundamentalsCacheService:
                 data, market
             )
         )
+        data['provider_data_plan'] = provider_data_plan_registry.plan_for(
+            market, DATASET_FUNDAMENTALS
+        ).provenance_metadata()
         return market
 
     def _ensure_field_availability_metadata(
@@ -517,6 +525,12 @@ class FundamentalsCacheService:
                     data, resolved_market
                 )
             )
+            changed = True
+        expected_plan = provider_data_plan_registry.plan_for(
+            resolved_market, DATASET_FUNDAMENTALS
+        ).provenance_metadata()
+        if data.get("provider_data_plan") != expected_plan:
+            data["provider_data_plan"] = expected_plan
             changed = True
 
         previous_fx_values = (

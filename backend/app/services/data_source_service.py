@@ -10,6 +10,11 @@ from typing import TYPE_CHECKING, Dict, Optional
 from datetime import datetime
 
 from app.config import settings
+from app.domain.providers.data_plan import (
+    DATASET_FUNDAMENTALS,
+    ProviderDataPlan,
+    provider_data_plan_registry,
+)
 
 from .finviz_validator import FinvizValidator
 from . import provider_routing_policy as routing_policy
@@ -115,7 +120,24 @@ class DataSourceService:
             'finviz_skipped_by_policy': 0,
         }
 
-    def _finviz_allowed(self, market: Optional[str]) -> bool:
+    def _fundamentals_plan(self, market: Optional[str]) -> ProviderDataPlan:
+        return provider_data_plan_registry.plan_for(market, DATASET_FUNDAMENTALS)
+
+    @staticmethod
+    def _attach_provider_plan(
+        payload: Optional[Dict],
+        plan: ProviderDataPlan,
+    ) -> Optional[Dict]:
+        if payload is not None:
+            payload["provider_data_plan"] = plan.provenance_metadata()
+        return payload
+
+    def _finviz_allowed(
+        self,
+        market: Optional[str],
+        *,
+        plan: ProviderDataPlan | None = None,
+    ) -> bool:
         """Return True iff finviz may be attempted for ``market`` per policy.
 
         NOT a pure predicate: increments ``metrics['finviz_skipped_by_policy']``
@@ -129,8 +151,10 @@ class DataSourceService:
         """
         if not self.prefer_finviz:
             return False
-        allowed = routing_policy.is_supported(
-            market, routing_policy.PROVIDER_FINVIZ
+        allowed = (
+            plan.allows(routing_policy.PROVIDER_FINVIZ)
+            if plan is not None
+            else routing_policy.is_supported(market, routing_policy.PROVIDER_FINVIZ)
         )
         if not allowed:
             self.metrics['finviz_skipped_by_policy'] += 1
@@ -162,90 +186,126 @@ class DataSourceService:
             Dict with fundamental metrics and metadata, or None if all sources fail
         """
         self.metrics['total_calls'] += 1
-        if routing_policy.normalize_market(market) == routing_policy.MARKET_CN:
-            return self._get_cn_fundamentals(symbol)
-        if routing_policy.normalize_market(market) == routing_policy.MARKET_KR:
-            return self._get_kr_fundamentals(symbol)
+        plan = self._fundamentals_plan(market)
+        if not plan.providers:
+            logger.error(
+                "No fundamentals provider plan for %s market=%r dataset=%s",
+                symbol, market, DATASET_FUNDAMENTALS,
+            )
+            return None
+        if self.prefer_finviz and not plan.allows(routing_policy.PROVIDER_FINVIZ):
+            self._finviz_allowed(market, plan=plan)
+        if plan.market == routing_policy.MARKET_CN:
+            return self._get_cn_fundamentals(symbol, plan=plan)
+        if plan.market == routing_policy.MARKET_KR:
+            return self._get_kr_fundamentals(symbol, plan=plan)
 
-        if self._finviz_allowed(market):
-            logger.debug(f"Attempting to fetch {symbol} fundamentals from finvizfinance")
+        finviz_failed = False
+        for step in plan.steps:
+            provider = step.provider
+            if provider == routing_policy.PROVIDER_FINVIZ:
+                if not self._finviz_allowed(market, plan=plan):
+                    continue
+                logger.debug(f"Attempting to fetch {symbol} fundamentals from finvizfinance")
 
-            finviz_data = self.finviz_service.get_fundamentals(symbol)
+                finviz_data = self.finviz_service.get_fundamentals(symbol)
 
-            if finviz_data:
-                # Validate data (range checks produce warnings, not blocking errors)
-                is_valid, errors = self.validator.validate_fundamentals(finviz_data)
+                if finviz_data:
+                    # Validate data (range checks produce warnings, not blocking errors)
+                    is_valid, errors = self.validator.validate_fundamentals(finviz_data)
 
-                if not is_valid:
-                    # Log warning but still use the data
-                    logger.warning(f"Range validation warnings for {symbol} fundamentals: {errors}")
+                    if not is_valid:
+                        # Log warning but still use the data
+                        logger.warning(f"Range validation warnings for {symbol} fundamentals: {errors}")
 
-                self.metrics['finviz_success'] += 1
-                logger.info(f"Using finvizfinance data for {symbol} fundamentals")
-                finviz_data['data_source'] = 'finviz'
-                finviz_data['data_source_timestamp'] = datetime.utcnow()
+                    self.metrics['finviz_success'] += 1
+                    logger.info(f"Using finvizfinance data for {symbol} fundamentals")
+                    finviz_data['data_source'] = 'finviz'
+                    finviz_data['data_source_timestamp'] = datetime.utcnow()
+                    self._attach_provider_plan(finviz_data, plan)
 
-                # Supplement with EPS rating data from yfinance (finviz doesn't have income statements)
-                eps_data = self._get_eps_rating_data(symbol)
-                if eps_data:
-                    finviz_data.update(eps_data)
-                    logger.debug(f"Supplemented finviz data with EPS rating data for {symbol}")
+                    # Supplement with EPS rating data from yfinance (finviz doesn't have income statements)
+                    eps_data = self._get_eps_rating_data(symbol)
+                    if eps_data:
+                        finviz_data.update(eps_data)
+                        logger.debug(f"Supplemented finviz data with EPS rating data for {symbol}")
 
-                return finviz_data
-            else:
+                    return finviz_data
+
                 self.metrics['finviz_failed'] += 1
                 logger.warning(f"finvizfinance failed to fetch {symbol}")
 
                 if not self.enable_fallback:
                     return None
 
-            # Fall back to yfinance
-            logger.info(f"Falling back to yfinance for {symbol} fundamentals")
-            self.metrics['yfinance_fallback'] += 1
+                finviz_failed = True
+                continue
 
-        else:
-            # Use yfinance as primary source
-            logger.debug(f"Using yfinance as primary source for {symbol}")
-            self.metrics['yfinance_primary'] += 1
+            if provider != routing_policy.PROVIDER_YFINANCE:
+                logger.debug(
+                    "Provider %s is in the %s plan for %s but is not wired in DataSourceService",
+                    provider, DATASET_FUNDAMENTALS, plan.market,
+                )
+                continue
 
-        # Fetch from yfinance (now includes EPS rating data)
-        yf_data = self.yfinance_service.get_fundamentals(symbol)
+            if finviz_failed:
+                logger.info(f"Falling back to yfinance for {symbol} fundamentals")
+                self.metrics['yfinance_fallback'] += 1
+            else:
+                logger.debug(f"Using yfinance as primary source for {symbol}")
+                self.metrics['yfinance_primary'] += 1
 
-        if yf_data:
-            yf_data['data_source'] = 'yfinance'
-            yf_data['data_source_timestamp'] = datetime.utcnow()
-            logger.info(f"Using yfinance data for {symbol} fundamentals")
-            return yf_data
+            # Fetch from yfinance (now includes EPS rating data)
+            yf_data = self.yfinance_service.get_fundamentals(symbol)
+
+            if yf_data:
+                yf_data['data_source'] = 'yfinance'
+                yf_data['data_source_timestamp'] = datetime.utcnow()
+                self._attach_provider_plan(yf_data, plan)
+                logger.info(f"Using yfinance data for {symbol} fundamentals")
+                return yf_data
 
         logger.error(f"All data sources failed for {symbol} fundamentals")
         return None
 
-    def _get_cn_fundamentals(self, symbol: str) -> Optional[Dict]:
+    def _get_cn_fundamentals(
+        self,
+        symbol: str,
+        *,
+        plan: ProviderDataPlan | None = None,
+    ) -> Optional[Dict]:
         """Fetch CN fundamentals in AKShare -> BaoStock -> yfinance order."""
+        plan = plan or self._fundamentals_plan(routing_policy.MARKET_CN)
         identity = security_master_resolver.resolve_identity(symbol=symbol, market="CN")
         local_code = str(identity.local_code or "").strip()
         merged: Dict = {}
         sources: list[str] = []
 
-        try:
-            core_data = self.cn_market_data_service.core_fundamentals(local_code)
-        except Exception as exc:  # pragma: no cover - provider/network variability
-            logger.warning("AKShare CN core fundamentals failed for %s: %s", symbol, exc)
-            core_data = {}
-        if core_data:
-            merged.update(core_data)
-            sources.append(routing_policy.PROVIDER_AKSHARE)
+        if plan.allows(routing_policy.PROVIDER_AKSHARE):
+            try:
+                core_data = self.cn_market_data_service.core_fundamentals(local_code)
+            except Exception as exc:  # pragma: no cover - provider/network variability
+                logger.warning("AKShare CN core fundamentals failed for %s: %s", symbol, exc)
+                core_data = {}
+            if core_data:
+                merged.update(core_data)
+                sources.append(routing_policy.PROVIDER_AKSHARE)
 
-        try:
-            statement_data = self.cn_market_data_service.statement_fundamentals(local_code)
-        except Exception as exc:  # pragma: no cover - provider/network variability
-            logger.warning("CN statement fundamentals failed for %s: %s", symbol, exc)
-            statement_data = {}
-        if statement_data:
-            merged.update({key: value for key, value in statement_data.items() if value is not None})
-            sources.append("cn_statement")
+        if plan.allows(routing_policy.PROVIDER_BAOSTOCK):
+            try:
+                statement_data = self.cn_market_data_service.statement_fundamentals(local_code)
+            except Exception as exc:  # pragma: no cover - provider/network variability
+                logger.warning("CN statement fundamentals failed for %s: %s", symbol, exc)
+                statement_data = {}
+            if statement_data:
+                merged.update({key: value for key, value in statement_data.items() if value is not None})
+                sources.append("cn_statement")
 
-        if self.enable_fallback and not identity.canonical_symbol.endswith(".BJ"):
+        if (
+            self.enable_fallback
+            and plan.allows(routing_policy.PROVIDER_YFINANCE)
+            and not identity.canonical_symbol.endswith(".BJ")
+        ):
             yf_data = self.yfinance_service.get_fundamentals(identity.canonical_symbol)
             if yf_data:
                 for key, value in yf_data.items():
@@ -264,35 +324,44 @@ class DataSourceService:
         merged["data_source_timestamp"] = datetime.utcnow()
         if identity.canonical_symbol.endswith(".BJ"):
             merged["yfinance_status"] = "disabled_for_beijing"
+        self._attach_provider_plan(merged, plan)
         return merged
 
-    def _get_kr_fundamentals(self, symbol: str) -> Optional[Dict]:
+    def _get_kr_fundamentals(
+        self,
+        symbol: str,
+        *,
+        plan: ProviderDataPlan | None = None,
+    ) -> Optional[Dict]:
         """Fetch KR fundamentals in KRX -> OpenDART -> yfinance order."""
+        plan = plan or self._fundamentals_plan(routing_policy.MARKET_KR)
         identity = security_master_resolver.resolve_identity(symbol=symbol, market="KR")
         merged: Dict = {}
         sources: list[str] = []
 
-        try:
-            krx_data = self.krx_fundamentals_service.core_fundamentals(identity.local_code)
-        except Exception as exc:  # pragma: no cover - provider/network variability
-            logger.warning("KRX fundamentals failed for %s: %s", symbol, exc)
-            krx_data = {}
-        if krx_data:
-            merged.update(krx_data)
-            sources.append(routing_policy.PROVIDER_KRX)
+        if plan.allows(routing_policy.PROVIDER_KRX):
+            try:
+                krx_data = self.krx_fundamentals_service.core_fundamentals(identity.local_code)
+            except Exception as exc:  # pragma: no cover - provider/network variability
+                logger.warning("KRX fundamentals failed for %s: %s", symbol, exc)
+                krx_data = {}
+            if krx_data:
+                merged.update(krx_data)
+                sources.append(routing_policy.PROVIDER_KRX)
 
-        try:
-            dart_data = self.opendart_fundamentals_service.get_statement_fundamentals(
-                identity.local_code
-            )
-        except Exception as exc:  # pragma: no cover - provider/network variability
-            logger.warning("OpenDART fundamentals failed for %s: %s", symbol, exc)
-            dart_data = {}
-        if dart_data:
-            merged.update({key: value for key, value in dart_data.items() if value is not None})
-            sources.append(routing_policy.PROVIDER_OPENDART)
+        if plan.allows(routing_policy.PROVIDER_OPENDART):
+            try:
+                dart_data = self.opendart_fundamentals_service.get_statement_fundamentals(
+                    identity.local_code
+                )
+            except Exception as exc:  # pragma: no cover - provider/network variability
+                logger.warning("OpenDART fundamentals failed for %s: %s", symbol, exc)
+                dart_data = {}
+            if dart_data:
+                merged.update({key: value for key, value in dart_data.items() if value is not None})
+                sources.append(routing_policy.PROVIDER_OPENDART)
 
-        if self.enable_fallback:
+        if self.enable_fallback and plan.allows(routing_policy.PROVIDER_YFINANCE):
             yf_data = self.yfinance_service.get_fundamentals(identity.canonical_symbol)
             if yf_data:
                 for key, value in yf_data.items():
@@ -311,6 +380,7 @@ class DataSourceService:
         merged["data_source_timestamp"] = datetime.utcnow()
         if not self.opendart_fundamentals_service.is_configured:
             merged["opendart_status"] = "missing_api_key"
+        self._attach_provider_plan(merged, plan)
         return merged
 
     def _get_eps_rating_data(self, symbol: str) -> Optional[Dict]:
@@ -430,12 +500,22 @@ class DataSourceService:
             Dict with keys 'fundamentals' and 'growth', both containing data + metadata
         """
         self.metrics['total_calls'] += 1
+        plan = self._fundamentals_plan(market)
+        if not plan.providers:
+            logger.error(
+                "No fundamentals provider plan for %s market=%r dataset=%s",
+                symbol, market, DATASET_FUNDAMENTALS,
+            )
+            return None
 
-        if routing_policy.normalize_market(market) == routing_policy.MARKET_CN:
-            fundamentals = self._get_cn_fundamentals(symbol)
+        if plan.market == routing_policy.MARKET_CN:
+            fundamentals = self._get_cn_fundamentals(symbol, plan=plan)
             identity = security_master_resolver.resolve_identity(symbol=symbol, market="CN")
             growth = {}
-            if not identity.canonical_symbol.endswith(".BJ"):
+            if (
+                plan.allows(routing_policy.PROVIDER_YFINANCE)
+                and not identity.canonical_symbol.endswith(".BJ")
+            ):
                 growth = self.yfinance_service.get_quarterly_growth(
                     identity.canonical_symbol,
                     market=routing_policy.MARKET_CN,
@@ -453,13 +533,15 @@ class DataSourceService:
             logger.error(f"All CN data sources failed for {symbol} combined data")
             return None
 
-        if routing_policy.normalize_market(market) == routing_policy.MARKET_KR:
-            fundamentals = self._get_kr_fundamentals(symbol)
+        if plan.market == routing_policy.MARKET_KR:
+            fundamentals = self._get_kr_fundamentals(symbol, plan=plan)
             identity = security_master_resolver.resolve_identity(symbol=symbol, market="KR")
-            growth = self.yfinance_service.get_quarterly_growth(
-                identity.canonical_symbol,
-                market=routing_policy.MARKET_KR,
-            )
+            growth = None
+            if plan.allows(routing_policy.PROVIDER_YFINANCE):
+                growth = self.yfinance_service.get_quarterly_growth(
+                    identity.canonical_symbol,
+                    market=routing_policy.MARKET_KR,
+                )
             if fundamentals:
                 timestamp = datetime.utcnow()
                 if growth:
@@ -473,7 +555,7 @@ class DataSourceService:
             logger.error(f"All KR data sources failed for {symbol} combined data")
             return None
 
-        if self._finviz_allowed(market):
+        if self._finviz_allowed(market, plan=plan):
             logger.debug(f"Attempting to fetch {symbol} combined data from finvizfinance")
 
             combined_data = self.finviz_service.get_combined_data(symbol, validate=self.strict_validation)
@@ -486,6 +568,7 @@ class DataSourceService:
                 timestamp = datetime.utcnow()
                 combined_data['fundamentals']['data_source'] = 'finviz'
                 combined_data['fundamentals']['data_source_timestamp'] = timestamp
+                self._attach_provider_plan(combined_data['fundamentals'], plan)
                 combined_data['growth']['data_source'] = 'finviz'
                 combined_data['growth']['data_source_timestamp'] = timestamp
 
@@ -506,6 +589,9 @@ class DataSourceService:
             self.metrics['yfinance_primary'] += 1
 
         # Fetch from yfinance (requires two API calls)
+        if not plan.allows(routing_policy.PROVIDER_YFINANCE):
+            logger.error(f"No yfinance fallback in provider plan for {symbol} combined data")
+            return None
         fundamentals = self.yfinance_service.get_fundamentals(symbol)
         growth = self.yfinance_service.get_quarterly_growth(symbol, market=market)
 
@@ -513,6 +599,7 @@ class DataSourceService:
             timestamp = datetime.utcnow()
             fundamentals['data_source'] = 'yfinance'
             fundamentals['data_source_timestamp'] = timestamp
+            self._attach_provider_plan(fundamentals, plan)
             growth['data_source'] = 'yfinance'
             growth['data_source_timestamp'] = timestamp
 

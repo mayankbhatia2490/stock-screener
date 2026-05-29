@@ -23,6 +23,11 @@ from .finviz_service import FinvizService
 from .price_cache_service import PriceCacheService
 from .institutional_ownership_service import InstitutionalOwnershipService
 from . import provider_routing_policy as routing_policy
+from app.domain.providers.data_plan import (
+    DATASET_FUNDAMENTALS,
+    ProviderDataPlan,
+    provider_data_plan_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +133,29 @@ class HybridFundamentalsService:
     ) -> bool:
         return self._market_for_symbol(symbol, market_by_symbol) == routing_policy.MARKET_CN
 
+    def _fundamentals_plan_for_symbol(
+        self,
+        symbol: str,
+        market_by_symbol: Optional[Dict[str, str]] = None,
+    ) -> ProviderDataPlan:
+        return provider_data_plan_registry.plan_for(
+            self._market_for_symbol(symbol, market_by_symbol),
+            DATASET_FUNDAMENTALS,
+        )
+
+    def _should_use_data_source_route(
+        self,
+        symbol: str,
+        market_by_symbol: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        plan = self._fundamentals_plan_for_symbol(symbol, market_by_symbol)
+        if not plan.providers:
+            return False
+        return plan.providers[0] in {
+            routing_policy.PROVIDER_AKSHARE,
+            routing_policy.PROVIDER_KRX,
+        }
+
     def _get_data_source_service(self):
         if self._data_source_service is None:
             from app.wiring.bootstrap import get_data_source_service
@@ -135,10 +163,15 @@ class HybridFundamentalsService:
             self._data_source_service = get_data_source_service()
         return self._data_source_service
 
-    def _fetch_cn_fundamentals_payload(self, symbol: str) -> Dict[str, Any]:
-        """Fetch CN fundamentals through AKShare/BaoStock-aware routing."""
+    def _fetch_plan_routed_fundamentals_payload(
+        self,
+        symbol: str,
+        *,
+        market: str,
+    ) -> Dict[str, Any]:
+        """Fetch fundamentals through the single-symbol plan-aware service."""
         data_source = self._get_data_source_service()
-        combined = data_source.get_combined_data(symbol, market=routing_policy.MARKET_CN)
+        combined = data_source.get_combined_data(symbol, market=market)
         if not combined:
             return {}
         merged: Dict[str, Any] = {}
@@ -151,6 +184,13 @@ class HybridFundamentalsService:
                 if value is not None and key not in merged:
                     merged[key] = value
         return merged
+
+    def _fetch_cn_fundamentals_payload(self, symbol: str) -> Dict[str, Any]:
+        """Fetch CN fundamentals through AKShare/BaoStock-aware routing."""
+        return self._fetch_plan_routed_fundamentals_payload(
+            symbol,
+            market=routing_policy.MARKET_CN,
+        )
 
     def fetch_fundamentals(
         self,
@@ -173,16 +213,21 @@ class HybridFundamentalsService:
             include_finviz = self.include_finviz
 
         result = {}
+        plan = self._fundamentals_plan_for_symbol(symbol)
 
-        # Phase 1: provider fundamentals. CN symbols must use the
-        # AKShare/BaoStock-aware service because Yahoo is not the primary
-        # source and Beijing yfinance support is intentionally disabled.
-        if self._is_cn_symbol(symbol):
-            result.update(self._fetch_cn_fundamentals_payload(symbol))
+        # Phase 1: provider fundamentals. Native-first plans must use the
+        # plan-aware single-symbol service because Yahoo is not primary there.
+        if self._should_use_data_source_route(symbol):
+            result.update(
+                self._fetch_plan_routed_fundamentals_payload(
+                    symbol,
+                    market=plan.market,
+                )
+            )
         else:
             yf_data = self.bulk_fetcher.fetch_batch_fundamentals(
                 [symbol],
-                batch_size=1,
+                batch_size=plan.step_for(routing_policy.PROVIDER_YFINANCE).batch_size or 1,
                 include_quarterly=True
             )
             if symbol in yf_data and not yf_data[symbol].get('has_error'):
@@ -204,6 +249,7 @@ class HybridFundamentalsService:
         # Add metadata
         result['symbol'] = symbol
         result['hybrid_fetch_timestamp'] = datetime.utcnow().isoformat()
+        result['provider_data_plan'] = plan.provenance_metadata()
 
         return result if result else None
 
@@ -246,22 +292,34 @@ class HybridFundamentalsService:
 
         results = {symbol: {} for symbol in symbols}
 
-        cn_symbols = [s for s in symbols if self._is_cn_symbol(s, market_by_symbol)]
-        cn_symbol_set = set(cn_symbols)
-        yfinance_symbols = [s for s in symbols if s not in cn_symbol_set]
-
-        if cn_symbols:
-            logger.info(
-                "Phase 1a: Fetching CN fundamentals via AKShare/BaoStock-aware routing for %d symbols...",
-                len(cn_symbols),
+        data_source_symbols = [
+            s for s in symbols if self._should_use_data_source_route(s, market_by_symbol)
+        ]
+        data_source_symbol_set = set(data_source_symbols)
+        yfinance_symbols = [
+            s for s in symbols
+            if s not in data_source_symbol_set
+            and self._fundamentals_plan_for_symbol(s, market_by_symbol).allows(
+                routing_policy.PROVIDER_YFINANCE
             )
-            for symbol in cn_symbols:
+        ]
+
+        if data_source_symbols:
+            logger.info(
+                "Phase 1a: Fetching native-first fundamentals via provider data plans for %d symbols...",
+                len(data_source_symbols),
+            )
+            for symbol in data_source_symbols:
+                plan = self._fundamentals_plan_for_symbol(symbol, market_by_symbol)
                 try:
-                    cn_data = self._fetch_cn_fundamentals_payload(symbol)
-                    if cn_data:
-                        results[symbol].update(cn_data)
+                    native_data = self._fetch_plan_routed_fundamentals_payload(
+                        symbol,
+                        market=plan.market,
+                    )
+                    if native_data:
+                        results[symbol].update(native_data)
                 except Exception as exc:  # pragma: no cover - provider/network variability
-                    logger.warning("CN fundamentals fetch failed for %s: %s", symbol, exc)
+                    logger.warning("Native-first fundamentals fetch failed for %s: %s", symbol, exc)
 
         # ============================================================
         # Phase 1: Batch fetch yfinance fundamentals (~25 min for 7000)
@@ -336,9 +394,8 @@ class HybridFundamentalsService:
             # HK/JP/TW symbols entirely rather than making doomed API calls.
             finviz_eligible = [
                 s for s in symbols
-                if routing_policy.is_supported(
-                    self._market_for_symbol(s, market_by_symbol),
-                    routing_policy.PROVIDER_FINVIZ,
+                if self._fundamentals_plan_for_symbol(s, market_by_symbol).allows(
+                    routing_policy.PROVIDER_FINVIZ
                 )
             ]
             skipped = len(symbols) - len(finviz_eligible)
@@ -413,6 +470,9 @@ class HybridFundamentalsService:
         for symbol in symbols:
             results[symbol]['symbol'] = symbol
             results[symbol]['hybrid_fetch_timestamp'] = datetime.utcnow().isoformat()
+            results[symbol]['provider_data_plan'] = (
+                self._fundamentals_plan_for_symbol(symbol, market_by_symbol).provenance_metadata()
+            )
 
         total_time = time.time() - start_time
         logger.info(
@@ -486,21 +546,33 @@ class HybridFundamentalsService:
         results = {symbol: {} for symbol in symbols}
 
         # Phase 1: yfinance (already batched)
-        cn_symbols = [s for s in symbols if self._is_cn_symbol(s, market_by_symbol)]
-        cn_symbol_set = set(cn_symbols)
-        yfinance_symbols = [s for s in symbols if s not in cn_symbol_set]
-        if cn_symbols:
-            logger.info(
-                "Phase 1a: Fetching CN fundamentals via AKShare/BaoStock-aware routing for %d symbols...",
-                len(cn_symbols),
+        data_source_symbols = [
+            s for s in symbols if self._should_use_data_source_route(s, market_by_symbol)
+        ]
+        data_source_symbol_set = set(data_source_symbols)
+        yfinance_symbols = [
+            s for s in symbols
+            if s not in data_source_symbol_set
+            and self._fundamentals_plan_for_symbol(s, market_by_symbol).allows(
+                routing_policy.PROVIDER_YFINANCE
             )
-            for symbol in cn_symbols:
+        ]
+        if data_source_symbols:
+            logger.info(
+                "Phase 1a: Fetching native-first fundamentals via provider data plans for %d symbols...",
+                len(data_source_symbols),
+            )
+            for symbol in data_source_symbols:
+                plan = self._fundamentals_plan_for_symbol(symbol, market_by_symbol)
                 try:
-                    cn_data = self._fetch_cn_fundamentals_payload(symbol)
-                    if cn_data:
-                        results[symbol].update(cn_data)
+                    native_data = self._fetch_plan_routed_fundamentals_payload(
+                        symbol,
+                        market=plan.market,
+                    )
+                    if native_data:
+                        results[symbol].update(native_data)
                 except Exception as exc:  # pragma: no cover - provider/network variability
-                    logger.warning("CN fundamentals fetch failed for %s: %s", symbol, exc)
+                    logger.warning("Native-first fundamentals fetch failed for %s: %s", symbol, exc)
 
         logger.info("Phase 1: Fetching yfinance fundamentals...")
         yf_data = {}
@@ -534,14 +606,15 @@ class HybridFundamentalsService:
 
         # Phase 3: Parallel finviz fetching, grouped by market so the
         # per-market rate limiter and circuit breaker apply correctly.
-        from . import provider_routing_policy as routing_policy
         from .rate_budget_policy import get_rate_budget_policy
 
         market_by_symbol = market_by_symbol or {}
         eligible_by_market: Dict[str, List[str]] = {}
         for symbol in symbols:
             market = self._market_for_symbol(symbol, market_by_symbol)
-            if not routing_policy.is_supported(market, routing_policy.PROVIDER_FINVIZ):
+            if not self._fundamentals_plan_for_symbol(symbol, market_by_symbol).allows(
+                routing_policy.PROVIDER_FINVIZ
+            ):
                 continue
             eligible_by_market.setdefault(market, []).append(symbol)
 
@@ -575,6 +648,9 @@ class HybridFundamentalsService:
         for symbol in symbols:
             results[symbol]['symbol'] = symbol
             results[symbol]['hybrid_fetch_timestamp'] = datetime.utcnow().isoformat()
+            results[symbol]['provider_data_plan'] = (
+                self._fundamentals_plan_for_symbol(symbol, market_by_symbol).provenance_metadata()
+            )
 
         total_time = time.time() - start_time
         logger.info(f"Parallel hybrid fetch complete: {total} symbols in {total_time/60:.1f} minutes")
