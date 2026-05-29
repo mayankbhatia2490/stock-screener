@@ -6,11 +6,16 @@ attaches the reproducible fx_metadata snapshot.
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.models.stock import StockFundamental
+from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
 from app.services.fundamentals_cache_service import FundamentalsCacheService
 from app.services.fx_service import FXService
 
@@ -32,6 +37,12 @@ def _dummy_session():
     return fake
 
 
+def _make_sqlite_session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
 @pytest.fixture
 def captured_record():
     captured = {"added_record": None}
@@ -47,6 +58,55 @@ def captured_record():
 
 
 class TestEnrichmentComputesUSDColumns:
+    def test_fetch_and_cache_uses_universe_currency_when_provider_payload_omits_currency(
+        self,
+        monkeypatch,
+    ):
+        import app.wiring.bootstrap as bootstrap_module
+
+        session_factory = _make_sqlite_session_factory()
+        db = session_factory()
+        db.add(
+            StockUniverse(
+                symbol="0700.HK",
+                market="HK",
+                exchange="XHKG",
+                currency="HKD",
+                timezone="Asia/Hong_Kong",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+            )
+        )
+        db.commit()
+        db.close()
+
+        fx = _make_fx({"HKD": 0.128})
+        service = FundamentalsCacheService(
+            redis_client=None,
+            session_factory=session_factory,
+            fx_service=fx,
+        )
+        monkeypatch.setattr(service, "record_on_demand_fallback", lambda: None)
+        monkeypatch.setattr(
+            bootstrap_module,
+            "get_data_source_service",
+            lambda: SimpleNamespace(
+                get_fundamentals=lambda symbol, market=None: {
+                    "market_cap": 1_000_000_000,
+                    "shares_outstanding": 10_000_000,
+                    "avg_volume": 500_000,
+                    "data_source": "yfinance",
+                }
+            ),
+        )
+
+        result = service._fetch_and_cache("0700.HK", market="HK")
+
+        assert result is not None
+        assert result["market_cap_usd"] == 128_000_000
+        assert result["adv_usd"] == 6_400_000
+        assert result["fx_metadata"]["from_currency"] == "HKD"
+
     def test_row_currency_wins_over_market_default(self, captured_record):
         fake_db, captured = captured_record
         fx = _make_fx({"NOK": 0.095, "EUR": 1.08})

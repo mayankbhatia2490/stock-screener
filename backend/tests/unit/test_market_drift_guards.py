@@ -21,6 +21,10 @@ from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
 from app.services import provider_routing_policy
 from app.services.field_capability_registry import field_capability_registry
 from app.services.security_master_service import SecurityMasterResolver
+from app.services.universe_row_facts import (
+    active_universe_currency_drift,
+    active_universe_timezone_drift,
+)
 from app.tasks import market_queues
 
 
@@ -90,60 +94,6 @@ def _make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
-
-
-def _active_universe_currency_drift(db) -> list[dict[str, object]]:
-    catalog = get_market_catalog()
-    drift: list[dict[str, object]] = []
-    rows = (
-        db.query(StockUniverse.symbol, StockUniverse.market, StockUniverse.currency)
-        .filter(StockUniverse.is_active.is_(True))
-        .all()
-    )
-    for symbol, market, currency in rows:
-        market_code = str(market or "").strip().upper()
-        row_currency = str(currency or "").strip().upper()
-        entry = catalog.get(market_code)
-        if row_currency not in entry.supported_currencies:
-            drift.append(
-                {
-                    "symbol": symbol,
-                    "market": market_code,
-                    "currency": row_currency,
-                    "supported_currencies": entry.supported_currencies,
-                }
-            )
-    return drift
-
-
-def _active_universe_timezone_drift(db) -> list[dict[str, object]]:
-    catalog = get_market_catalog()
-    drift: list[dict[str, object]] = []
-    rows = (
-        db.query(
-            StockUniverse.symbol,
-            StockUniverse.market,
-            StockUniverse.exchange,
-            StockUniverse.timezone,
-        )
-        .filter(StockUniverse.is_active.is_(True))
-        .all()
-    )
-    for symbol, market, mic, timezone in rows:
-        market_code = str(market or "").strip().upper()
-        row_mic = str(mic or "").strip().upper()
-        expected_timezone = catalog.get(market_code).mic_facts_for(row_mic).timezone
-        if timezone != expected_timezone:
-            drift.append(
-                {
-                    "symbol": symbol,
-                    "market": market_code,
-                    "mic": row_mic,
-                    "timezone": timezone,
-                    "expected_timezone": expected_timezone,
-                }
-            )
-    return drift
 
 
 def _fallback_catalog_codes_from_frontend() -> list[str]:
@@ -224,7 +174,7 @@ def test_active_universe_row_currencies_are_catalog_supported() -> None:
     )
     db.commit()
 
-    assert _active_universe_currency_drift(db) == []
+    assert active_universe_currency_drift(db) == []
     db.close()
 
 
@@ -243,7 +193,7 @@ def test_active_universe_currency_drift_reports_unsupported_currency() -> None:
     )
     db.commit()
 
-    assert _active_universe_currency_drift(db) == [
+    assert active_universe_currency_drift(db) == [
         {
             "symbol": "BAD.HK",
             "market": "HK",
@@ -280,7 +230,7 @@ def test_active_universe_timezone_drift_reports_mic_mismatch() -> None:
     )
     db.commit()
 
-    assert _active_universe_timezone_drift(db) == [
+    assert active_universe_timezone_drift(db) == [
         {
             "symbol": "BAD.SI",
             "market": "SG",

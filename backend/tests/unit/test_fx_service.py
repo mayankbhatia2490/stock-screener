@@ -7,6 +7,7 @@ that fundamentals storage consumes.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,6 +85,16 @@ class TestCurrencyForMarket:
             market: catalog.get(market).default_currency
             for market in catalog.supported_market_codes()
         }
+
+    def test_market_currency_fallback_is_not_used_by_fundamentals_cache_service(self):
+        service_source = (
+            Path(__file__).resolve().parents[2]
+            / "app"
+            / "services"
+            / "fundamentals_cache_service.py"
+        ).read_text()
+
+        assert "currency_for_market" not in service_source
 
 
 # --- FXQuote ---------------------------------------------------------------
