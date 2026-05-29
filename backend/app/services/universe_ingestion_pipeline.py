@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from typing import Any, Iterable, Mapping, Protocol
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +11,7 @@ from ..domain.universe.ingestion import (
     CanonicalUniverseIngestionResult,
     CanonicalUniverseRow,
     RejectedUniverseRow,
+    UniverseLifecycleMetadata,
 )
 from ..models.stock_universe import (
     StockUniverse,
@@ -34,38 +34,85 @@ class UniverseCanonicalizer(Protocol):
         """Return accepted/rejected canonical rows for one source snapshot."""
 
 
-@dataclass(frozen=True)
-class UniversePersistenceHooks:
-    apply_status_transition: Callable[..., bool]
-    apply_market_reconciliation_policy: Callable[..., dict[str, Any]]
-    build_metadata_event_record: Callable[..., StockUniverseStatusEvent]
-    build_status_event_record: Callable[..., StockUniverseStatusEvent]
-    bulk_insert_records: Callable[[Session, list[Any]], None]
-    record_market_reconciliation_run: Callable[..., dict[str, Any]]
+class StockUniversePersistenceService(Protocol):
+    def _apply_status_transition(
+        self,
+        db: Session,
+        record: StockUniverse,
+        *,
+        new_status: str,
+        trigger_source: str,
+        reason: str,
+        now: datetime | None = None,
+        payload: dict[str, Any] | None = None,
+        source: str | None = None,
+        clear_failures: bool = False,
+        seen_in_source: bool = False,
+    ) -> bool:
+        """Apply lifecycle state and emit status events when needed."""
+
+    def _apply_market_reconciliation_policy(
+        self,
+        db: Session,
+        *,
+        market: str,
+        snapshot_id: str,
+        trigger_source: str,
+        reconciliation: Mapping[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Apply destructive reconciliation safety policy."""
+
+    def _build_metadata_event_record(
+        self,
+        *,
+        symbol: str,
+        event_type: str,
+        trigger_source: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> StockUniverseStatusEvent:
+        """Build a metadata audit event."""
+
+    def _build_status_event_record(
+        self,
+        *,
+        symbol: str,
+        old_status: str | None,
+        new_status: str,
+        trigger_source: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> StockUniverseStatusEvent:
+        """Build a lifecycle audit event."""
+
+    def _bulk_insert_records(self, db: Session, objects: list[Any]) -> None:
+        """Insert ORM records in bulk."""
+
+    def _record_market_reconciliation_run(
+        self,
+        db: Session,
+        *,
+        market: str,
+        source_name: str,
+        snapshot_id: str,
+        canonical_rows: Iterable[Any],
+    ) -> dict[str, Any]:
+        """Persist one reconciliation artifact."""
 
 
 class UniversePersistence:
     """Persist canonical Universe rows and shared reconciliation side effects."""
 
-    def __init__(self, hooks: UniversePersistenceHooks) -> None:
-        self._hooks = hooks
+    def __init__(self, service: StockUniversePersistenceService) -> None:
+        self._service = service
 
     @classmethod
-    def for_stock_universe_service(cls, service: Any) -> "UniversePersistence":
-        return cls(
-            UniversePersistenceHooks(
-                apply_status_transition=service._apply_status_transition,
-                apply_market_reconciliation_policy=(
-                    service._apply_market_reconciliation_policy
-                ),
-                build_metadata_event_record=service._build_metadata_event_record,
-                build_status_event_record=service._build_status_event_record,
-                bulk_insert_records=service._bulk_insert_records,
-                record_market_reconciliation_run=(
-                    service._record_market_reconciliation_run
-                ),
-            )
-        )
+    def for_stock_universe_service(
+        cls,
+        service: StockUniversePersistenceService,
+    ) -> "UniversePersistence":
+        return cls(service)
 
     def persist(
         self,
@@ -99,7 +146,7 @@ class UniversePersistence:
 
         for row in canonical_rows:
             event_payload = self._event_payload(row)
-            reason = f"Present in {market} source snapshot {row.provenance.snapshot_id}"
+            reason = self._status_reason(row, market=market)
             existing = existing_rows.get(row.symbol)
 
             if existing is not None:
@@ -125,10 +172,10 @@ class UniversePersistence:
                 )
             )
             new_events.append(
-                self._hooks.build_status_event_record(
+                self._service._build_status_event_record(
                     symbol=row.symbol,
                     old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
+                    new_status=row.lifecycle.status,
                     trigger_source=trigger_source,
                     reason=reason,
                     payload=event_payload,
@@ -136,17 +183,17 @@ class UniversePersistence:
             )
             added_count += 1
 
-        self._hooks.bulk_insert_records(db, new_rows)
-        self._hooks.bulk_insert_records(db, new_events)
+        self._service._bulk_insert_records(db, new_rows)
+        self._service._bulk_insert_records(db, new_events)
 
-        reconciliation = self._hooks.record_market_reconciliation_run(
+        reconciliation = self._service._record_market_reconciliation_run(
             db,
             market=market,
             source_name=source_name,
             snapshot_id=snapshot_id,
             canonical_rows=canonical_rows,
         )
-        reconciliation = self._hooks.apply_market_reconciliation_policy(
+        reconciliation = self._service._apply_market_reconciliation_policy(
             db,
             market=market,
             snapshot_id=snapshot_id,
@@ -174,7 +221,6 @@ class UniversePersistence:
         event_payload: dict[str, Any],
         new_events: list[StockUniverseStatusEvent],
     ) -> None:
-        previous_listing_tier = existing.listing_tier
         existing.name = row.name or existing.name
         existing.market = row.market
         existing.exchange = row.mic
@@ -183,13 +229,48 @@ class UniversePersistence:
         existing.local_code = row.local_code or existing.local_code
         existing.sector = row.sector or existing.sector
         existing.industry = row.industry or existing.industry
-        existing.listing_tier = row.listing_tier
         if row.market_cap is not None:
             existing.market_cap = row.market_cap
 
+        self._apply_listing_tier(
+            existing,
+            row=row,
+            trigger_source=trigger_source,
+            event_payload=event_payload,
+            new_events=new_events,
+        )
+
+        self._service._apply_status_transition(
+            db,
+            existing,
+            new_status=row.lifecycle.status,
+            trigger_source=trigger_source,
+            reason=reason,
+            now=now,
+            payload=event_payload,
+            source=trigger_source,
+            clear_failures=row.lifecycle.is_active,
+            seen_in_source=row.lifecycle.is_active,
+        )
+        self._apply_lifecycle_metadata(existing, row.lifecycle, now=now)
+
+    def _apply_listing_tier(
+        self,
+        existing: StockUniverse,
+        *,
+        row: CanonicalUniverseRow,
+        trigger_source: str,
+        event_payload: dict[str, Any],
+        new_events: list[StockUniverseStatusEvent],
+    ) -> None:
+        if row.listing_tier is None:
+            return
+
+        previous_listing_tier = existing.listing_tier
+        existing.listing_tier = row.listing_tier
         if previous_listing_tier != row.listing_tier:
             new_events.append(
-                self._hooks.build_metadata_event_record(
+                self._service._build_metadata_event_record(
                     symbol=row.symbol,
                     event_type=UNIVERSE_EVENT_LISTING_TIER_CHANGED,
                     trigger_source=trigger_source,
@@ -202,18 +283,20 @@ class UniversePersistence:
                 )
             )
 
-        self._hooks.apply_status_transition(
-            db,
-            existing,
-            new_status=UNIVERSE_STATUS_ACTIVE,
-            trigger_source=trigger_source,
-            reason=reason,
-            now=now,
-            payload=event_payload,
-            source=trigger_source,
-            clear_failures=True,
-            seen_in_source=True,
-        )
+    @staticmethod
+    def _apply_lifecycle_metadata(
+        existing: StockUniverse,
+        lifecycle: UniverseLifecycleMetadata,
+        *,
+        now: datetime,
+    ) -> None:
+        if existing.first_seen_at is None:
+            existing.first_seen_at = lifecycle.first_seen_at or now
+        if lifecycle.last_seen_in_source_at is not None:
+            existing.last_seen_in_source_at = lifecycle.last_seen_in_source_at
+        if not lifecycle.is_active and lifecycle.deactivated_at is not None:
+            existing.deactivated_at = lifecycle.deactivated_at
+        existing.consecutive_fetch_failures = lifecycle.consecutive_fetch_failures
 
     @staticmethod
     def _new_universe_row(
@@ -223,6 +306,18 @@ class UniversePersistence:
         source: str,
         reason: str,
     ) -> StockUniverse:
+        lifecycle = row.lifecycle
+        first_seen_at = lifecycle.first_seen_at or now
+        last_seen_in_source_at = (
+            lifecycle.last_seen_in_source_at
+            if lifecycle.last_seen_in_source_at is not None
+            else now if lifecycle.is_active else None
+        )
+        deactivated_at = (
+            lifecycle.deactivated_at
+            if lifecycle.deactivated_at is not None
+            else None if lifecycle.is_active else now
+        )
         return StockUniverse(
             symbol=row.symbol,
             name=row.name,
@@ -235,14 +330,15 @@ class UniversePersistence:
             sector=row.sector,
             industry=row.industry,
             market_cap=row.market_cap,
-            is_active=True,
-            status=UNIVERSE_STATUS_ACTIVE,
+            is_active=lifecycle.is_active,
+            status=lifecycle.status,
             status_reason=reason,
             source=source,
-            consecutive_fetch_failures=0,
-            added_at=now,
-            first_seen_at=now,
-            last_seen_in_source_at=now,
+            consecutive_fetch_failures=lifecycle.consecutive_fetch_failures,
+            added_at=first_seen_at,
+            first_seen_at=first_seen_at,
+            last_seen_in_source_at=last_seen_in_source_at,
+            deactivated_at=deactivated_at,
             updated_at=now,
         )
 
@@ -260,6 +356,17 @@ class UniversePersistence:
             "row_hash": provenance.row_hash,
             "listing_tier": row.listing_tier,
         }
+
+    @staticmethod
+    def _status_reason(row: CanonicalUniverseRow, *, market: str) -> str:
+        if row.lifecycle.status_reason:
+            return row.lifecycle.status_reason
+        if row.lifecycle.status == UNIVERSE_STATUS_ACTIVE:
+            return f"Present in {market} source snapshot {row.provenance.snapshot_id}"
+        return (
+            f"{market} source snapshot {row.provenance.snapshot_id} marks "
+            f"row {row.lifecycle.status}"
+        )
 
 
 class UniverseIngestionPipeline:

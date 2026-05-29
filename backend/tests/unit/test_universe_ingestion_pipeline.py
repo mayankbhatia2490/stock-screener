@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
@@ -11,6 +12,7 @@ from app.domain.universe.ingestion import (
     CanonicalUniverseIngestionResult,
     CanonicalUniverseRow,
     RejectedUniverseRow,
+    UniverseLifecycleMetadata,
     UniverseSourceProvenance,
 )
 from app.models.stock_universe import (
@@ -19,6 +21,7 @@ from app.models.stock_universe import (
     UNIVERSE_EVENT_LISTING_TIER_CHANGED,
     UNIVERSE_EVENT_STATUS_CHANGED,
     UNIVERSE_STATUS_ACTIVE,
+    UNIVERSE_STATUS_INACTIVE_MANUAL,
 )
 from app.services.stock_universe_service import StockUniverseService
 from app.services.universe_ingestion_pipeline import (
@@ -49,6 +52,7 @@ def _row(
     local_code: str,
     listing_tier: str | None = None,
     source_row_number: int = 1,
+    lifecycle: UniverseLifecycleMetadata | None = None,
 ) -> CanonicalUniverseRow:
     return CanonicalUniverseRow(
         symbol=symbol,
@@ -72,6 +76,7 @@ def _row(
             lineage_hash=f"lineage-{local_code}",
             row_hash=f"row-{local_code}",
         ),
+        lifecycle=lifecycle or UniverseLifecycleMetadata.active(),
     )
 
 
@@ -179,4 +184,102 @@ def test_pipeline_strict_mode_raises_for_rejected_rows() -> None:
             snapshot_id="sgx-2026-05-29",
             strict=True,
         )
+    db.close()
+
+
+def test_pipeline_persists_canonical_lifecycle_for_inactive_rows() -> None:
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    deactivated_at = datetime(2026, 5, 29, 4, 30)
+    canonicalizer = _FakeCanonicalizer(
+        CanonicalUniverseIngestionResult(
+            canonical_rows=(
+                _row(
+                    "D05.SI",
+                    local_code="D05",
+                    lifecycle=UniverseLifecycleMetadata.inactive(
+                        status=UNIVERSE_STATUS_INACTIVE_MANUAL,
+                        reason="Source marks row inactive",
+                        deactivated_at=deactivated_at,
+                    ),
+                ),
+            )
+        )
+    )
+    pipeline = UniverseIngestionPipeline(
+        canonicalizers={"SG": canonicalizer},
+        persistence=UniversePersistence.for_stock_universe_service(
+            StockUniverseService()
+        ),
+    )
+
+    stats = pipeline.ingest_snapshot_rows(
+        db,
+        market="SG",
+        rows=[{"symbol": "D05"}],
+        source_name="sgx_official",
+        snapshot_id="sgx-2026-05-29",
+        strict=True,
+    )
+
+    assert stats["added"] == 1
+    row = db.query(StockUniverse).filter_by(symbol="D05.SI").one()
+    assert row.status == UNIVERSE_STATUS_INACTIVE_MANUAL
+    assert row.is_active is False
+    assert row.status_reason == "Source marks row inactive"
+    assert row.deactivated_at == deactivated_at
+
+    event = db.query(StockUniverseStatusEvent).one()
+    assert event.event_type == UNIVERSE_EVENT_STATUS_CHANGED
+    assert event.old_status is None
+    assert event.new_status == UNIVERSE_STATUS_INACTIVE_MANUAL
+    db.close()
+
+
+def test_pipeline_preserves_existing_listing_tier_when_source_omits_tier() -> None:
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    db.add(
+        StockUniverse(
+            symbol="D05.SI",
+            name="DBS old",
+            market="SG",
+            exchange="XSES",
+            currency="SGD",
+            timezone="Asia/Singapore",
+            local_code="D05",
+            listing_tier="mainboard",
+            is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE,
+            source="sg_ingest",
+        )
+    )
+    db.commit()
+    canonicalizer = _FakeCanonicalizer(
+        CanonicalUniverseIngestionResult(
+            canonical_rows=(
+                _row("D05.SI", local_code="D05", listing_tier=None),
+            )
+        )
+    )
+    pipeline = UniverseIngestionPipeline(
+        canonicalizers={"SG": canonicalizer},
+        persistence=UniversePersistence.for_stock_universe_service(
+            StockUniverseService()
+        ),
+    )
+
+    pipeline.ingest_snapshot_rows(
+        db,
+        market="SG",
+        rows=[{"symbol": "D05"}],
+        source_name="sgx_official",
+        snapshot_id="sgx-2026-05-29",
+        strict=True,
+    )
+
+    row = db.query(StockUniverse).filter_by(symbol="D05.SI").one()
+    assert row.listing_tier == "mainboard"
+    events = db.query(StockUniverseStatusEvent).all()
+    assert events == []
     db.close()

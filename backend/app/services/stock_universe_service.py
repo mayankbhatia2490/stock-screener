@@ -33,6 +33,7 @@ from ..models.stock import StockIndustry
 from ..models.ticker_validation import TickerValidationLog
 from ..schemas.universe import IndexName
 from ..config import settings
+from ..domain.universe.ingestion import CanonicalUniverseRow
 from .ca_universe_ingestion_adapter import ca_universe_ingestion_adapter
 from .cn_universe_ingestion_adapter import cn_universe_ingestion_adapter
 from .de_universe_ingestion_adapter import de_universe_ingestion_adapter
@@ -693,12 +694,12 @@ class StockUniverseService:
     def _sha256_text(raw: str) -> str:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def _reconciliation_row_payload(self, row: Any) -> dict[str, Any]:
+    def _legacy_reconciliation_row_payload(self, row: Any) -> dict[str, Any]:
         payload = {
             "symbol": row.symbol,
             "name": row.name,
             "market": row.market,
-            "exchange": getattr(row, "exchange", None) or getattr(row, "mic", None),
+            "exchange": row.exchange,
             "currency": row.currency,
             "timezone": row.timezone,
             "local_code": row.local_code,
@@ -708,6 +709,38 @@ class StockUniverseService:
         }
         payload["content_hash"] = self._sha256_text(self._stable_json(payload))
         return payload
+
+    def _canonical_reconciliation_row_payload(
+        self,
+        row: CanonicalUniverseRow,
+    ) -> dict[str, Any]:
+        payload = {
+            "symbol": row.symbol,
+            "name": row.name,
+            "market": row.market,
+            "exchange": row.mic,
+            "currency": row.currency,
+            "timezone": row.timezone,
+            "local_code": row.local_code,
+            "sector": row.sector,
+            "industry": row.industry,
+            "market_cap": float(row.market_cap) if row.market_cap is not None else None,
+        }
+        payload["content_hash"] = self._sha256_text(self._stable_json(payload))
+        return payload
+
+    def _reconciliation_row_payloads(self, rows: list[Any]) -> list[dict[str, Any]]:
+        canonical_rows = [
+            row for row in rows if isinstance(row, CanonicalUniverseRow)
+        ]
+        if canonical_rows and len(canonical_rows) != len(rows):
+            raise ValueError("Cannot mix canonical and legacy Universe reconciliation rows")
+        if canonical_rows:
+            return [
+                self._canonical_reconciliation_row_payload(row)
+                for row in canonical_rows
+            ]
+        return [self._legacy_reconciliation_row_payload(row) for row in rows]
 
     @staticmethod
     def _reconciliation_changed_fields(
@@ -865,14 +898,11 @@ class StockUniverseService:
 
         canonical_list = list(canonical_rows)
         normalized_source_name = (
-            self._canonical_row_source_name(canonical_list[0])
+            self._reconciliation_source_name(canonical_list[0])
             if canonical_list
             else str(source_name or "").strip().lower().replace("-", "_")
         )
-        current_rows = [
-            self._reconciliation_row_payload(row)
-            for row in canonical_list
-        ]
+        current_rows = self._reconciliation_row_payloads(canonical_list)
         artifact = self._build_market_reconciliation_artifact(
             market=market,
             source_name=normalized_source_name,
@@ -944,14 +974,10 @@ class StockUniverseService:
         }
 
     @staticmethod
-    def _canonical_row_source_name(row: Any) -> str:
-        flat_source_name = getattr(row, "source_name", None)
-        if flat_source_name:
-            return str(flat_source_name)
-        provenance = getattr(row, "provenance", None)
-        if provenance is not None:
-            return str(provenance.source_name)
-        return ""
+    def _reconciliation_source_name(row: Any) -> str:
+        if isinstance(row, CanonicalUniverseRow):
+            return row.provenance.source_name
+        return str(row.source_name)
 
     @staticmethod
     def _min_count_threshold_for_market(market: str) -> int:
