@@ -6,6 +6,7 @@ import logging
 import pytest
 
 from app.services import provider_routing_policy as policy
+from app.domain.providers.data_plan import PLAN_VERSION as DATA_PLAN_VERSION
 from app.services.provider_routing_policy import (
     MARKET_CA,
     MARKET_DE,
@@ -14,6 +15,7 @@ from app.services.provider_routing_policy import (
     MARKET_IN,
     MARKET_JP,
     MARKET_KR,
+    MARKET_MY,
     MARKET_SG,
     MARKET_TW,
     MARKET_US,
@@ -38,7 +40,7 @@ class TestPolicyVersion:
 
     def test_policy_version_is_date_stamped(self):
         # Format: YYYY.MM.DD.N — bump when routing semantics change.
-        assert POLICY_VERSION == "2026.05.17.1"
+        assert POLICY_VERSION == DATA_PLAN_VERSION
         assert policy_version() == POLICY_VERSION
 
 
@@ -54,6 +56,7 @@ class TestMatrixShape:
             MARKET_IN,
             MARKET_JP,
             MARKET_KR,
+            MARKET_MY,
             MARKET_SG,
             MARKET_TW,
             MARKET_US,
@@ -85,19 +88,19 @@ class TestUSPolicy:
 class TestAsiaPolicy:
     """HK/IN/JP/TW route to yfinance only; KR has native providers first."""
 
-    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG])
+    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG, MARKET_MY])
     def test_asia_markets_are_yfinance_only(self, market):
         assert providers_for(market) == (PROVIDER_YFINANCE,)
 
-    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG])
+    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG, MARKET_MY])
     def test_asia_markets_reject_finviz(self, market):
         assert is_supported(market, PROVIDER_FINVIZ) is False
 
-    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG])
+    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG, MARKET_MY])
     def test_asia_markets_reject_alphavantage(self, market):
         assert is_supported(market, PROVIDER_ALPHAVANTAGE) is False
 
-    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG])
+    @pytest.mark.parametrize("market", [MARKET_HK, MARKET_IN, MARKET_JP, MARKET_TW, MARKET_SG, MARKET_MY])
     def test_asia_markets_allow_yfinance(self, market):
         assert is_supported(market, PROVIDER_YFINANCE) is True
 
@@ -150,6 +153,7 @@ class TestNormalization:
         assert normalize_market("jp") == MARKET_JP
         assert normalize_market("kr") == MARKET_KR
         assert normalize_market("cn") == MARKET_CN
+        assert normalize_market("my") == MARKET_MY
 
     def test_mixed_case_with_padding(self):
         assert normalize_market("  Tw ") == MARKET_TW

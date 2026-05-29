@@ -21,10 +21,11 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import StopIcon from '@mui/icons-material/Stop';
 import ScanProgress from '../../../components/Scan/ScanProgress';
 import { formatScanDropdownLabel } from '../../../utils/scanLabel';
-import { SCREENER_OPTIONS, UNIVERSE_MARKETS, UNIVERSE_SCOPES_BY_MARKET } from '../constants';
+import { SCREENER_OPTIONS } from '../constants';
+import { selectRuntimeUniverseOption } from '../runtimeUniverseSelections';
 import { getSelectionCount } from '../universeSelection';
 
-function stockCountLabel(universeMarket, universeScope, universeStats, statsLoading) {
+function stockCountLabel(universeMarket, universeScope, universeStats, statsLoading, selectedScopeOption) {
   if (!universeMarket) {
     return 'Pick a market to start';
   }
@@ -34,11 +35,22 @@ function stockCountLabel(universeMarket, universeScope, universeStats, statsLoad
   if (statsLoading) {
     return '...';
   }
-  const count = getSelectionCount(universeMarket, universeScope, universeStats);
+  const count = getSelectionCount(
+    universeMarket,
+    universeScope,
+    universeStats,
+    selectedScopeOption?.universe_def
+  );
   if (count === null || count === undefined) {
     return '';
   }
   return `${count} stocks`;
+}
+
+function optionStatusLabel(option, count) {
+  const countLabel = count !== null && count !== undefined ? ` (${count})` : '';
+  const disabledLabel = option.disabledReason ? ` - ${option.disabledReason}` : '';
+  return `${option.label}${countLabel}${disabledLabel}`;
 }
 
 function toOptionalNumber(rawValue) {
@@ -63,6 +75,7 @@ export default function ScanControlBar({
   onUniverseMarketChange,
   onUniverseScopeChange,
   universeStats,
+  universeSelections = null,
   statsLoading,
   selectedScreeners,
   onScreenerToggle,
@@ -86,12 +99,19 @@ export default function ScanControlBar({
   refreshStaleDataError = null,
 }) {
   const controlsDisabled = createScanPending || scanStatus === 'running';
-  const scopeOptions = universeMarket ? UNIVERSE_SCOPES_BY_MARKET[universeMarket] ?? [] : [];
+  const universeMarkets = universeSelections?.markets ?? [];
+  const {
+    marketOption: selectedMarketOption,
+    scopeOptions,
+    scopeOption: selectedScopeOption,
+  } = selectRuntimeUniverseOption(universeSelections, universeMarket, universeScope);
   const needsScope = universeMarket && universeMarket !== 'TEST';
   const startDisabled =
     createScanPending
     || !universeMarket
     || (needsScope && !universeScope)
+    || Boolean(selectedMarketOption?.disabled)
+    || Boolean(selectedScopeOption?.disabled)
     || Boolean(refreshConflict);
   const createScanErrorMessage = typeof createScanError === 'string'
     ? createScanError
@@ -141,13 +161,13 @@ export default function ScanControlBar({
             onChange={(event) => onUniverseMarketChange(event.target.value || null)}
             disabled={controlsDisabled}
           >
-            {UNIVERSE_MARKETS.map((option) => {
+            {universeMarkets.map((option) => {
               const count = option.value === 'TEST'
                 ? null
                 : getSelectionCount(option.value, 'market', universeStats);
               return (
-                <MenuItem key={option.value} value={option.value}>
-                  {option.label}{count ? ` (${count})` : ''}
+                <MenuItem key={option.value} value={option.value} disabled={option.disabled}>
+                  {optionStatusLabel(option, count)}
                 </MenuItem>
               );
             })}
@@ -165,10 +185,15 @@ export default function ScanControlBar({
               disabled={controlsDisabled}
             >
               {scopeOptions.map((option) => {
-                const count = getSelectionCount(universeMarket, option.value, universeStats);
+                const count = getSelectionCount(
+                  universeMarket,
+                  option.value,
+                  universeStats,
+                  option.universe_def
+                );
                 return (
-                  <MenuItem key={option.value} value={option.value}>
-                    {option.label}{count ? ` (${count})` : ''}
+                  <MenuItem key={option.value} value={option.value} disabled={option.disabled}>
+                    {optionStatusLabel(option, count)}
                   </MenuItem>
                 );
               })}
@@ -225,7 +250,7 @@ export default function ScanControlBar({
         <Box sx={{ flexGrow: 1 }} />
 
         <Box sx={{ fontSize: '11px', color: 'text.secondary' }}>
-          {stockCountLabel(universeMarket, universeScope, universeStats, statsLoading)}
+          {stockCountLabel(universeMarket, universeScope, universeStats, statsLoading, selectedScopeOption)}
         </Box>
 
         {scanStatus === 'running' ? (

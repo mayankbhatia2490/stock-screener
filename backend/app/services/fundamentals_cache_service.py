@@ -13,6 +13,11 @@ from typing import Any, Optional, Dict, Callable
 from datetime import datetime, date
 from sqlalchemy.orm import Session
 
+from app.domain.providers.data_plan import (
+    DATASET_FUNDAMENTALS,
+    provider_data_plan_registry,
+)
+
 try:
     import redis  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover - exercised in desktop packaging
@@ -27,10 +32,14 @@ from .fundamentals_completeness import (
     derive_field_provenance,
 )
 from .field_capability_registry import field_capability_registry
-from .fx_service import FXQuote, FXService, currency_for_market, get_fx_service
+from .fx_service import FXQuote, FXService, get_fx_service
 from .institutional_ownership_service import InstitutionalOwnershipService
 from .redis_pool import get_redis_client, is_redis_enabled
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
+from .universe_row_facts import (
+    UniverseRowFactsResolver,
+    normalize_universe_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +169,7 @@ class FundamentalsCacheService:
         session_factory: Optional[Callable[[], Session]] = None,
         fx_service: Optional[FXService] = None,
         cache_policy: MarketAwareCachePolicy = market_cache_policy,
+        row_facts_resolver: Optional[UniverseRowFactsResolver] = None,
     ):
         """Initialize fundamentals cache service.
 
@@ -169,6 +179,9 @@ class FundamentalsCacheService:
         self._session_factory = session_factory or SessionLocal
         self._fx_service = fx_service
         self._cache_policy = cache_policy
+        self._row_facts_resolver = row_facts_resolver or UniverseRowFactsResolver(
+            self._session_factory
+        )
         if redis_client:
             self._redis_client = redis_client
         else:
@@ -489,6 +502,9 @@ class FundamentalsCacheService:
                 data, market
             )
         )
+        data['provider_data_plan'] = provider_data_plan_registry.plan_for(
+            market, DATASET_FUNDAMENTALS
+        ).provenance_metadata()
         return market
 
     def _ensure_field_availability_metadata(
@@ -496,13 +512,20 @@ class FundamentalsCacheService:
         symbol: str,
         data: Dict,
         market: Optional[str],
+        currency: Optional[str] = None,
     ) -> bool:
         """Backfill derived metadata fields for older cache rows.
 
         Returns ``True`` when any field was backfilled.
         """
         changed = False
-        resolved_market = market if market is not None else self._resolve_market(symbol)
+        row_facts = self._row_facts_resolver.resolve_for_payload(
+            symbol,
+            data,
+            market=market,
+            currency=currency,
+        )
+        resolved_market = row_facts.market
         if data.get("field_completeness_score") is None:
             data["field_completeness_score"] = compute_completeness_score(
                 data, resolved_market
@@ -518,6 +541,12 @@ class FundamentalsCacheService:
                 )
             )
             changed = True
+        expected_plan = provider_data_plan_registry.plan_for(
+            resolved_market, DATASET_FUNDAMENTALS
+        ).provenance_metadata()
+        if data.get("provider_data_plan") != expected_plan:
+            data["provider_data_plan"] = expected_plan
+            changed = True
 
         previous_fx_values = (
             data.get("market_cap_usd"),
@@ -530,7 +559,11 @@ class FundamentalsCacheService:
             or not isinstance(data.get("fx_metadata"), dict)
         )
         if missing_fx_metadata:
-            self._enrich_with_fx_normalization(data, resolved_market)
+            self._enrich_with_fx_normalization(
+                data,
+                row_facts.currency,
+                market=resolved_market,
+            )
             changed = changed or (
                 previous_fx_values
                 != (
@@ -555,7 +588,9 @@ class FundamentalsCacheService:
     def _enrich_with_fx_normalization(
         self,
         data: Dict,
-        market: Optional[str],
+        currency: Optional[str],
+        *,
+        market: Optional[str] = None,
     ) -> None:
         """Compute USD normalisation (``market_cap_usd``, ``adv_usd``) and
         attach an ``fx_metadata`` snapshot to ``data`` in place.
@@ -565,18 +600,24 @@ class FundamentalsCacheService:
         rate or missing source amounts → NULL USD columns (honest
         "unknown" rather than a fabricated zero).
         """
-        currency = currency_for_market(market)
+        row_currency = normalize_universe_text(currency)
         market_cap = data.get("market_cap")
         shares_out = data.get("shares_outstanding")
         avg_volume = data.get("avg_volume")
 
-        quote = self._get_fx_service().get_usd_rate(currency)
+        if row_currency is None:
+            data["market_cap_usd"] = None
+            data["adv_usd"] = None
+            data["fx_metadata"] = self._missing_currency_metadata(market)
+            return
+
+        quote = self._get_fx_service().get_usd_rate(row_currency)
         if quote is None:
             # Rate unavailable — leave USD columns NULL but record the
             # intent so consumers can see we tried.
             data["market_cap_usd"] = None
             data["adv_usd"] = None
-            data["fx_metadata"] = FXQuote.unavailable_metadata(currency)
+            data["fx_metadata"] = FXQuote.unavailable_metadata(row_currency)
             return
 
         rate = quote.rate
@@ -597,6 +638,19 @@ class FundamentalsCacheService:
             data["adv_usd"] = None
         data["fx_metadata"] = quote.to_metadata()
 
+    @staticmethod
+    def _missing_currency_metadata(market: Optional[str]) -> Dict[str, Any]:
+        metadata = {
+            "from_currency": None,
+            "to_currency": "USD",
+            "rate": None,
+            "as_of_date": None,
+            "source": "missing_currency",
+        }
+        if market:
+            metadata["market"] = str(market).strip().upper()
+        return metadata
+
     def _resolve_market(self, symbol: str) -> Optional[str]:
         """Look up the stock universe market for ``symbol``.
 
@@ -604,26 +658,7 @@ class FundamentalsCacheService:
         fails) — the routing policy treats ``None`` as the legacy US default
         so this never crashes on-demand fetches.
         """
-        from ..models.stock_universe import StockUniverse
-
-        db = None
-        try:
-            db = self._session_factory()
-            row = (
-                db.query(StockUniverse.market)
-                .filter(StockUniverse.symbol == symbol)
-                .first()
-            )
-            return row[0] if row else None
-        except Exception as exc:  # pragma: no cover - DB hiccup shouldn't block fetch
-            logger.debug(
-                "Market lookup failed for %s (%s) - defaulting to US policy",
-                symbol, exc,
-            )
-            return None
-        finally:
-            if db is not None:
-                db.close()
+        return self._row_facts_resolver.resolve(symbol).market
 
     def _fetch_and_cache(
         self,
@@ -649,8 +684,10 @@ class FundamentalsCacheService:
             logger.info(f"Fetching fresh fundamental data for {symbol} from data sources")
             self.record_on_demand_fallback()
 
+            row_facts = None
             if market is None:
-                market = self._resolve_market(symbol)
+                row_facts = self._row_facts_resolver.resolve(symbol)
+                market = row_facts.market
 
             # Use DataSourceService which handles finviz → yfinance fallback
             fundamentals = get_data_source_service().get_fundamentals(
@@ -674,8 +711,22 @@ class FundamentalsCacheService:
 
             # Enrich with completeness/provenance so both Redis and DB writes
             # include the derived metadata (avoids warm-read staleness).
-            market = self._enrich_with_quality_metadata(symbol, fundamentals, market)
-            self._enrich_with_fx_normalization(fundamentals, market)
+            row_facts = self._row_facts_resolver.resolve_for_payload(
+                symbol,
+                fundamentals,
+                market=market,
+                fallback=row_facts,
+            )
+            market = self._enrich_with_quality_metadata(
+                symbol,
+                fundamentals,
+                row_facts.market,
+            )
+            self._enrich_with_fx_normalization(
+                fundamentals,
+                row_facts.currency,
+                market=market,
+            )
 
             # Cache in Redis (7-day TTL)
             self._store_in_redis_for_market(symbol, fundamentals, market=market)
@@ -1306,6 +1357,13 @@ class FundamentalsCacheService:
                     "technicals_refreshed_at": (
                         record.technicals_refreshed_at.isoformat() if record.technicals_refreshed_at else None
                     ),
+                    # T2 quality metadata
+                    "field_completeness_score": record.field_completeness_score,
+                    "field_provenance": record.field_provenance,
+                    # T3 FX normalisation
+                    "market_cap_usd": record.market_cap_usd,
+                    "adv_usd": record.adv_usd,
+                    "fx_metadata": record.fx_metadata,
                 }
 
                 # Compute fallback description
@@ -1366,7 +1424,21 @@ class FundamentalsCacheService:
             logger.warning("Redis not available for bulk get - using database fallback")
             # Fallback: query database directly
             db_results = self._get_many_from_database(symbols)
-            return {symbol: data for symbol, (data, _) in db_results.items()}
+            cached_data = {}
+            for symbol, (data, _) in db_results.items():
+                if data is not None:
+                    symbol_market = self._market_for_symbol(
+                        symbol,
+                        market=market,
+                        market_by_symbol=market_by_symbol,
+                    )
+                    self._ensure_field_availability_metadata(
+                        symbol,
+                        data,
+                        symbol_market,
+                    )
+                cached_data[symbol] = data
+            return cached_data
 
         try:
             # Build pipeline for bulk fetch from Redis
@@ -1430,20 +1502,25 @@ class FundamentalsCacheService:
                     fundamentals, last_update = db_results.get(symbol, (None, None))
 
                     if fundamentals is not None and self._is_data_fresh(last_update):
+                        symbol_market = self._market_for_symbol(
+                            symbol,
+                            market=market,
+                            market_by_symbol=market_by_symbol,
+                        )
                         if symbol in redis_needs_enrichment and cached_data.get(symbol):
                             cached_data[symbol] = self._merge_fundamentals(
                                 cached_data[symbol], fundamentals
                             )
                         else:
                             cached_data[symbol] = fundamentals
+                        self._ensure_field_availability_metadata(
+                            symbol,
+                            cached_data[symbol],
+                            symbol_market,
+                        )
                         db_hits.append(symbol)
 
                         # Warm Redis for next time
-                        symbol_market = self._market_for_symbol(
-                            symbol,
-                            market=market,
-                            market_by_symbol=market_by_symbol,
-                        )
                         self._store_in_redis_for_market(
                             symbol,
                             cached_data[symbol],
@@ -1515,8 +1592,21 @@ class FundamentalsCacheService:
         normalized_data = self._normalize_payload_for_storage(data)
 
         # Enrich before Redis/DB writes so both see the same snapshot.
-        market = self._enrich_with_quality_metadata(symbol, normalized_data, market)
-        self._enrich_with_fx_normalization(normalized_data, market)
+        row_facts = self._row_facts_resolver.resolve_for_payload(
+            symbol,
+            normalized_data,
+            market=market,
+        )
+        market = self._enrich_with_quality_metadata(
+            symbol,
+            normalized_data,
+            row_facts.market,
+        )
+        self._enrich_with_fx_normalization(
+            normalized_data,
+            row_facts.currency,
+            market=market,
+        )
 
         # Store in Redis
         self._store_in_redis_for_market(symbol, normalized_data, market=market)

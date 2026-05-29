@@ -23,6 +23,7 @@ from ..models.stock_universe import (
     StockUniverseIndexMembership,
     StockUniverseReconciliationRun,
     StockUniverseStatusEvent,
+    UNIVERSE_EVENT_STATUS_CHANGED,
     UNIVERSE_STATUS_ACTIVE,
     UNIVERSE_STATUS_INACTIVE_MANUAL,
     UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE,
@@ -32,9 +33,20 @@ from ..models.stock import StockIndustry
 from ..models.ticker_validation import TickerValidationLog
 from ..schemas.universe import IndexName
 from ..config import settings
+from ..domain.markets.mic_aliases import mic_alias_registry
+from ..domain.universe.ingestion import (
+    CanonicalUniverseIngestionResult,
+    CanonicalUniverseRow,
+    RejectedUniverseRow,
+    UniverseCoverageRejection,
+    UniverseIngestionContext,
+    UniverseIngestionSideEffects,
+    UniverseReconciliationPolicy,
+)
 from .ca_universe_ingestion_adapter import ca_universe_ingestion_adapter
 from .cn_universe_ingestion_adapter import cn_universe_ingestion_adapter
 from .de_universe_ingestion_adapter import de_universe_ingestion_adapter
+from .finviz_universe_ingestion_adapter import finviz_universe_ingestion_adapter
 from .hk_universe_ingestion_adapter import hk_universe_ingestion_adapter
 from .jp_universe_ingestion_adapter import jp_universe_ingestion_adapter
 from .kr_universe_ingestion_adapter import kr_universe_ingestion_adapter
@@ -42,6 +54,12 @@ from .my_universe_ingestion_adapter import my_universe_ingestion_adapter
 from .security_master_service import security_master_resolver
 from .sg_universe_ingestion_adapter import sg_universe_ingestion_adapter
 from .tw_universe_ingestion_adapter import tw_universe_ingestion_adapter
+from .universe_ingestion_pipeline import (
+    FlatUniverseCanonicalizerAdapter,
+    UniverseBeforeReconciliationContext,
+    UniverseIngestionPipeline,
+    UniversePersistence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +73,7 @@ MARKET_EXCHANGE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "CN": ("SSE", "SZSE", "BJSE", "XSHG"),
     "CA": ("TSX", "TSXV", "XTSE", "XTNX"),
     "SG": ("SGX", "SES", "XSES"),
+    "MY": ("KLSE", "MYX", "XKLS", "BURSA"),
 }
 KR_ACTIVE_UNIVERSE_MIN_COUNT = 2526
 CN_ACTIVE_UNIVERSE_MIN_COUNT = 5217
@@ -73,12 +92,32 @@ class StockUniverseService:
         self._ca_ingestion = ca_universe_ingestion_adapter
         self._cn_ingestion = cn_universe_ingestion_adapter
         self._de_ingestion = de_universe_ingestion_adapter
+        self._finviz_ingestion = finviz_universe_ingestion_adapter
         self._hk_ingestion = hk_universe_ingestion_adapter
         self._jp_ingestion = jp_universe_ingestion_adapter
         self._kr_ingestion = kr_universe_ingestion_adapter
         self._my_ingestion = my_universe_ingestion_adapter
         self._sg_ingestion = sg_universe_ingestion_adapter
         self._tw_ingestion = tw_universe_ingestion_adapter
+        self._universe_ingestion_pipeline = UniverseIngestionPipeline(
+            canonicalizers={
+                "US": self._finviz_ingestion,
+                "HK": FlatUniverseCanonicalizerAdapter(self._hk_ingestion),
+                "JP": FlatUniverseCanonicalizerAdapter(self._jp_ingestion),
+                "KR": FlatUniverseCanonicalizerAdapter(self._kr_ingestion),
+                "TW": FlatUniverseCanonicalizerAdapter(self._tw_ingestion),
+                "CA": FlatUniverseCanonicalizerAdapter(self._ca_ingestion),
+                "DE": FlatUniverseCanonicalizerAdapter(self._de_ingestion),
+                "CN": FlatUniverseCanonicalizerAdapter(self._cn_ingestion),
+                "SG": self._sg_ingestion,
+                "MY": FlatUniverseCanonicalizerAdapter(self._my_ingestion),
+            },
+            persistence=UniversePersistence.for_stock_universe_service(self),
+            before_reconciliation_hooks={
+                "CN": self._upsert_cn_stock_industry_from_pipeline_context,
+                "IN": self._deactivate_india_coverage_rejections,
+            },
+        )
         self._bulk_fetcher = None
 
     @staticmethod
@@ -171,8 +210,30 @@ class StockUniverseService:
     ) -> StockUniverseStatusEvent:
         return StockUniverseStatusEvent(
             symbol=symbol,
+            event_type=UNIVERSE_EVENT_STATUS_CHANGED,
             old_status=old_status,
             new_status=new_status,
+            trigger_source=trigger_source,
+            reason=reason,
+            payload_json=json.dumps(payload, sort_keys=True) if payload else None,
+        )
+
+    @staticmethod
+    def _build_metadata_event_record(
+        *,
+        symbol: str,
+        event_type: str,
+        trigger_source: str,
+        reason: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> StockUniverseStatusEvent:
+        if event_type == UNIVERSE_EVENT_STATUS_CHANGED:
+            raise ValueError("Use _build_status_event_record for lifecycle events")
+        return StockUniverseStatusEvent(
+            symbol=symbol,
+            event_type=event_type,
+            old_status=None,
+            new_status=None,
             trigger_source=trigger_source,
             reason=reason,
             payload_json=json.dumps(payload, sort_keys=True) if payload else None,
@@ -667,7 +728,7 @@ class StockUniverseService:
     def _sha256_text(raw: str) -> str:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def _reconciliation_row_payload(self, row: Any) -> dict[str, Any]:
+    def _legacy_reconciliation_row_payload(self, row: Any) -> dict[str, Any]:
         payload = {
             "symbol": row.symbol,
             "name": row.name,
@@ -682,6 +743,38 @@ class StockUniverseService:
         }
         payload["content_hash"] = self._sha256_text(self._stable_json(payload))
         return payload
+
+    def _canonical_reconciliation_row_payload(
+        self,
+        row: CanonicalUniverseRow,
+    ) -> dict[str, Any]:
+        payload = {
+            "symbol": row.symbol,
+            "name": row.name,
+            "market": row.market,
+            "exchange": row.mic,
+            "currency": row.currency,
+            "timezone": row.timezone,
+            "local_code": row.local_code,
+            "sector": row.sector,
+            "industry": row.industry,
+            "market_cap": float(row.market_cap) if row.market_cap is not None else None,
+        }
+        payload["content_hash"] = self._sha256_text(self._stable_json(payload))
+        return payload
+
+    def _reconciliation_row_payloads(self, rows: list[Any]) -> list[dict[str, Any]]:
+        canonical_rows = [
+            row for row in rows if isinstance(row, CanonicalUniverseRow)
+        ]
+        if canonical_rows and len(canonical_rows) != len(rows):
+            raise ValueError("Cannot mix canonical and legacy Universe reconciliation rows")
+        if canonical_rows:
+            return [
+                self._canonical_reconciliation_row_payload(row)
+                for row in canonical_rows
+            ]
+        return [self._legacy_reconciliation_row_payload(row) for row in rows]
 
     @staticmethod
     def _reconciliation_changed_fields(
@@ -770,10 +863,17 @@ class StockUniverseService:
         snapshot_id: str,
         canonical_rows: Iterable[Any],
     ) -> dict[str, Any]:
+        canonical_list = list(canonical_rows)
+        normalized_source_name = (
+            self._reconciliation_source_name(canonical_list[0])
+            if canonical_list
+            else str(source_name or "").strip().lower().replace("-", "_")
+        )
         current_run = (
             db.query(StockUniverseReconciliationRun)
             .filter(
                 StockUniverseReconciliationRun.market == market,
+                StockUniverseReconciliationRun.source_name == normalized_source_name,
                 StockUniverseReconciliationRun.snapshot_id == snapshot_id,
             )
             .one_or_none()
@@ -791,6 +891,7 @@ class StockUniverseService:
                 db.query(StockUniverseReconciliationRun)
                 .filter(
                     StockUniverseReconciliationRun.market == market,
+                    StockUniverseReconciliationRun.source_name == normalized_source_name,
                     StockUniverseReconciliationRun.snapshot_id == previous_snapshot_id,
                 )
                 .one_or_none()
@@ -809,6 +910,7 @@ class StockUniverseService:
                 db.query(StockUniverseReconciliationRun)
                 .filter(
                     StockUniverseReconciliationRun.market == market,
+                    StockUniverseReconciliationRun.source_name == normalized_source_name,
                     StockUniverseReconciliationRun.snapshot_id != snapshot_id,
                 )
                 .order_by(
@@ -837,16 +939,7 @@ class StockUniverseService:
                         },
                     )
 
-        canonical_list = list(canonical_rows)
-        normalized_source_name = (
-            canonical_list[0].source_name
-            if canonical_list
-            else str(source_name or "").strip().lower().replace("-", "_")
-        )
-        current_rows = [
-            self._reconciliation_row_payload(row)
-            for row in canonical_list
-        ]
+        current_rows = self._reconciliation_row_payloads(canonical_list)
         artifact = self._build_market_reconciliation_artifact(
             market=market,
             source_name=normalized_source_name,
@@ -916,6 +1009,12 @@ class StockUniverseService:
             "removed_symbols_truncated": len(removed_symbols) > details_limit,
             "changed_symbols_truncated": len(changed_symbols) > details_limit,
         }
+
+    @staticmethod
+    def _reconciliation_source_name(row: Any) -> str:
+        if isinstance(row, CanonicalUniverseRow):
+            return row.provenance.source_name
+        return str(row.source_name)
 
     @staticmethod
     def _min_count_threshold_for_market(market: str) -> int:
@@ -998,6 +1097,87 @@ class StockUniverseService:
         except ValueError:
             return float(default)
 
+    def _default_reconciliation_policy_for_market(
+        self,
+        market: str,
+    ) -> UniverseReconciliationPolicy:
+        normalized_market = str(market or "").strip().upper()
+        return UniverseReconciliationPolicy(
+            name=f"{normalized_market.lower()}_market_default",
+            min_count=self._min_count_threshold_for_market(normalized_market),
+            max_removed_percent=self._safety_float_setting(
+                field_name="asia_reconciliation_max_removed_percent",
+                env_name="ASIA_RECONCILIATION_MAX_REMOVED_PERCENT",
+                default=25.0,
+            ),
+            anomaly_percent=self._safety_float_setting(
+                field_name="asia_reconciliation_anomaly_percent",
+                env_name="ASIA_RECONCILIATION_ANOMALY_PERCENT",
+                default=35.0,
+            ),
+            apply_destructive_enabled=self._safety_bool_setting(
+                field_name="asia_universe_apply_destructive_enabled",
+                env_name="ASIA_UNIVERSE_APPLY_DESTRUCTIVE_ENABLED",
+                default=False,
+            ),
+            quarantine_enforced=self._safety_bool_setting(
+                field_name="asia_reconciliation_quarantine_enforced",
+                env_name="ASIA_RECONCILIATION_QUARANTINE_ENFORCED",
+                default=True,
+            ),
+        )
+
+    def _finviz_reconciliation_policy(
+        self,
+        exchange_name: str | None,
+    ) -> UniverseReconciliationPolicy:
+        normalized_exchange = str(exchange_name or "").strip().upper() or None
+        exchange_resolution = mic_alias_registry.resolve("US", normalized_exchange)
+        exchange_mic = exchange_resolution.mic if exchange_resolution else None
+        min_count_env = (
+            "FINVIZ_RECONCILIATION_MIN_COUNT_EXCHANGE"
+            if normalized_exchange
+            else "FINVIZ_RECONCILIATION_MIN_COUNT_FULL"
+        )
+        min_count_field = (
+            "finviz_reconciliation_min_count_exchange"
+            if normalized_exchange
+            else "finviz_reconciliation_min_count_full"
+        )
+        return UniverseReconciliationPolicy(
+            name=(
+                f"finviz_{normalized_exchange.lower()}"
+                if normalized_exchange
+                else "finviz_full"
+            ),
+            min_count=self._safety_int_setting(
+                field_name=min_count_field,
+                env_name=min_count_env,
+                default=0 if normalized_exchange else 8000,
+            ),
+            max_removed_percent=self._safety_float_setting(
+                field_name="finviz_reconciliation_max_removed_percent",
+                env_name="FINVIZ_RECONCILIATION_MAX_REMOVED_PERCENT",
+                default=10.0,
+            ),
+            anomaly_percent=self._safety_float_setting(
+                field_name="finviz_reconciliation_anomaly_percent",
+                env_name="FINVIZ_RECONCILIATION_ANOMALY_PERCENT",
+                default=100.0,
+            ),
+            apply_destructive_enabled=self._safety_bool_setting(
+                field_name="finviz_universe_apply_destructive_enabled",
+                env_name="FINVIZ_UNIVERSE_APPLY_DESTRUCTIVE_ENABLED",
+                default=True,
+            ),
+            quarantine_enforced=self._safety_bool_setting(
+                field_name="finviz_reconciliation_quarantine_enforced",
+                env_name="FINVIZ_RECONCILIATION_QUARANTINE_ENFORCED",
+                default=True,
+            ),
+            removal_mics=(exchange_mic,) if exchange_mic else (),
+        )
+
     def _evaluate_reconciliation_safety(
         self,
         *,
@@ -1005,23 +1185,16 @@ class StockUniverseService:
         snapshot_id: str,
         counts: Mapping[str, Any],
         removed_symbols: list[str],
+        policy: UniverseReconciliationPolicy,
     ) -> dict[str, Any]:
         total_current = int(counts.get("total_current") or 0)
         total_previous = int(counts.get("total_previous") or 0)
         removed_count = int(counts.get("removed") or 0)
         changed_count = int(counts.get("changed") or 0)
 
-        min_count_threshold = self._min_count_threshold_for_market(market)
-        max_removed_percent = self._safety_float_setting(
-            field_name="asia_reconciliation_max_removed_percent",
-            env_name="ASIA_RECONCILIATION_MAX_REMOVED_PERCENT",
-            default=25.0,
-        )
-        anomaly_percent_threshold = self._safety_float_setting(
-            field_name="asia_reconciliation_anomaly_percent",
-            env_name="ASIA_RECONCILIATION_ANOMALY_PERCENT",
-            default=35.0,
-        )
+        min_count_threshold = policy.min_count
+        max_removed_percent = policy.max_removed_percent
+        anomaly_percent_threshold = policy.anomaly_percent
 
         removed_percent = (removed_count / total_previous * 100.0) if total_previous > 0 else 0.0
         anomaly_percent = (
@@ -1059,16 +1232,8 @@ class StockUniverseService:
                 }
             )
 
-        apply_destructive_enabled = self._safety_bool_setting(
-            field_name="asia_universe_apply_destructive_enabled",
-            env_name="ASIA_UNIVERSE_APPLY_DESTRUCTIVE_ENABLED",
-            default=False,
-        )
-        quarantine_enforced = self._safety_bool_setting(
-            field_name="asia_reconciliation_quarantine_enforced",
-            env_name="ASIA_RECONCILIATION_QUARANTINE_ENFORCED",
-            default=True,
-        )
+        apply_destructive_enabled = policy.apply_destructive_enabled
+        quarantine_enforced = policy.quarantine_enforced
         quarantined = bool(gate_breaches) and quarantine_enforced
         allow_destructive_apply = apply_destructive_enabled and not quarantined
         destructive_apply_blocked = bool(removed_symbols) and not allow_destructive_apply
@@ -1088,9 +1253,11 @@ class StockUniverseService:
             )
 
         return {
+            "policy_name": policy.name,
             "quarantined": quarantined,
             "apply_destructive_enabled": apply_destructive_enabled,
             "quarantine_enforced": quarantine_enforced,
+            "removal_mics": list(policy.removal_mics),
             "allow_destructive_apply": allow_destructive_apply,
             "destructive_apply_blocked": destructive_apply_blocked,
             "gate_breaches": gate_breaches,
@@ -1115,6 +1282,7 @@ class StockUniverseService:
         market: str,
         snapshot_id: str,
         trigger_source: str,
+        reconciliation_policy: UniverseReconciliationPolicy | None = None,
         reconciliation: Mapping[str, Any],
         now: datetime,
     ) -> dict[str, Any]:
@@ -1140,18 +1308,27 @@ class StockUniverseService:
             snapshot_id=snapshot_id,
             counts=reconciliation.get("counts") or {},
             removed_symbols=removed_symbols_full,
+            policy=(
+                reconciliation_policy
+                or self._default_reconciliation_policy_for_market(market)
+            ),
         )
 
         deactivated_symbols: list[str] = []
         if safety["allow_destructive_apply"] and removed_symbols_full:
-            candidates = (
+            candidates_query = (
                 db.query(StockUniverse)
                 .filter(
                     StockUniverse.market == market,
                     StockUniverse.symbol.in_(removed_symbols_full),
                 )
-                .all()
             )
+            removal_mics = tuple(safety.get("removal_mics") or ())
+            if removal_mics:
+                candidates_query = candidates_query.filter(
+                    StockUniverse.exchange.in_(removal_mics)
+                )
+            candidates = candidates_query.all()
             for record in candidates:
                 if self._normalize_status(record) != UNIVERSE_STATUS_ACTIVE:
                     continue
@@ -1196,6 +1373,83 @@ class StockUniverseService:
         updated_reconciliation["safety"] = safety
         return updated_reconciliation
 
+    def _ingest_snapshot_rows_via_pipeline(
+        self,
+        db: Session,
+        *,
+        market: str,
+        rows: Iterable[dict[str, Any]],
+        source_name: str,
+        snapshot_id: str,
+        snapshot_as_of: str | None = None,
+        source_metadata: Optional[dict[str, Any]] = None,
+        strict: bool = True,
+        ingestion_context: UniverseIngestionContext | None = None,
+    ) -> Dict[str, Any]:
+        return self._universe_ingestion_pipeline.ingest_snapshot_rows(
+            db,
+            market=market,
+            rows=rows,
+            source_name=source_name,
+            snapshot_id=snapshot_id,
+            snapshot_as_of=snapshot_as_of,
+            source_metadata=source_metadata,
+            strict=strict,
+            ingestion_context=(
+                ingestion_context
+                or UniverseIngestionContext.default_for_market(
+                    market,
+                    reconciliation_policy=self._default_reconciliation_policy_for_market(market),
+                )
+            ),
+        )
+
+    def _deactivate_india_coverage_rejections(
+        self,
+        db: Session,
+        context: UniverseBeforeReconciliationContext,
+        *,
+        now: datetime,
+    ) -> dict[str, int]:
+        rows = context.result.side_effects.coverage_rejections
+        if not rows:
+            return {"coverage_rejected": 0}
+
+        existing_rows = {
+            row.symbol: row
+            for row in db.query(StockUniverse)
+            .filter(StockUniverse.symbol.in_([row.symbol for row in rows]))
+            .all()
+        }
+        for coverage_rejection in rows:
+            rejected_row = coverage_rejection.rejected_row
+            existing = existing_rows.get(coverage_rejection.symbol)
+            if existing is None or self._normalize_status(existing) != UNIVERSE_STATUS_ACTIVE:
+                continue
+            self._apply_status_transition(
+                db,
+                existing,
+                new_status=UNIVERSE_STATUS_INACTIVE_NO_DATA,
+                trigger_source="in_ingest_coverage_gate",
+                reason=f"Rejected by IN BSE coverage gate: {rejected_row.reason}",
+                now=now,
+                payload={
+                    "source_name": rejected_row.source_name or context.source_name,
+                    "source_symbol": rejected_row.source_symbol,
+                    "source_row_number": rejected_row.source_row_number,
+                    "snapshot_id": rejected_row.snapshot_id or context.snapshot_id,
+                    "snapshot_as_of": (
+                        str(rejected_row.snapshot_as_of)
+                        if rejected_row.snapshot_as_of is not None
+                        else None
+                    ),
+                    "symbol": coverage_rejection.symbol,
+                    "reason": rejected_row.reason,
+                },
+                source="in_ingest",
+            )
+        return {"coverage_rejected": len(rows)}
+
     def ingest_in_snapshot_rows(
         self,
         db: Session,
@@ -1208,7 +1462,7 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest IN rows with exchange-aware canonicalization and lineage metadata."""
-        canonical_rows, rejected_rows = self._canonicalize_in_snapshot_rows(
+        source_canonical_rows, source_rejected_rows = self._canonicalize_in_snapshot_rows(
             rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
@@ -1216,190 +1470,66 @@ class StockUniverseService:
             source_metadata=source_metadata,
         )
 
-        if strict and rejected_rows:
+        if strict and source_rejected_rows:
             sample = "; ".join(
                 f"row {row.source_row_number}: {row.reason}"
-                for row in rejected_rows[:3]
+                for row in source_rejected_rows[:3]
             )
             raise ValueError(
-                f"IN ingestion rejected {len(rejected_rows)} row(s). {sample}"
+                f"IN ingestion rejected {len(source_rejected_rows)} row(s). {sample}"
             )
 
-        canonical_rows, coverage_rejected_rows = self._filter_india_bse_rows_for_downstream_support(
+        accepted_rows, coverage_rejected_rows = self._filter_india_bse_rows_for_downstream_support(
             db,
-            canonical_rows,
+            source_canonical_rows,
         )
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonical_rows]
-        coverage_rejected_symbols = [
-            row.symbol for row in coverage_rejected_rows if getattr(row, "symbol", None)
-        ]
-        lookup_symbols = [*canonical_symbols, *coverage_rejected_symbols]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(lookup_symbols)
-            ).all()
-        } if lookup_symbols else {}
 
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in IN source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="in_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="in_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
+        source_rejections = tuple(
+            FlatUniverseCanonicalizerAdapter.rejected_row_from_flat(row)
+            for row in source_rejected_rows
+        )
+        coverage_rejections: list[RejectedUniverseRow] = []
+        coverage_side_effects: list[UniverseCoverageRejection] = []
+        for row in coverage_rejected_rows:
+            rejected_row = RejectedUniverseRow(
+                source_row_number=row.source_row_number,
+                source_symbol=row.source_symbol,
+                reason=row.reason,
+                source_name=source_name,
+                snapshot_id=snapshot_id,
+                snapshot_as_of=snapshot_as_of,
+                strict=False,
+            )
+            coverage_rejections.append(rejected_row)
+            coverage_side_effects.append(
+                UniverseCoverageRejection(
                     symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="in_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
+                    rejected_row=rejected_row,
                 )
             )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="in_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
 
-        for rejected_row in coverage_rejected_rows:
-            existing = existing_rows.get(rejected_row.symbol)
-            if existing is None or self._normalize_status(existing) != UNIVERSE_STATUS_ACTIVE:
-                continue
-            self._apply_status_transition(
-                db,
-                existing,
-                new_status=UNIVERSE_STATUS_INACTIVE_NO_DATA,
-                trigger_source="in_ingest_coverage_gate",
-                reason=f"Rejected by IN BSE coverage gate: {rejected_row.reason}",
-                now=now,
-                payload={
-                    "source_name": source_name,
-                    "source_symbol": rejected_row.source_symbol,
-                    "source_row_number": rejected_row.source_row_number,
-                    "snapshot_id": snapshot_id,
-                    "snapshot_as_of": snapshot_as_of,
-                    "symbol": rejected_row.symbol,
-                    "reason": rejected_row.reason,
-                },
-                source="in_ingest",
-            )
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
+        result = CanonicalUniverseIngestionResult(
+            canonical_rows=tuple(
+                FlatUniverseCanonicalizerAdapter.canonical_row_from_flat(row)
+                for row in accepted_rows
+            ),
+            rejected_rows=source_rejections + tuple(coverage_rejections),
+            side_effects=UniverseIngestionSideEffects(
+                coverage_rejections=tuple(coverage_side_effects),
+            ),
+        )
+        return self._universe_ingestion_pipeline.ingest_canonicalized_result(
             db,
             market="IN",
             source_name=source_name,
             snapshot_id=snapshot_id,
-            canonical_rows=canonical_rows,
+            result=result,
+            strict=strict,
+            ingestion_context=UniverseIngestionContext.default_for_market(
+                "IN",
+                reconciliation_policy=self._default_reconciliation_policy_for_market("IN"),
+            ),
         )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="IN",
-            snapshot_id=snapshot_id,
-            trigger_source="in_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonical_rows[:details_limit]
-        all_rejected_rows = [*rejected_rows, *coverage_rejected_rows]
-        rejected_preview = all_rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonical_rows),
-            "rejected": len(rejected_rows) + len(coverage_rejected_rows),
-            "coverage_rejected": len(coverage_rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(all_rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     @staticmethod
     def _parse_hk_csv_rows(csv_content: str) -> list[dict[str, Any]]:
@@ -1441,165 +1571,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest HK rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._hk_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="HK",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"HK ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in HK source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="hk_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="hk_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="hk_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                symbol=row.symbol,
-                old_status=None,
-                new_status=UNIVERSE_STATUS_ACTIVE,
-                trigger_source="hk_ingest",
-                reason=reason,
-                payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="HK",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="HK",
-            snapshot_id=snapshot_id,
-            trigger_source="hk_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_hk_from_csv(
         self,
@@ -1665,165 +1646,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest JP rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._jp_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="JP",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"JP ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in JP source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="jp_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="jp_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="jp_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                symbol=row.symbol,
-                old_status=None,
-                new_status=UNIVERSE_STATUS_ACTIVE,
-                trigger_source="jp_ingest",
-                reason=reason,
-                payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="JP",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="JP",
-            snapshot_id=snapshot_id,
-            trigger_source="jp_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_jp_from_csv(
         self,
@@ -1889,165 +1721,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest KR rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._kr_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="KR",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"KR ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in KR source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="kr_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="kr_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="kr_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                symbol=row.symbol,
-                old_status=None,
-                new_status=UNIVERSE_STATUS_ACTIVE,
-                trigger_source="kr_ingest",
-                reason=reason,
-                payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="KR",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="KR",
-            snapshot_id=snapshot_id,
-            trigger_source="kr_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_kr_from_csv(
         self,
@@ -2171,6 +1854,21 @@ class StockUniverseService:
         self._bulk_insert_records(db, new_rows)
         return changed
 
+    def _upsert_cn_stock_industry_from_pipeline_context(
+        self,
+        db: Session,
+        context: UniverseBeforeReconciliationContext,
+        *,
+        now: datetime,
+    ) -> dict[str, int]:
+        return {
+            "stock_industry_upserts": self._upsert_cn_stock_industry_rows(
+                db,
+                context.result.side_effects.industry_taxonomy_rows,
+                now=now,
+            )
+        }
+
     def ingest_cn_snapshot_rows(
         self,
         db: Session,
@@ -2183,173 +1881,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest CN rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._cn_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="CN",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"CN ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "board": row.board,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in CN source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or row.industry_group or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="cn_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="cn_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry or row.industry_group,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="cn_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="cn_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-        stock_industry_upserts = self._upsert_cn_stock_industry_rows(
-            db,
-            canonicalized.canonical_rows,
-            now=now,
-        )
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="CN",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="CN",
-            snapshot_id=snapshot_id,
-            trigger_source="cn_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "stock_industry_upserts": stock_industry_upserts,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "board": row.board,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_cn_from_csv(
         self,
@@ -2415,165 +1956,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest TW rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._tw_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="TW",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"TW ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in TW source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="tw_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="tw_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="tw_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                symbol=row.symbol,
-                old_status=None,
-                new_status=UNIVERSE_STATUS_ACTIVE,
-                trigger_source="tw_ingest",
-                reason=reason,
-                payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="TW",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="TW",
-            snapshot_id=snapshot_id,
-            trigger_source="tw_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_tw_from_csv(
         self,
@@ -2639,165 +2031,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest CA rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._ca_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="CA",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"CA ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in CA source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="ca_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="ca_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="ca_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="ca_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="CA",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="CA",
-            snapshot_id=snapshot_id,
-            trigger_source="ca_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_ca_from_csv(
         self,
@@ -2863,165 +2106,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest DE rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._de_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="DE",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"DE ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in DE source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="de_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="de_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="de_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="de_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="DE",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="DE",
-            snapshot_id=snapshot_id,
-            trigger_source="de_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_de_from_csv(
         self,
@@ -3059,165 +2153,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest SG rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._sg_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="SG",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"SG ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in SG source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="sg_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="sg_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="sg_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="sg_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="SG",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="SG",
-            snapshot_id=snapshot_id,
-            trigger_source="sg_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def ingest_my_snapshot_rows(
         self,
@@ -3231,165 +2176,16 @@ class StockUniverseService:
         strict: bool = True,
     ) -> Dict[str, Any]:
         """Ingest MY rows with deterministic canonicalization and lineage metadata."""
-        canonicalized = self._my_ingestion.canonicalize_rows(
-            rows,
+        return self._ingest_snapshot_rows_via_pipeline(
+            db,
+            market="MY",
+            rows=rows,
             source_name=source_name,
             snapshot_id=snapshot_id,
             snapshot_as_of=snapshot_as_of,
             source_metadata=source_metadata,
+            strict=strict,
         )
-
-        if strict and canonicalized.rejected_rows:
-            sample = "; ".join(
-                f"row {row.source_row_number}: {row.reason}"
-                for row in canonicalized.rejected_rows[:3]
-            )
-            raise ValueError(
-                f"MY ingestion rejected {len(canonicalized.rejected_rows)} row(s). {sample}"
-            )
-
-        now = datetime.utcnow()
-        canonical_symbols = [row.symbol for row in canonicalized.canonical_rows]
-        existing_rows = {
-            row.symbol: row
-            for row in db.query(StockUniverse).filter(
-                StockUniverse.symbol.in_(canonical_symbols)
-            ).all()
-        } if canonical_symbols else {}
-
-        added_count = 0
-        updated_count = 0
-        new_rows: list[StockUniverse] = []
-        new_events: list[StockUniverseStatusEvent] = []
-
-        for row in canonicalized.canonical_rows:
-            event_payload = {
-                "source_name": row.source_name,
-                "source_symbol": row.source_symbol,
-                "source_row_number": row.source_row_number,
-                "snapshot_id": row.snapshot_id,
-                "snapshot_as_of": row.snapshot_as_of,
-                "source_metadata": row.source_metadata,
-                "lineage_hash": row.lineage_hash,
-                "row_hash": row.row_hash,
-            }
-            reason = f"Present in MY source snapshot {row.snapshot_id}"
-            existing = existing_rows.get(row.symbol)
-
-            if existing is not None:
-                existing.name = row.name or existing.name
-                existing.market = row.market
-                existing.exchange = row.exchange
-                existing.currency = row.currency
-                existing.timezone = row.timezone
-                existing.local_code = row.local_code or existing.local_code
-                existing.sector = row.sector or existing.sector
-                existing.industry = row.industry or existing.industry
-                if row.market_cap is not None:
-                    existing.market_cap = row.market_cap
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="my_ingest",
-                    reason=reason,
-                    now=now,
-                    payload=event_payload,
-                    source="my_ingest",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
-                continue
-
-            new_rows.append(
-                StockUniverse(
-                    symbol=row.symbol,
-                    name=row.name,
-                    market=row.market,
-                    exchange=row.exchange,
-                    currency=row.currency,
-                    timezone=row.timezone,
-                    local_code=row.local_code,
-                    sector=row.sector,
-                    industry=row.industry,
-                    market_cap=row.market_cap,
-                    is_active=True,
-                    status=UNIVERSE_STATUS_ACTIVE,
-                    status_reason=reason,
-                    source="my_ingest",
-                    consecutive_fetch_failures=0,
-                    added_at=now,
-                    first_seen_at=now,
-                    last_seen_in_source_at=now,
-                    updated_at=now,
-                )
-            )
-            new_events.append(
-                self._build_status_event_record(
-                    symbol=row.symbol,
-                    old_status=None,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
-                    trigger_source="my_ingest",
-                    reason=reason,
-                    payload=event_payload,
-                )
-            )
-            added_count += 1
-
-        self._bulk_insert_records(db, new_rows)
-        self._bulk_insert_records(db, new_events)
-
-        reconciliation = self._record_market_reconciliation_run(
-            db,
-            market="MY",
-            source_name=source_name,
-            snapshot_id=snapshot_id,
-            canonical_rows=canonicalized.canonical_rows,
-        )
-        reconciliation = self._apply_market_reconciliation_policy(
-            db,
-            market="MY",
-            snapshot_id=snapshot_id,
-            trigger_source="my_ingest",
-            reconciliation=reconciliation,
-            now=now,
-        )
-        db.commit()
-        details_limit = 25
-        canonical_preview = canonicalized.canonical_rows[:details_limit]
-        rejected_preview = canonicalized.rejected_rows[:details_limit]
-
-        return {
-            "added": added_count,
-            "updated": updated_count,
-            "total": len(canonicalized.canonical_rows),
-            "rejected": len(canonicalized.rejected_rows),
-            "source_name": source_name,
-            "snapshot_id": snapshot_id,
-            "canonical_rows": [
-                {
-                    "symbol": row.symbol,
-                    "local_code": row.local_code,
-                    "exchange": row.exchange,
-                    "source_symbol": row.source_symbol,
-                    "lineage_hash": row.lineage_hash,
-                    "row_hash": row.row_hash,
-                }
-                for row in canonical_preview
-            ],
-            "rejected_rows": [
-                {
-                    "source_row_number": row.source_row_number,
-                    "source_symbol": row.source_symbol,
-                    "reason": row.reason,
-                }
-                for row in rejected_preview
-            ],
-            "canonical_rows_truncated": len(canonicalized.canonical_rows) > details_limit,
-            "rejected_rows_truncated": len(canonicalized.rejected_rows) > details_limit,
-            "reconciliation": reconciliation,
-        }
 
     def populate_from_csv(self, db: Session, csv_content: str) -> Dict:
         """
@@ -3559,7 +2355,7 @@ class StockUniverseService:
         """
         Populate stock_universe table from finviz.
 
-        Performs upsert: updates existing symbols, inserts new ones, deactivates removed ones.
+        Performs shared upsert/reconciliation using the canonical Universe pipeline.
 
         Args:
             db: Database session
@@ -3576,184 +2372,37 @@ class StockUniverseService:
                 logger.warning("No stocks fetched from finviz")
                 return {'added': 0, 'updated': 0, 'deactivated': 0, 'total': 0}
 
-            now = datetime.utcnow()
-            added_count = 0
-            updated_count = 0
-            new_rows: list[StockUniverse] = []
-            new_events: list[StockUniverseStatusEvent] = []
-
-            existing_stocks = {
-                stock.symbol: stock
-                for stock in db.query(StockUniverse).all()
-            }
-            resolved_rows: list[tuple[dict[str, Any], Any, str, str]] = []
-            fetched_symbols: set[str] = set()
-            for stock_data in stocks:
-                identity = self._resolved_identity(stock_data)
-                source_symbol = stock_data["symbol"]
-                canonical_symbol = identity.canonical_symbol
-                resolved_rows.append((stock_data, identity, source_symbol, canonical_symbol))
-                fetched_symbols.add(canonical_symbol)
-
-            for stock_data, identity, source_symbol, canonical_symbol in resolved_rows:
-                existing = existing_stocks.get(canonical_symbol) or existing_stocks.get(source_symbol)
-                if existing and existing.symbol != canonical_symbol and canonical_symbol not in existing_stocks:
-                    existing_stocks.pop(existing.symbol, None)
-                    existing.symbol = canonical_symbol
-                    existing_stocks[canonical_symbol] = existing
-                if existing is None:
-                    new_rows.append(StockUniverse(
-                        symbol=canonical_symbol,
-                        name=stock_data["name"],
-                        market=identity.market,
-                        exchange=identity.exchange,
-                        currency=identity.currency,
-                        timezone=identity.timezone,
-                        local_code=identity.local_code,
-                        sector=stock_data["sector"],
-                        industry=stock_data["industry"],
-                        market_cap=stock_data["market_cap"],
-                        is_active=True,
-                        status=UNIVERSE_STATUS_ACTIVE,
-                        status_reason="Present in Finviz universe sync",
-                        source="finviz",
-                        consecutive_fetch_failures=0,
-                        added_at=now,
-                        first_seen_at=now,
-                        last_seen_in_source_at=now,
-                        updated_at=now,
-                    ))
-                    new_events.append(self._build_status_event_record(
-                        symbol=canonical_symbol,
-                        old_status=None,
-                        new_status=UNIVERSE_STATUS_ACTIVE,
-                        trigger_source="finviz_sync",
-                        reason="New symbol discovered in Finviz universe sync",
-                        payload={"exchange": stock_data["exchange"]},
-                    ))
-                    added_count += 1
-                    continue
-
-                existing.name = stock_data["name"] or existing.name
-                existing.exchange = identity.exchange or existing.exchange
-                existing.market = identity.market
-                existing.currency = identity.currency
-                existing.timezone = identity.timezone
-                existing.local_code = identity.local_code or existing.local_code
-                existing.sector = stock_data["sector"] or existing.sector
-                existing.industry = stock_data["industry"] or existing.industry
-                existing.market_cap = stock_data["market_cap"]
-                self._apply_status_transition(
-                    db,
-                    existing,
-                    new_status=UNIVERSE_STATUS_ACTIVE,
+            exchange_name = str(exchange_filter or "").strip().upper() or None
+            source_name = (
+                "finviz"
+                if exchange_name is None
+                else f"finviz_{exchange_name.lower()}"
+            )
+            stats = self._ingest_snapshot_rows_via_pipeline(
+                db,
+                market="US",
+                rows=stocks,
+                source_name=source_name,
+                snapshot_id=self._auto_snapshot_id(source_name),
+                source_metadata={"exchange_filter": exchange_name},
+                strict=True,
+                ingestion_context=UniverseIngestionContext(
                     trigger_source="finviz_sync",
-                    reason="Present in Finviz universe sync",
-                    now=now,
-                    payload={"exchange": stock_data["exchange"]},
-                    source="finviz",
-                    clear_failures=True,
-                    seen_in_source=True,
-                )
-                updated_count += 1
+                    row_source="finviz",
+                    reconciliation_policy=self._finviz_reconciliation_policy(exchange_name),
+                ),
+            )
+            reconciliation = stats.get("reconciliation") or {}
+            safety = reconciliation.get("safety") or {}
+            stats["deactivated"] = int(safety.get("deactivated_count") or 0)
 
-            self._bulk_insert_records(db, new_rows)
-            self._bulk_insert_records(db, new_events)
-
-            # Deactivate symbols that no longer exist in finviz
-            # ONLY when refreshing ALL exchanges (no filter)
-            # When refreshing specific exchange, don't deactivate stocks from other exchanges
-            deactivated_count = 0
-
-            # Safety check: minimum expected stocks from finviz (prevents mass deactivation on API failure)
-            MIN_EXPECTED_STOCKS = 8000  # Finviz typically returns 9000+ US stocks
-            MAX_DEACTIVATION_PERCENT = 10  # Never deactivate more than 10% in one refresh
-
-            if not exchange_filter:
-                # Only deactivate when doing full universe refresh
-                removed_records = [
-                    stock
-                    for stock in existing_stocks.values()
-                    if self._normalize_status(stock) == UNIVERSE_STATUS_ACTIVE
-                    and stock.symbol not in fetched_symbols
-                ]
-
-                if removed_records:
-                    # Safety check: don't deactivate if fetch count is suspiciously low
-                    if len(fetched_symbols) < MIN_EXPECTED_STOCKS:
-                        logger.warning(
-                            f"SAFETY: Skipping deactivation - only {len(fetched_symbols)} stocks fetched "
-                            f"(expected {MIN_EXPECTED_STOCKS}+). Would have deactivated {len(removed_records)} stocks."
-                        )
-                    # Safety check: don't deactivate too many stocks at once
-                    elif len(removed_records) > len(existing_stocks) * MAX_DEACTIVATION_PERCENT / 100:
-                        logger.warning(
-                            f"SAFETY: Skipping deactivation - {len(removed_records)} stocks would be deactivated "
-                            f"(>{MAX_DEACTIVATION_PERCENT}% of {len(existing_stocks)} existing). "
-                            f"This may indicate a finviz API issue."
-                        )
-                    else:
-                        for record in removed_records:
-                            self._apply_status_transition(
-                                db,
-                                record,
-                                new_status=UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE,
-                                trigger_source="finviz_sync",
-                                reason="Missing from Finviz universe sync",
-                                now=now,
-                                payload={"exchange_filter": None},
-                            )
-                        deactivated_count = len(removed_records)
-                        logger.info(f"Deactivated {deactivated_count} stocks no longer in finviz")
-            else:
-                # When refreshing specific exchange, only deactivate stocks from THAT exchange
-                # that are no longer in the fetch results
-                exchange_name = exchange_filter.upper()
-                removed_from_exchange = [
-                    stock
-                    for stock in existing_stocks.values()
-                    if stock.exchange == exchange_name
-                    and self._normalize_status(stock) == UNIVERSE_STATUS_ACTIVE
-                    and stock.symbol not in fetched_symbols
-                ]
-
-                if removed_from_exchange:
-                    # Safety check: don't deactivate too many from a single exchange
-                    existing_exchange_count = sum(
-                        1
-                        for stock in existing_stocks.values()
-                        if stock.exchange == exchange_name and self._normalize_status(stock) == UNIVERSE_STATUS_ACTIVE
-                    )
-                    if existing_exchange_count > 0 and len(removed_from_exchange) > existing_exchange_count * MAX_DEACTIVATION_PERCENT / 100:
-                        logger.warning(
-                            f"SAFETY: Skipping deactivation for {exchange_name} - {len(removed_from_exchange)} stocks "
-                            f"would be deactivated (>{MAX_DEACTIVATION_PERCENT}% of {existing_exchange_count}). "
-                            f"This may indicate a finviz API issue."
-                        )
-                    else:
-                        for record in removed_from_exchange:
-                            self._apply_status_transition(
-                                db,
-                                record,
-                                new_status=UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE,
-                                trigger_source="finviz_sync",
-                                reason=f"Missing from Finviz universe sync for {exchange_name}",
-                                now=now,
-                                payload={"exchange_filter": exchange_name},
-                            )
-                        deactivated_count = len(removed_from_exchange)
-                        logger.info(f"Deactivated {deactivated_count} {exchange_name} stocks no longer in finviz")
-
-            db.commit()
-
-            logger.info(f"Universe populated: {added_count} added, {updated_count} updated, {deactivated_count} deactivated")
-
-            return {
-                'added': added_count,
-                'updated': updated_count,
-                'deactivated': deactivated_count,
-                'total': len(stocks),
-            }
+            logger.info(
+                "Universe populated: %s added, %s updated, %s deactivated",
+                stats["added"],
+                stats["updated"],
+                stats["deactivated"],
+            )
+            return stats
 
         except Exception as e:
             logger.error(f"Error populating universe: {e}", exc_info=True)
@@ -3765,6 +2414,7 @@ class StockUniverseService:
         db: Session,
         market: Optional[str] = None,
         exchange: Optional[str] = None,
+        listing_tier: Optional[str] = None,
         sector: Optional[str] = None,
         min_market_cap: Optional[float] = None,
         sp500_only: bool = False,
@@ -3778,6 +2428,7 @@ class StockUniverseService:
             db: Database session
             market: Optional market filter (US, HK, JP, TW)
             exchange: Optional exchange filter (NYSE, NASDAQ, AMEX)
+            listing_tier: Optional canonical listing tier filter
             sector: Optional sector filter
             min_market_cap: Optional minimum market cap filter
             sp500_only: If True, only return S&P 500 stocks (legacy path;
@@ -3849,7 +2500,14 @@ class StockUniverseService:
                     query = query.filter(StockUniverse.market == normalized_market)
 
             if exchange:
-                query = query.filter(StockUniverse.exchange == exchange.upper())
+                query = query.filter(
+                    StockUniverse.exchange.in_(
+                        self._exchange_filter_values(market, exchange)
+                    )
+                )
+
+            if listing_tier:
+                query = query.filter(StockUniverse.listing_tier == listing_tier)
 
             if sector:
                 query = query.filter(StockUniverse.sector == sector)
@@ -3866,10 +2524,11 @@ class StockUniverseService:
             symbols = [row[0] for row in query.all()]
 
             logger.info(
-                "Retrieved %d active symbols (market=%s, exchange=%s, sector=%s, index=%s)",
+                "Retrieved %d active symbols (market=%s, exchange=%s, tier=%s, sector=%s, index=%s)",
                 len(symbols),
                 market,
                 exchange,
+                listing_tier,
                 sector,
                 resolved_index,
             )
@@ -3878,6 +2537,31 @@ class StockUniverseService:
         except Exception as e:
             logger.error(f"Error getting active symbols: {e}", exc_info=True)
             return []
+
+    @staticmethod
+    def _exchange_filter_values(
+        market: Optional[str],
+        exchange: str,
+    ) -> tuple[str, ...]:
+        requested = str(exchange or "").strip().upper()
+        if not requested:
+            return ()
+
+        market_code = str(market or "").strip().upper() or None
+        resolved = (
+            mic_alias_registry.resolve(market_code, requested)
+            if market_code
+            else mic_alias_registry.resolve_global(requested)
+        )
+        if resolved is None:
+            return (requested,)
+
+        values = (
+            *mic_alias_registry.aliases_for_mic(resolved.market, resolved.mic),
+            requested,
+            resolved.mic,
+        )
+        return tuple(dict.fromkeys(value for value in values if value))
 
     def add_manual_symbol(self, db: Session, symbol: str, name: str = "") -> bool:
         """

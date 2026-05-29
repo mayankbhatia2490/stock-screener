@@ -40,11 +40,152 @@ class _FakeBulkFetcher:
         return {symbol: self._results.get(symbol, {"has_error": True, "price_data": None}) for symbol in symbols}
 
 
+class _RecordingUniversePipeline:
+    def __init__(self):
+        self.calls = []
+        self.canonicalized_calls = []
+
+    def ingest_snapshot_rows(self, db, *, market, rows, **kwargs):
+        self.calls.append(
+            {
+                "market": market,
+                "rows": list(rows),
+                **kwargs,
+            }
+        )
+        return {
+            "added": 0,
+            "updated": 0,
+            "total": 0,
+            "rejected": 0,
+            "source_name": kwargs["source_name"],
+            "snapshot_id": kwargs["snapshot_id"],
+            "canonical_rows": [],
+            "rejected_rows": [],
+            "reconciliation": {},
+            "pipeline": {"market": market},
+        }
+
+    def ingest_canonicalized_result(self, db, *, market, result, **kwargs):
+        self.canonicalized_calls.append(
+            {
+                "market": market,
+                "result": result,
+                **kwargs,
+            }
+        )
+        return {
+            "added": 0,
+            "updated": 0,
+            "total": len(result.canonical_rows),
+            "rejected": len(result.rejected_rows),
+            "coverage_rejected": len(result.side_effects.coverage_rejections),
+            "source_name": kwargs["source_name"],
+            "snapshot_id": kwargs["snapshot_id"],
+            "canonical_rows": [],
+            "rejected_rows": [],
+            "reconciliation": {},
+            "pipeline": {"market": market},
+        }
+
+
 def _make_session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     return TestingSessionLocal
+
+
+@pytest.mark.parametrize(
+    ("market", "method_name"),
+    [
+        ("HK", "ingest_hk_snapshot_rows"),
+        ("JP", "ingest_jp_snapshot_rows"),
+        ("KR", "ingest_kr_snapshot_rows"),
+        ("TW", "ingest_tw_snapshot_rows"),
+        ("CA", "ingest_ca_snapshot_rows"),
+        ("DE", "ingest_de_snapshot_rows"),
+        ("CN", "ingest_cn_snapshot_rows"),
+        ("SG", "ingest_sg_snapshot_rows"),
+        ("MY", "ingest_my_snapshot_rows"),
+    ],
+)
+def test_official_market_ingest_methods_delegate_to_shared_pipeline(
+    market,
+    method_name,
+):
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    pipeline = _RecordingUniversePipeline()
+    service._universe_ingestion_pipeline = pipeline
+
+    result = getattr(service, method_name)(
+        db,
+        rows=[{"symbol": "TEST", "name": "Test"}],
+        source_name=f"{market.lower()}_reference_bundle",
+        snapshot_id=f"{market.lower()}-snapshot",
+        snapshot_as_of="2026-05-29",
+        source_metadata={"fixture": True},
+        strict=True,
+    )
+
+    assert result["pipeline"]["market"] == market
+    assert len(pipeline.calls) == 1
+    call = dict(pipeline.calls[0])
+    ingestion_context = call.pop("ingestion_context")
+    assert call == {
+        "market": market,
+        "rows": [{"symbol": "TEST", "name": "Test"}],
+        "source_name": f"{market.lower()}_reference_bundle",
+        "snapshot_id": f"{market.lower()}-snapshot",
+        "snapshot_as_of": "2026-05-29",
+        "source_metadata": {"fixture": True},
+        "strict": True,
+    }
+    assert ingestion_context.trigger_source == f"{market.lower()}_ingest"
+    assert ingestion_context.row_source == f"{market.lower()}_ingest"
+    assert ingestion_context.reconciliation_policy.name == f"{market.lower()}_market_default"
+    db.close()
+
+
+def test_in_ingest_delegates_filtered_result_to_shared_pipeline():
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    pipeline = _RecordingUniversePipeline()
+    service._universe_ingestion_pipeline = pipeline
+
+    result = service.ingest_in_snapshot_rows(
+        db,
+        rows=[
+            {
+                "symbol": "RELIANCE.NS",
+                "name": "Reliance Industries Limited",
+                "exchange": "XNSE",
+                "sector": "",
+                "industry": "",
+                "market_cap": None,
+                "isin": "INE002A01018",
+            },
+        ],
+        source_name="in_reference_bundle",
+        snapshot_id="in-reference-bundle-2026-04-21",
+        snapshot_as_of="2026-04-21",
+        source_metadata={"overlap_isin_count": 0},
+        strict=True,
+    )
+
+    assert result["pipeline"]["market"] == "IN"
+    assert len(pipeline.canonicalized_calls) == 1
+    call = pipeline.canonicalized_calls[0]
+    assert call["market"] == "IN"
+    assert call["strict"] is True
+    assert call["result"].canonical_rows[0].symbol == "RELIANCE.NS"
+    assert call["result"].canonical_rows[0].mic == "XNSE"
+    assert call["result"].rejected_rows == ()
+    assert call["result"].side_effects.coverage_rejections == ()
+    db.close()
 
 
 def _assert_bulk_universe_rows_prepopulate_required_defaults(objects):
@@ -99,6 +240,7 @@ def test_ingest_sg_snapshot_rows_canonicalizes_sgx_codes():
                 "symbol": "D05",
                 "name": "DBS GROUP HOLDINGS LTD",
                 "exchange": "SGX",
+                "listing_tier": "MAINBOARD",
                 "sector": "Finance",
                 "industry": "Banking",
                 "market_cap": "100.5",
@@ -108,6 +250,7 @@ def test_ingest_sg_snapshot_rows_canonicalizes_sgx_codes():
                 "symbol": "A17U.SI",
                 "name": "CAPITALAND ASCENDAS REIT",
                 "exchange": "XSES",
+                "listing_tier": "CATALIST",
                 "sector": "Real Estate",
                 "industry": "REIT",
             },
@@ -126,6 +269,8 @@ def test_ingest_sg_snapshot_rows_canonicalizes_sgx_codes():
     assert rows[0].currency == "SGD"
     assert rows[0].timezone == "Asia/Singapore"
     assert rows[0].local_code == "A17U"
+    assert rows[0].listing_tier == "catalist"
+    assert rows[1].listing_tier == "mainboard"
     assert rows[1].market_cap == 100.5
     db.close()
 
@@ -213,6 +358,43 @@ def test_get_active_symbols_market_filter_falls_back_to_exchange_when_market_bla
     symbols = stock_universe_service.get_active_symbols(db, market="US")
 
     assert symbols == ["AAPL", "IBM"]
+    db.close()
+
+
+def test_get_active_symbols_mic_filter_matches_legacy_exchange_alias_rows():
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    db.add_all(
+        [
+            StockUniverse(
+                symbol="IBM",
+                exchange="NYSE",
+                market="US",
+                market_cap=500,
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="Present in Finviz universe sync",
+            ),
+            StockUniverse(
+                symbol="AAPL",
+                exchange="XNAS",
+                market="US",
+                market_cap=1000,
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="Present in Finviz universe sync",
+            ),
+        ]
+    )
+    db.commit()
+
+    symbols = stock_universe_service.get_active_symbols(
+        db,
+        market="US",
+        exchange="XNYS",
+    )
+
+    assert symbols == ["IBM"]
     db.close()
 
 
@@ -518,6 +700,7 @@ def test_ingest_in_snapshot_rows_deactivates_existing_active_bse_symbol_rejected
     assert event is not None
     assert event.new_status == UNIVERSE_STATUS_INACTIVE_NO_DATA
     assert event.trigger_source == "in_ingest_coverage_gate"
+    assert json.loads(event.payload_json)["snapshot_as_of"] == "2026-04-21"
     db.close()
 
 
@@ -823,6 +1006,251 @@ def test_populate_universe_batches_new_rows_with_required_defaults(monkeypatch):
     db.close()
 
 
+def test_populate_universe_uses_shared_pipeline_with_finviz_source_semantics(monkeypatch):
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    monkeypatch.setattr(
+        service,
+        "fetch_from_finviz",
+        lambda exchange_filter=None: [
+            {
+                "symbol": "AAPL",
+                "name": "Apple",
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+                "market_cap": 3_000_000_000_000.0,
+            },
+        ],
+    )
+
+    stats = service.populate_universe(db)
+
+    row = db.query(StockUniverse).filter(StockUniverse.symbol == "AAPL").one()
+    event = (
+        db.query(StockUniverseStatusEvent)
+        .filter(StockUniverseStatusEvent.symbol == "AAPL")
+        .one()
+    )
+    run = (
+        db.query(StockUniverseReconciliationRun)
+        .filter(
+            StockUniverseReconciliationRun.market == "US",
+            StockUniverseReconciliationRun.source_name == "finviz",
+        )
+        .one()
+    )
+    payload = json.loads(event.payload_json)
+
+    assert stats["pipeline"]["market"] == "US"
+    assert stats["source_name"] == "finviz"
+    assert stats["reconciliation"]["run_id"] == run.id
+    assert stats["deactivated"] == 0
+    assert row.source == "finviz"
+    assert row.status_reason == "Present in Finviz universe sync"
+    assert event.trigger_source == "finviz_sync"
+    assert payload["source_name"] == "finviz"
+    assert payload["source_symbol"] == "AAPL"
+    assert payload["source_metadata"]["exchange_filter"] is None
+    db.close()
+
+
+def test_populate_universe_keeps_snapshot_when_finviz_has_bad_rows(monkeypatch):
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    monkeypatch.setattr(
+        service,
+        "fetch_from_finviz",
+        lambda exchange_filter=None: [
+            {
+                "symbol": "AAPL",
+                "name": "Apple",
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+                "market_cap": 3_000_000_000_000.0,
+            },
+            {
+                "symbol": "",
+                "name": "Malformed",
+                "exchange": "NASDAQ",
+            },
+        ],
+    )
+
+    stats = service.populate_universe(db)
+
+    assert stats["added"] == 1
+    assert stats["rejected"] == 1
+    assert stats["rejected_rows"][0]["reason"] == "Missing symbol/ticker"
+    assert db.query(StockUniverse).filter(StockUniverse.symbol == "AAPL").one()
+    db.close()
+
+
+def test_populate_universe_reconciliation_baseline_is_source_scoped(monkeypatch):
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    snapshot_ids = iter(["finviz-nasdaq-1", "finviz-full-1"])
+
+    monkeypatch.setattr(service, "_auto_snapshot_id", lambda prefix: next(snapshot_ids))
+
+    def _fetch(exchange_filter=None):
+        if exchange_filter == "NASDAQ":
+            return [
+                {
+                    "symbol": "AAPL",
+                    "name": "Apple",
+                    "exchange": "NASDAQ",
+                    "sector": "Technology",
+                    "industry": "Consumer Electronics",
+                    "market_cap": 3_000_000_000_000.0,
+                },
+            ]
+        return [
+            {
+                "symbol": "AAPL",
+                "name": "Apple",
+                "exchange": "NASDAQ",
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+                "market_cap": 3_000_000_000_000.0,
+            },
+            {
+                "symbol": "IBM",
+                "name": "IBM",
+                "exchange": "NYSE",
+                "sector": "Technology",
+                "industry": "Information Technology Services",
+                "market_cap": 180_000_000_000.0,
+            },
+        ]
+
+    monkeypatch.setattr(service, "fetch_from_finviz", _fetch)
+
+    service.populate_universe(db, exchange_filter="NASDAQ")
+    full_stats = service.populate_universe(db)
+
+    assert full_stats["source_name"] == "finviz"
+    assert full_stats["reconciliation"]["previous_snapshot_id"] is None
+    assert full_stats["reconciliation"]["counts"]["total_current"] == 2
+    db.close()
+
+
+def test_populate_universe_uses_finviz_reconciliation_policy(monkeypatch):
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+    snapshot_ids = iter(["finviz-full-a", "finviz-full-b"])
+    fetches = iter(
+        [
+            [
+                {
+                    "symbol": "AAPL",
+                    "name": "Apple",
+                    "exchange": "NASDAQ",
+                    "sector": "Technology",
+                    "industry": "Consumer Electronics",
+                    "market_cap": 3_000_000_000_000.0,
+                },
+                {
+                    "symbol": "IBM",
+                    "name": "IBM",
+                    "exchange": "NYSE",
+                    "sector": "Technology",
+                    "industry": "Information Technology Services",
+                    "market_cap": 180_000_000_000.0,
+                },
+                {
+                    "symbol": "MSFT",
+                    "name": "Microsoft",
+                    "exchange": "NASDAQ",
+                    "sector": "Technology",
+                    "industry": "Software",
+                    "market_cap": 2_800_000_000_000.0,
+                },
+            ],
+            [
+                {
+                    "symbol": "AAPL",
+                    "name": "Apple",
+                    "exchange": "NASDAQ",
+                    "sector": "Technology",
+                    "industry": "Consumer Electronics",
+                    "market_cap": 3_000_000_000_000.0,
+                },
+                {
+                    "symbol": "MSFT",
+                    "name": "Microsoft",
+                    "exchange": "NASDAQ",
+                    "sector": "Technology",
+                    "industry": "Software",
+                    "market_cap": 2_800_000_000_000.0,
+                },
+            ],
+        ]
+    )
+
+    monkeypatch.setenv("ASIA_UNIVERSE_APPLY_DESTRUCTIVE_ENABLED", "false")
+    monkeypatch.setenv("FINVIZ_UNIVERSE_APPLY_DESTRUCTIVE_ENABLED", "true")
+    monkeypatch.setenv("FINVIZ_RECONCILIATION_MIN_COUNT_FULL", "0")
+    monkeypatch.setenv("FINVIZ_RECONCILIATION_MAX_REMOVED_PERCENT", "90")
+    monkeypatch.setattr(service, "_auto_snapshot_id", lambda prefix: next(snapshot_ids))
+    monkeypatch.setattr(service, "fetch_from_finviz", lambda exchange_filter=None: next(fetches))
+
+    service.populate_universe(db)
+    stats = service.populate_universe(db)
+
+    safety = stats["reconciliation"]["safety"]
+    ibm = db.query(StockUniverse).filter(StockUniverse.symbol == "IBM").one()
+
+    assert safety["policy_name"] == "finviz_full"
+    assert safety["thresholds"]["min_count"] == 0
+    assert safety["thresholds"]["max_removed_percent"] == 90.0
+    assert safety["apply_destructive_enabled"] is True
+    assert safety["deactivated_count"] == 1
+    assert safety["deactivated_symbols"] == ["IBM"]
+    assert ibm.status == UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE
+    assert ibm.is_active is False
+    db.close()
+
+
+def test_reconciliation_runs_are_distinct_per_source_for_same_snapshot_id():
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    service = StockUniverseService()
+
+    service.ingest_hk_snapshot_rows(
+        db,
+        rows=[{"symbol": "700", "exchange": "SEHK", "name": "Tencent"}],
+        source_name="hkex_official",
+        snapshot_id="shared-snapshot",
+    )
+    manual_stats = service.ingest_hk_snapshot_rows(
+        db,
+        rows=[{"symbol": "5", "exchange": "SEHK", "name": "HSBC"}],
+        source_name="hk_manual_csv",
+        snapshot_id="shared-snapshot",
+    )
+
+    runs = (
+        db.query(StockUniverseReconciliationRun)
+        .filter(
+            StockUniverseReconciliationRun.market == "HK",
+            StockUniverseReconciliationRun.snapshot_id == "shared-snapshot",
+        )
+        .order_by(StockUniverseReconciliationRun.source_name.asc())
+        .all()
+    )
+
+    assert [run.source_name for run in runs] == ["hk_manual_csv", "hkex_official"]
+    assert manual_stats["reconciliation"]["source_name"] == "hk_manual_csv"
+    assert manual_stats["reconciliation"]["previous_snapshot_id"] is None
+    db.close()
+
+
 def test_ingest_hk_from_csv_rejects_unapproved_source():
     TestingSessionLocal = _make_session()
     db = TestingSessionLocal()
@@ -1075,11 +1503,11 @@ def test_ingest_tw_from_csv_normalizes_twse_tpex_variants_and_lineage():
     assert stats["updated"] == 0
     assert stats["total"] == 2
     assert stats["rejected"] == 0
-    assert twse_row.exchange == "TWSE"
+    assert twse_row.exchange == "XTAI"
     assert twse_row.market == "TW"
     assert twse_row.currency == "TWD"
     assert twse_row.timezone == "Asia/Taipei"
-    assert tpex_row.exchange == "TPEX"
+    assert tpex_row.exchange == "XTAI"
     assert tpex_row.market == "TW"
     assert tpex_row.symbol == "3008.TWO"
     assert tpex_row.source == "tw_ingest"
@@ -1125,7 +1553,7 @@ def test_ingest_tw_from_csv_reactivates_existing_inactive_symbol():
     assert stats["updated"] == 1
     assert row.is_active is True
     assert row.status == UNIVERSE_STATUS_ACTIVE
-    assert row.exchange == "TPEX"
+    assert row.exchange == "XTAI"
     assert row.local_code == "3008"
     db.close()
 
@@ -1153,7 +1581,7 @@ def test_ingest_tw_from_csv_infers_tpex_exchange_from_symbol_when_exchange_missi
     assert stats["updated"] == 0
     assert stats["total"] == 1
     assert stats["rejected"] == 0
-    assert row.exchange == "TPEX"
+    assert row.exchange == "XTAI"
     assert row.market == "TW"
     assert row.local_code == "3008"
     db.close()

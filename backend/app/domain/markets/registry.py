@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
+from .catalog import MarketCatalog, get_market_catalog
 from .market import Market
+from .mic_aliases import mic_alias_registry
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkFacts:
+    """Benchmark compatibility facts not owned by Market Catalog."""
+
+    primary_symbol: str
+    fallback_symbol: str | None
+    primary_kind: str
+    fallback_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,11 +31,19 @@ class MarketProfile:
     calendar_id: str
     provider_calendar_id: str | None
     exchanges: tuple[str, ...]
-    indexes: tuple[str, ...]
     primary_benchmark_symbol: str
     benchmark_fallback_symbol: str | None
     benchmark_primary_kind: str
     benchmark_fallback_kind: str | None
+
+    @property
+    def indexes(self) -> tuple[str, ...]:
+        """Derived compatibility summary; IndexRegistry owns definitions."""
+        from ..universe.indexes import index_registry
+
+        return tuple(
+            definition.key for definition in index_registry.definitions(self.market.code)
+        )
 
 
 class MarketRegistry:
@@ -36,24 +56,47 @@ class MarketRegistry:
     def __init__(self, profiles: Iterable[MarketProfile]) -> None:
         self._profiles = tuple(profiles)
         self._by_code: dict[str, MarketProfile] = {}
-        self._market_by_exchange: dict[str, Market] = {}
-        self._market_by_index: dict[str, Market] = {}
 
         for profile in self._profiles:
             code = profile.market.code
             if code in self._by_code:
                 raise ValueError(f"Duplicate market profile: {code}")
             self._by_code[code] = profile
-            for exchange in profile.exchanges:
-                normalized_exchange = exchange.upper()
-                if normalized_exchange in self._market_by_exchange:
-                    raise ValueError(f"Duplicate exchange alias: {normalized_exchange}")
-                self._market_by_exchange[normalized_exchange] = profile.market
-            for index in profile.indexes:
-                normalized_index = index.upper()
-                if normalized_index in self._market_by_index:
-                    raise ValueError(f"Duplicate index alias: {normalized_index}")
-                self._market_by_index[normalized_index] = profile.market
+
+    @classmethod
+    def from_catalog(
+        cls,
+        catalog: MarketCatalog,
+        *,
+        benchmark_facts: Mapping[str, BenchmarkFacts],
+    ) -> "MarketRegistry":
+        profiles: list[MarketProfile] = []
+        catalog_codes = tuple(catalog.supported_market_codes())
+        missing = sorted(set(catalog_codes) - set(benchmark_facts))
+        if missing:
+            raise ValueError(
+                "Benchmark facts are missing for supported Markets: "
+                + ", ".join(missing)
+            )
+        for code in catalog_codes:
+            entry = catalog.get(code)
+            benchmark = benchmark_facts[code]
+            profiles.append(
+                MarketProfile(
+                    market=Market(entry.code),
+                    label=entry.label,
+                    currency=entry.default_currency,
+                    timezone_name=entry.display_timezone,
+                    calendar_id=entry.calendar_id,
+                    provider_calendar_id=entry.provider_calendar_id,
+                    exchanges=entry.exchanges,
+                    primary_benchmark_symbol=benchmark.primary_symbol,
+                    benchmark_fallback_symbol=benchmark.fallback_symbol,
+                    benchmark_primary_kind=benchmark.primary_kind,
+                    benchmark_fallback_kind=benchmark.fallback_kind,
+                )
+            )
+        return cls(profiles)
 
     def profile(self, market: Market | str) -> MarketProfile:
         resolved = market if isinstance(market, Market) else Market.from_str(market)
@@ -69,176 +112,45 @@ class MarketRegistry:
         return tuple(profile.market.code for profile in self._profiles)
 
     def market_for_exchange(self, exchange: str | None) -> Market | None:
-        normalized = str(exchange or "").strip().upper()
-        if not normalized:
+        resolved = mic_alias_registry.resolve_global(exchange)
+        if resolved is None:
             return None
-        return self._market_by_exchange.get(normalized)
+        return Market(resolved.market)
+
+    def mic_for_exchange(
+        self, market: Market | str | None, exchange: str | None
+    ) -> str | None:
+        if market is None:
+            return None
+        market_code = market.code if isinstance(market, Market) else str(market)
+        resolved = mic_alias_registry.resolve(market_code, exchange)
+        return resolved.mic if resolved else None
 
     def market_for_index(self, index: str | None) -> Market | None:
-        normalized = str(index or "").strip().upper()
-        if not normalized:
+        from ..universe.indexes import index_registry
+
+        market_code = index_registry.market_for(index)
+        if market_code is None:
             return None
-        return self._market_by_index.get(normalized)
+        return Market(market_code)
 
 
-market_registry = MarketRegistry(
-    (
-        MarketProfile(
-            market=Market("US"),
-            label="United States",
-            currency="USD",
-            timezone_name="America/New_York",
-            calendar_id="XNYS",
-            provider_calendar_id=None,
-            exchanges=("NYSE", "NASDAQ", "AMEX", "XNYS", "XNAS", "XASE"),
-            indexes=("SP500",),
-            primary_benchmark_symbol="SPY",
-            benchmark_fallback_symbol="IVV",
-            benchmark_primary_kind="etf",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("HK"),
-            label="Hong Kong",
-            currency="HKD",
-            timezone_name="Asia/Hong_Kong",
-            calendar_id="XHKG",
-            provider_calendar_id=None,
-            exchanges=("HKEX", "SEHK", "XHKG"),
-            indexes=("HSI",),
-            primary_benchmark_symbol="^HSI",
-            benchmark_fallback_symbol="2800.HK",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("IN"),
-            label="India",
-            currency="INR",
-            timezone_name="Asia/Kolkata",
-            calendar_id="XNSE",
-            provider_calendar_id="NSE",
-            exchanges=("NSE", "XNSE", "BSE", "XBOM"),
-            indexes=("NIFTY50",),
-            primary_benchmark_symbol="^NSEI",
-            benchmark_fallback_symbol="NIFTYBEES.NS",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("JP"),
-            label="Japan",
-            currency="JPY",
-            timezone_name="Asia/Tokyo",
-            calendar_id="XTKS",
-            provider_calendar_id=None,
-            exchanges=("TSE", "JPX", "XTKS"),
-            indexes=("NIKKEI225",),
-            primary_benchmark_symbol="^N225",
-            benchmark_fallback_symbol="1306.T",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("KR"),
-            label="South Korea",
-            currency="KRW",
-            timezone_name="Asia/Seoul",
-            calendar_id="XKRX",
-            provider_calendar_id=None,
-            exchanges=("KOSPI", "KOSDAQ", "KRX", "XKRX"),
-            indexes=("KOSPI",),
-            primary_benchmark_symbol="^KS11",
-            benchmark_fallback_symbol="069500.KS",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("TW"),
-            label="Taiwan",
-            currency="TWD",
-            timezone_name="Asia/Taipei",
-            calendar_id="XTAI",
-            provider_calendar_id=None,
-            exchanges=("TWSE", "TPEX", "XTAI"),
-            indexes=("TAIEX",),
-            primary_benchmark_symbol="^TWII",
-            benchmark_fallback_symbol="0050.TW",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("CN"),
-            label="China",
-            currency="CNY",
-            timezone_name="Asia/Shanghai",
-            calendar_id="XSHG",
-            provider_calendar_id=None,
-            exchanges=("SSE", "SHSE", "XSHG", "SZSE", "XSHE", "BJSE", "XBSE", "XBEI"),
-            indexes=("CSI300",),
-            primary_benchmark_symbol="000300.SS",
-            benchmark_fallback_symbol="000001.SS",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="index",
-        ),
-        MarketProfile(
-            market=Market("CA"),
-            label="Canada",
-            currency="CAD",
-            timezone_name="America/Toronto",
-            calendar_id="XTSE",
-            provider_calendar_id=None,
-            exchanges=("TSX", "TSXV", "XTSE", "XTNX"),
-            indexes=("TSX_COMPOSITE",),
-            primary_benchmark_symbol="^GSPTSE",
-            benchmark_fallback_symbol="XIU.TO",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("DE"),
-            label="Germany",
-            currency="EUR",
-            timezone_name="Europe/Berlin",
-            calendar_id="XETR",
-            provider_calendar_id=None,
-            exchanges=("XETR", "XETRA", "XFRA", "FRA", "FWB"),
-            indexes=("DAX", "MDAX", "SDAX"),
-            primary_benchmark_symbol="^GDAXI",
-            benchmark_fallback_symbol="EXS1.DE",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("SG"),
-            label="Singapore",
-            currency="SGD",
-            timezone_name="Asia/Singapore",
-            calendar_id="XSES",
-            provider_calendar_id=None,
-            exchanges=("SGX", "SES", "XSES"),
-            indexes=("STI",),
-            primary_benchmark_symbol="^STI",
-            benchmark_fallback_symbol="ES3.SI",
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind="etf",
-        ),
-        MarketProfile(
-            market=Market("MY"),
-            label="Malaysia",
-            currency="MYR",
-            timezone_name="Asia/Kuala_Lumpur",
-            calendar_id="XKLS",
-            provider_calendar_id=None,
-            exchanges=("KLSE", "MYX", "XKLS", "BURSA"),
-            indexes=("FBMKLCI",),
-            # No FBM KLCI-tracking ETF is currently listed in Malaysia (the
-            # original was delisted in 2020), so the index is the only
-            # benchmark we resolve without crossing into non-MYR proxies.
-            primary_benchmark_symbol="^KLSE",
-            benchmark_fallback_symbol=None,
-            benchmark_primary_kind="index",
-            benchmark_fallback_kind=None,
-        ),
-    )
+_BENCHMARK_FACTS_BY_MARKET: Mapping[str, BenchmarkFacts] = {
+    "US": BenchmarkFacts("SPY", "IVV", "etf", "etf"),
+    "HK": BenchmarkFacts("^HSI", "2800.HK", "index", "etf"),
+    "IN": BenchmarkFacts("^NSEI", "NIFTYBEES.NS", "index", "etf"),
+    "JP": BenchmarkFacts("^N225", "1306.T", "index", "etf"),
+    "KR": BenchmarkFacts("^KS11", "069500.KS", "index", "etf"),
+    "TW": BenchmarkFacts("^TWII", "0050.TW", "index", "etf"),
+    "CN": BenchmarkFacts("000300.SS", "000001.SS", "index", "index"),
+    "CA": BenchmarkFacts("^GSPTSE", "XIU.TO", "index", "etf"),
+    "DE": BenchmarkFacts("^GDAXI", "EXS1.DE", "index", "etf"),
+    "SG": BenchmarkFacts("^STI", "ES3.SI", "index", "etf"),
+    "MY": BenchmarkFacts("^KLSE", None, "index", None),
+}
+
+
+market_registry = MarketRegistry.from_catalog(
+    get_market_catalog(),
+    benchmark_facts=_BENCHMARK_FACTS_BY_MARKET,
 )

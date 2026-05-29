@@ -140,7 +140,16 @@ def _serialize_universe_definition(universe_def: object) -> dict[str, object]:
         return model_dump(mode="json")
 
     result: dict[str, object] = {}
-    for key in ("type", "market", "exchange", "index", "symbols", "allow_inactive_symbols"):
+    for key in (
+        "type",
+        "market",
+        "mic",
+        "exchange",
+        "index",
+        "listing_tier",
+        "symbols",
+        "allow_inactive_symbols",
+    ):
         value = getattr(universe_def, key, None)
         if value is None:
             continue

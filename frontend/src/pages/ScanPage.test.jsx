@@ -13,6 +13,7 @@ const runtimeState = {
     scan: false,
   },
   scanDefaults: DEFAULT_SCAN_DEFAULTS,
+  universeOptions: null,
 };
 const useRuntimeActivityMock = vi.hoisted(() => vi.fn());
 
@@ -68,6 +69,7 @@ beforeEach(() => {
   runtimeState.runtimeReady = false;
   runtimeState.uiSnapshots = { scan: false };
   runtimeState.scanDefaults = DEFAULT_SCAN_DEFAULTS;
+  runtimeState.universeOptions = null;
   useRuntimeActivityMock.mockReset();
   useRuntimeActivityMock.mockReturnValue({
     data: {
@@ -386,6 +388,122 @@ describe('ScanPage', () => {
     expect(
       await screen.findByText('Error: US fundamentals refresh is running. Wait for it to finish before starting a scan.')
     ).toBeInTheDocument();
+  });
+
+  it('uses runtime capability listing-tier options when starting a scan', async () => {
+    const user = userEvent.setup();
+    runtimeState.runtimeReady = true;
+    runtimeState.scanDefaults = {
+      ...DEFAULT_SCAN_DEFAULTS,
+      universe: 'market:hk',
+    };
+    runtimeState.universeOptions = {
+      markets: [
+        {
+          code: 'HK',
+          label: 'Hong Kong',
+          enabled: true,
+          market: {
+            value: 'market:HK',
+            label: 'All Hong Kong',
+            universe_def: { type: 'market', market: 'HK' },
+          },
+          mics: [
+            {
+              value: 'market:HK:mic:XHKG',
+              label: 'XHKG',
+              mic: 'XHKG',
+              aliases: ['HKEX'],
+              universe_def: { type: 'market', market: 'HK', mic: 'XHKG' },
+            },
+          ],
+          indexes: [],
+          listing_tiers: [
+            {
+              value: 'market:HK:mic:XHKG:tier:main_board',
+              label: 'Main Board',
+              key: 'main_board',
+              mic: 'XHKG',
+              aliases: [],
+              universe_def: {
+                type: 'market',
+                market: 'HK',
+                mic: 'XHKG',
+                listing_tier: 'main_board',
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    renderWithProviders(<ScanPage />);
+
+    await user.click(await screen.findByRole('combobox', { name: 'Universe' }));
+    await user.click(await screen.findByRole('option', { name: 'Main Board' }));
+    await user.click(screen.getByRole('button', { name: 'Scan' }));
+
+    await waitFor(() => {
+      expect(scanApi.createScan).toHaveBeenCalled();
+      expect(scanApi.createScan.mock.calls[0][0]).toEqual(
+        expect.objectContaining({
+          universe_def: {
+            type: 'market',
+            market: 'HK',
+            mic: 'XHKG',
+            listing_tier: 'main_board',
+          },
+        })
+      );
+    });
+  });
+
+  it('disables non-enabled markets from runtime capability options', async () => {
+    const user = userEvent.setup();
+    runtimeState.runtimeReady = true;
+    runtimeState.universeOptions = {
+      markets: [
+        {
+          code: 'US',
+          label: 'United States',
+          enabled: true,
+          market: {
+            value: 'market:US',
+            label: 'All United States',
+            universe_def: { type: 'market', market: 'US' },
+          },
+          mics: [],
+          indexes: [],
+          listing_tiers: [],
+        },
+        {
+          code: 'HK',
+          label: 'Hong Kong',
+          enabled: false,
+          market: {
+            value: 'market:HK',
+            label: 'All Hong Kong',
+            universe_def: { type: 'market', market: 'HK' },
+          },
+          mics: [],
+          indexes: [],
+          listing_tiers: [],
+        },
+      ],
+    };
+
+    renderWithProviders(<ScanPage />);
+
+    await user.click(await screen.findByRole('combobox', { name: 'Market' }));
+
+    expect(await screen.findByRole('option', { name: 'United States' })).not.toHaveAttribute(
+      'aria-disabled',
+      'true'
+    );
+    expect(await screen.findByRole('option', { name: /Hong Kong/ })).toHaveAttribute(
+      'aria-disabled',
+      'true'
+    );
   });
 
   it('lets the user refresh stale market data from a scan failure', async () => {

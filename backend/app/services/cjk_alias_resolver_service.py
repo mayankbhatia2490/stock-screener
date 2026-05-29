@@ -44,15 +44,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from ..domain.markets import market_symbol_suffix_registry
 from .cjk_alias_data import ASIA_ALIAS_CORPUS
-# Re-use the authoritative suffix↔market tables from SecurityMaster so the
-# two modules can't silently drift when a new exchange is added. Ordering
-# of _MARKET_BY_SUFFIX is defensive: longest/most-specific suffix first.
-# With today's four entries (.HK/.TWO/.TW/.T) the final characters are
-# all distinct, so order is not strictly required — but a future addition
-# like ``.AT`` would collide with ``.T`` on endswith(), and putting it
-# first preserves correctness without special-casing.
-from .security_master_service import _MARKET_BY_SUFFIX, _SUFFIX_BY_MARKET
 
 POLICY_VERSION: str = "2026.04.30.1"
 
@@ -169,7 +162,7 @@ def _try_symbol_passthrough(
 ) -> Optional[AliasResolution]:
     """Input already carries a known SecurityMaster suffix."""
     upper = normalized.upper()
-    for suffix, market in _MARKET_BY_SUFFIX:
+    for suffix, market in market_symbol_suffix_registry.suffix_market_pairs():
         if market not in SUPPORTED_MARKETS:
             continue
         if not upper.endswith(suffix):
@@ -207,7 +200,9 @@ def _try_symbol_normalized(
     market = hint_market.strip().upper()
     if market not in SUPPORTED_MARKETS:
         return None
-    suffix = _SUFFIX_BY_MARKET[market]
+    suffix = market_symbol_suffix_registry.suffix_for(market)
+    if suffix is None:
+        return None
     if market == "HK":
         if not _LOCAL_CODE_RE_HK_NORMALIZED.match(normalized):
             return None

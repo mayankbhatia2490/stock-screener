@@ -1,13 +1,21 @@
 import { TEST_SYMBOLS, UNIVERSE_GEOGRAPHIC_MARKETS } from './constants';
 
+function findRuntimeScopeOption(market, scope, universeSelections) {
+  return universeSelections?.scopesByMarket?.[market]?.find((option) => option.value === scope) ?? null;
+}
+
 // Build a typed universe_def payload from the two-step picker state.
 // Returns null when the selection is incomplete (caller should disable submit).
-export function buildUniverseDef(market, scope) {
+export function buildUniverseDef(market, scope, universeSelections = null) {
   if (market === 'TEST') {
     return { type: 'test', symbols: TEST_SYMBOLS };
   }
   if (!market || !scope) {
     return null;
+  }
+  const runtimeOption = findRuntimeScopeOption(market, scope, universeSelections);
+  if (runtimeOption?.universe_def) {
+    return runtimeOption.universe_def;
   }
   if (scope === 'market') {
     return { type: 'market', market };
@@ -23,7 +31,7 @@ export function buildUniverseDef(market, scope) {
 
 // Count of stocks matching a (market, scope) selection, derived from the
 // universeStats bootstrap payload. Returns null when data isn't available yet.
-export function getSelectionCount(market, scope, universeStats) {
+export function getSelectionCount(market, scope, universeStats, universeDef = null) {
   if (!universeStats) {
     return null;
   }
@@ -32,6 +40,18 @@ export function getSelectionCount(market, scope, universeStats) {
   }
   if (!market || !scope) {
     return null;
+  }
+  if (universeDef?.type === 'market') {
+    if (universeDef.listing_tier) {
+      return null;
+    }
+    if (universeDef.mic) {
+      return universeStats.by_exchange?.[universeDef.mic] ?? null;
+    }
+    return universeStats.by_market?.[universeDef.market]?.counts?.active ?? null;
+  }
+  if (universeDef?.type === 'index') {
+    return universeDef.index === 'SP500' ? universeStats.sp500 ?? null : null;
   }
   if (scope === 'market') {
     return universeStats.by_market?.[market]?.counts?.active ?? null;

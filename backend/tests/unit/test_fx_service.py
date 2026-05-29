@@ -7,6 +7,7 @@ that fundamentals storage consumes.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,12 +19,17 @@ from app.services.fx_service import (
     MARKET_CURRENCY_MAP,
     SUPPORTED_CURRENCIES,
     currency_for_market,
+    default_currency_for_market,
 )
 
 
 # --- currency_for_market ---------------------------------------------------
 
 class TestCurrencyForMarket:
+    def test_default_currency_for_market_is_explicit_fallback_name(self):
+        assert default_currency_for_market("US") == "USD"
+        assert default_currency_for_market("HK") == "HKD"
+
     def test_known_markets(self):
         assert currency_for_market("US") == "USD"
         assert currency_for_market("HK") == "HKD"
@@ -46,12 +52,21 @@ class TestCurrencyForMarket:
         assert currency_for_market("XX") == "USD"
 
     def test_supported_set_matches_map(self):
-        assert SUPPORTED_CURRENCIES == frozenset(MARKET_CURRENCY_MAP.values())
+        from app.domain.markets.catalog import get_market_catalog
+
+        catalog = get_market_catalog()
+        expected = frozenset(
+            currency
+            for market in catalog.supported_market_codes()
+            for currency in catalog.get(market).supported_currencies
+        )
+
+        assert SUPPORTED_CURRENCIES == expected
 
     def test_agrees_with_security_master_defaults(self):
-        """Drift guard: fx_service.MARKET_CURRENCY_MAP mirrors
-        security_master_service._MARKET_DEFAULTS. If a new market is added
-        to one, CI must fail until the other catches up.
+        """Fallback defaults mirror SecurityMaster's boot-time defaults.
+
+        Row-level FX must use StockUniverse.currency instead of this map.
         """
         from app.services import security_master_service as sm
         for market, currency in MARKET_CURRENCY_MAP.items():
@@ -61,6 +76,25 @@ class TestCurrencyForMarket:
                 f"security_master says {sm_currency!r}."
             )
         assert set(MARKET_CURRENCY_MAP.keys()) == set(sm._MARKET_DEFAULTS.keys())
+
+    def test_default_currency_map_comes_from_market_catalog(self):
+        from app.domain.markets.catalog import get_market_catalog
+
+        catalog = get_market_catalog()
+        assert MARKET_CURRENCY_MAP == {
+            market: catalog.get(market).default_currency
+            for market in catalog.supported_market_codes()
+        }
+
+    def test_market_currency_fallback_is_not_used_by_fundamentals_cache_service(self):
+        service_source = (
+            Path(__file__).resolve().parents[2]
+            / "app"
+            / "services"
+            / "fundamentals_cache_service.py"
+        ).read_text()
+
+        assert "currency_for_market" not in service_source
 
 
 # --- FXQuote ---------------------------------------------------------------

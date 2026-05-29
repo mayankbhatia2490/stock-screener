@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.domain.providers.data_plan import DATASET_FUNDAMENTALS, PLAN_VERSION
 from app.services.data_source_service import DataSourceService
 
 
@@ -73,8 +74,28 @@ class TestGetFundamentalsPolicyGate:
         svc.yfinance_service.get_fundamentals.assert_called_once_with("0700.HK")
         assert result is not None
         assert result["data_source"] == "yfinance"
+        assert result["provider_data_plan"] == {
+            "version": PLAN_VERSION,
+            "dataset": DATASET_FUNDAMENTALS,
+            "market": market,
+            "mic": None,
+            "providers": ["yfinance"],
+        }
         assert svc.metrics["finviz_skipped_by_policy"] == 1
         assert svc.metrics["finviz_success"] == 0
+
+    def test_fundamentals_plan_controls_fallback_order(self):
+        svc = _make_service(finviz_return=None, yfinance_return={"market_cap": 1_000})
+        result = svc.get_fundamentals("AAPL", market="US")
+
+        svc.finviz_service.get_fundamentals.assert_called_once_with("AAPL")
+        svc.yfinance_service.get_fundamentals.assert_called_once_with("AAPL")
+        assert result["data_source"] == "yfinance"
+        assert result["provider_data_plan"]["providers"] == [
+            "finviz",
+            "yfinance",
+            "alphavantage",
+        ]
 
     def test_korea_market_uses_native_fundamental_providers_before_yfinance(self):
         krx = MagicMock()
@@ -92,6 +113,7 @@ class TestGetFundamentalsPolicyGate:
         assert opendart.calls == ["005930"]
         svc.yfinance_service.get_fundamentals.assert_called_once_with("005930.KS")
         assert result["data_source"] == "krx+opendart+yfinance"
+        assert result["provider_data_plan"]["providers"] == ["krx", "opendart", "yfinance"]
         assert result["market"] == "KR"
         assert result["currency"] == "KRW"
 
@@ -109,6 +131,24 @@ class TestGetFundamentalsPolicyGate:
         assert result["data_source"] == "akshare+cn_statement"
         assert result["market"] == "CN"
         assert result["currency"] == "CNY"
+
+    def test_china_bjse_plan_disables_yfinance_fallback_by_mic(self):
+        cn = MagicMock()
+        cn.core_fundamentals.return_value = {"market_cap": 1_000}
+        cn.statement_fundamentals.return_value = {"revenue_current": 10_000}
+        svc = _make_service(cn_market_data_service=cn)
+
+        result = svc.get_fundamentals("920118.BJ", market="CN")
+
+        svc.yfinance_service.get_fundamentals.assert_not_called()
+        assert result["yfinance_status"] == "disabled_for_beijing"
+        assert result["provider_data_plan"] == {
+            "version": PLAN_VERSION,
+            "dataset": DATASET_FUNDAMENTALS,
+            "market": "CN",
+            "mic": "XBSE",
+            "providers": ["akshare", "baostock"],
+        }
 
     def test_korea_market_respects_disabled_yfinance_fallback(self):
         krx = MagicMock()

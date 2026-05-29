@@ -613,22 +613,17 @@ def _create_auto_scan_for_published_run(
                 if feature_run.stats and feature_run.stats.passed_symbols is not None
                 else 0
             )
+            universe_projection = universe_def.storage_projection()
             scan = uow.scans.create(
                 scan_id=str(uuid4()),
                 criteria=criteria or {},
-                universe=universe_def.label(),
-                universe_key=universe_def.key(),
-                universe_type=universe_def.type.value,
-                universe_market=(
-                    universe_def.market.value if getattr(universe_def, "market", None) else None
-                ),
-                universe_exchange=(
-                    universe_def.exchange.value if universe_def.exchange else None
-                ),
-                universe_index=(
-                    universe_def.index.value if universe_def.index else None
-                ),
-                universe_symbols=universe_def.symbols,
+                universe=universe_projection.label,
+                universe_key=universe_projection.key,
+                universe_type=universe_projection.type,
+                universe_market=universe_projection.market,
+                universe_exchange=universe_projection.exchange,
+                universe_index=universe_projection.index,
+                universe_symbols=universe_projection.symbols,
                 screener_types=screeners,
                 composite_method=composite_method,
                 total_stocks=run_universe_count or len(symbols),

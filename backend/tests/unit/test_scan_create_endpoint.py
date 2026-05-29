@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 from app.main import app
 from app.api.v1.scans import _resolve_scan_guard_market
-from app.domain.markets import market_registry
+from app.domain.markets import market_registry, mic_alias_registry
 from app.schemas.universe import Exchange, Market, UniverseDefinition, UniverseType
 from app.services import server_auth
 from app.wiring.bootstrap import get_create_scan_use_case, get_uow
@@ -63,17 +63,25 @@ class _ConflictCreateScanUseCase(_FakeCreateScanUseCase):
         )
 
 
-def test_scan_guard_resolves_beijing_and_bombay_exchange_codes_distinctly():
+def test_scan_guard_requires_market_context_for_ambiguous_bse_alias():
     cn_universe = UniverseDefinition(type=UniverseType.EXCHANGE, market=Market.CN, exchange=Exchange.BJSE)
-    legacy_bombay = SimpleNamespace(market=None, exchange=SimpleNamespace(value="BSE"), index=None)
+    legacy_bse = SimpleNamespace(market=None, exchange=SimpleNamespace(value="BSE"), index=None)
+    scoped_bombay = SimpleNamespace(
+        market=SimpleNamespace(value="IN"),
+        exchange=SimpleNamespace(value="BSE"),
+        index=None,
+    )
 
     assert _resolve_scan_guard_market(cn_universe) == "CN"
-    assert _resolve_scan_guard_market(legacy_bombay) == "IN"
+    assert _resolve_scan_guard_market(scoped_bombay) == "IN"
+    assert _resolve_scan_guard_market(legacy_bse) is None
 
 
 def test_scan_guard_resolves_registry_exchanges_and_indexes():
     for profile in market_registry.profiles():
         for exchange in profile.exchanges:
+            if mic_alias_registry.is_ambiguous(exchange):
+                continue
             universe = SimpleNamespace(market=None, exchange=SimpleNamespace(value=exchange), index=None)
             assert _resolve_scan_guard_market(universe) == profile.market.code
 
@@ -225,8 +233,10 @@ async def test_create_scan_accepts_market_universe_def(client):
     assert payload["universe_def"] == {
         "type": "market",
         "market": "HK",
+        "mic": None,
         "exchange": None,
         "index": None,
+        "listing_tier": None,
         "symbols": None,
         "allow_inactive_symbols": False,
     }

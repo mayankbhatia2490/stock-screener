@@ -2,6 +2,9 @@
 import pytest
 from pydantic import ValidationError
 
+from app.domain.markets.catalog import get_market_catalog
+from app.domain.universe import listing_tier_registry
+from app.domain.universe.indexes import index_registry
 from app.schemas.universe import (
     Exchange,
     IndexName,
@@ -13,6 +16,12 @@ from app.schemas.universe import (
 
 class TestUniverseDefinitionConstruction:
     """Test valid construction for each UniverseType."""
+
+    def test_market_values_come_from_market_catalog(self):
+        assert [market.value for market in Market] == get_market_catalog().supported_market_codes()
+
+    def test_index_values_come_from_index_registry(self):
+        assert [index.value for index in IndexName] == list(index_registry.supported_index_keys())
 
     def test_all_universe(self):
         u = UniverseDefinition(type=UniverseType.ALL)
@@ -84,6 +93,48 @@ class TestUniverseDefinitionConstruction:
         assert u.type == UniverseType.INDEX
         assert u.index == IndexName.SP500
 
+    def test_market_universe_can_target_canonical_mic(self):
+        u = UniverseDefinition(type=UniverseType.MARKET, market=Market.CN, mic="XBSE")
+
+        assert u.type == UniverseType.MARKET
+        assert u.market == Market.CN
+        assert u.mic == "XBSE"
+        assert u.key() == "market:CN:mic:XBSE"
+
+    def test_market_universe_resolves_legacy_exchange_alias_to_mic(self):
+        u = UniverseDefinition(type=UniverseType.MARKET, market=Market.IN, exchange="BSE")
+
+        assert u.exchange == Exchange.BSE
+        assert u.mic == "XBOM"
+        assert u.key() == "market:IN:mic:XBOM"
+
+    def test_market_universe_storage_projection_uses_canonical_mic(self):
+        u = UniverseDefinition(type=UniverseType.MARKET, market=Market.IN, exchange="BSE")
+
+        projection = u.storage_projection()
+
+        assert projection.label == "India Market"
+        assert projection.key == "market:IN:mic:XBOM"
+        assert projection.type == "market"
+        assert projection.market == "IN"
+        assert projection.exchange == "XBOM"
+        assert projection.index is None
+        assert projection.symbols is None
+
+    def test_market_universe_can_filter_by_listing_tier(self):
+        u = UniverseDefinition(
+            type=UniverseType.MARKET,
+            market=Market.HK,
+            listing_tier="Main Board",
+        )
+
+        assert u.listing_tier == "main_board"
+        assert u.key() == "market:HK:tier:main_board"
+        assert any(
+            definition.key == "main_board"
+            for definition in listing_tier_registry.definitions("HK")
+        )
+
     def test_custom_universe(self):
         u = UniverseDefinition(type=UniverseType.CUSTOM, symbols=["AAPL", "MSFT"])
         assert u.type == UniverseType.CUSTOM
@@ -122,12 +173,33 @@ class TestUniverseDefinitionValidation:
         with pytest.raises(ValidationError, match="requires 'market' field"):
             UniverseDefinition(type=UniverseType.MARKET)
 
-    def test_market_with_exchange_raises(self):
-        with pytest.raises(ValidationError, match="must not specify exchange"):
+    def test_market_with_exchange_alias_outside_market_raises(self):
+        with pytest.raises(ValidationError, match="Unsupported exchange alias"):
             UniverseDefinition(
                 type=UniverseType.MARKET,
                 market=Market.HK,
                 exchange=Exchange.NYSE,
+            )
+
+    def test_market_with_conflicting_mic_and_exchange_raises(self):
+        with pytest.raises(ValidationError, match="conflicts with exchange"):
+            UniverseDefinition(
+                type=UniverseType.MARKET,
+                market=Market.CN,
+                mic="XBSE",
+                exchange=Exchange.SSE,
+            )
+
+    def test_exchange_without_market_rejects_ambiguous_alias(self):
+        with pytest.raises(ValidationError, match="requires market context"):
+            UniverseDefinition(type=UniverseType.EXCHANGE, exchange=Exchange.BSE)
+
+    def test_listing_tier_without_market_support_raises(self):
+        with pytest.raises(ValidationError, match="Unsupported listing_tier"):
+            UniverseDefinition(
+                type=UniverseType.MARKET,
+                market=Market.US,
+                listing_tier="Main Board",
             )
 
     def test_exchange_with_index_raises(self):
@@ -199,6 +271,14 @@ class TestKey:
 
     def test_all_key(self):
         assert UniverseDefinition(type=UniverseType.ALL).key() == "all"
+
+    def test_all_key_stays_global(self):
+        u = UniverseDefinition(type=UniverseType.ALL)
+
+        assert u.market is None
+        assert u.exchange is None
+        assert u.mic is None
+        assert u.key() == "all"
 
     def test_exchange_key(self):
         u = UniverseDefinition(type=UniverseType.EXCHANGE, exchange=Exchange.NYSE)

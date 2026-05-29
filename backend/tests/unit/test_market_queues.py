@@ -1,8 +1,13 @@
 """Unit tests for per-market queue helpers (bead StockScreenClaude-asia.9.1)."""
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
+from app.domain.markets.catalog import get_market_catalog
 from app.domain.markets.registry import market_registry
 from app.tasks.market_queues import (
     MARKET_JOBS_BASE,
@@ -25,6 +30,24 @@ from app.tasks.market_queues import (
 
 def test_supported_markets_match_market_registry_runtime_order():
     assert SUPPORTED_MARKETS == market_registry.supported_market_codes()
+
+
+def test_supported_markets_are_derived_directly_from_market_catalog():
+    assert SUPPORTED_MARKETS == tuple(get_market_catalog().supported_market_codes())
+
+
+def test_market_queue_import_does_not_construct_market_registry():
+    script = """
+import sys
+import app.tasks.market_queues
+assert "app.domain.markets.registry" not in sys.modules
+assert "app.domain.markets.symbol_suffixes" not in sys.modules
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        cwd=Path(__file__).resolve().parents[2],
+    )
 
 
 class TestNormalizeMarket:

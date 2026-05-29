@@ -40,6 +40,33 @@ describe('buildUniverseDef', () => {
     });
     expect(buildUniverseDef('US', 'index:SP500')).toEqual({ type: 'index', index: 'SP500' });
   });
+
+  it('returns the backend-provided universe definition for runtime option scopes', () => {
+    const universeSelections = {
+      scopesByMarket: {
+        HK: [
+          {
+            value: 'market:HK:mic:XHKG:tier:main_board',
+            universe_def: {
+              type: 'market',
+              market: 'HK',
+              mic: 'XHKG',
+              listing_tier: 'main_board',
+            },
+          },
+        ],
+      },
+    };
+
+    expect(
+      buildUniverseDef('HK', 'market:HK:mic:XHKG:tier:main_board', universeSelections)
+    ).toEqual({
+      type: 'market',
+      market: 'HK',
+      mic: 'XHKG',
+      listing_tier: 'main_board',
+    });
+  });
 });
 
 describe('getSelectionCount', () => {

@@ -78,6 +78,51 @@ class TestResolveSymbols:
         )
 
     @patch("app.services.universe_resolver.get_stock_universe_service")
+    def test_market_with_mic_passes_canonical_exchange_param(self, mock_service, mock_db):
+        mock_service.return_value.get_active_symbols.return_value = ["920118.BJ"]
+
+        u = UniverseDefinition(type=UniverseType.MARKET, market=Market.CN, mic="XBSE")
+        result = resolve_symbols(mock_db, u)
+
+        assert result == ["920118.BJ"]
+        mock_service.return_value.get_active_symbols.assert_called_once_with(
+            mock_db, market="CN", exchange="XBSE", sp500_only=False, limit=None
+        )
+
+    @patch("app.services.universe_resolver.get_stock_universe_service")
+    def test_market_with_legacy_exchange_alias_passes_resolved_mic(self, mock_service, mock_db):
+        mock_service.return_value.get_active_symbols.return_value = ["500325.BO"]
+
+        u = UniverseDefinition(type=UniverseType.MARKET, market=Market.IN, exchange="BSE")
+        result = resolve_symbols(mock_db, u)
+
+        assert result == ["500325.BO"]
+        mock_service.return_value.get_active_symbols.assert_called_once_with(
+            mock_db, market="IN", exchange="XBOM", sp500_only=False, limit=None
+        )
+
+    @patch("app.services.universe_resolver.get_stock_universe_service")
+    def test_market_with_listing_tier_passes_listing_tier_filter(self, mock_service, mock_db):
+        mock_service.return_value.get_active_symbols.return_value = ["0800.HK"]
+
+        u = UniverseDefinition(
+            type=UniverseType.MARKET,
+            market=Market.HK,
+            listing_tier="GEM",
+        )
+        result = resolve_symbols(mock_db, u)
+
+        assert result == ["0800.HK"]
+        mock_service.return_value.get_active_symbols.assert_called_once_with(
+            mock_db,
+            market="HK",
+            exchange=None,
+            sp500_only=False,
+            limit=None,
+            listing_tier="gem",
+        )
+
+    @patch("app.services.universe_resolver.get_stock_universe_service")
     def test_exchange_passes_exchange_param(self, mock_service, mock_db):
         mock_service.return_value.get_active_symbols.return_value = ["IBM", "GE"]
 

@@ -33,36 +33,17 @@ import { DEFAULT_FILTER_KEY } from '../constants';
 import ScanControlBar from '../components/ScanControlBar';
 import ScanResultsSection from '../components/ScanResultsSection';
 import { useScanFilterPresets } from '../hooks/useScanFilterPresets';
-import { buildUniverseDef, parseLegacyUniverseDefault } from '../universeSelection';
+import {
+  buildUniverseDef,
+  parseLegacyUniverseDefault,
+} from '../universeSelection';
+import {
+  buildRuntimeUniverseSelections,
+  getMarketScanBlocker,
+  resolveUniverseScopeValue,
+} from '../runtimeUniverseSelections';
 
 const INITIAL_UNIVERSE_SELECTION = parseLegacyUniverseDefault(DEFAULT_SCAN_DEFAULTS.universe);
-const SCAN_BLOCKING_ACTIVITY_STAGES = new Set(['prices', 'fundamentals']);
-const SCAN_BLOCKING_ACTIVITY_STATUSES = new Set(['queued', 'running']);
-
-function buildRefreshConflict(activity, market) {
-  if (!market || market === 'TEST') {
-    return null;
-  }
-
-  const marketActivity = (activity?.markets ?? []).find((item) => (
-    item?.market === market
-    && SCAN_BLOCKING_ACTIVITY_STAGES.has(item.stage_key)
-    && SCAN_BLOCKING_ACTIVITY_STATUSES.has(item.status)
-  ));
-  if (!marketActivity) {
-    return null;
-  }
-
-  const stageLabel = (marketActivity.stage_label || marketActivity.stage_key || 'refresh').toLowerCase();
-  const statusLabel = marketActivity.status === 'queued' ? 'queued' : 'running';
-  return {
-    market,
-    stageKey: marketActivity.stage_key,
-    status: marketActivity.status,
-    lifecycle: marketActivity.lifecycle ?? null,
-    message: `${market} ${stageLabel} is ${statusLabel}. Wait for it to finish before starting a scan.`,
-  };
-}
 
 function getMutationErrorMessage(error) {
   if (!error) {
@@ -80,7 +61,7 @@ function getMutationErrorDetail(error) {
 }
 
 function ScanPage() {
-  const { runtimeReady, uiSnapshots, scanDefaults } = useRuntime();
+  const { runtimeReady, uiSnapshots, scanDefaults, universeOptions } = useRuntime();
   const { activeProfileDetail } = useStrategyProfile();
   const scanDefaultsAppliedRef = useRef(null);
   const hasAutoLoadedScanRef = useRef(false);
@@ -110,6 +91,10 @@ function ScanPage() {
   const snapshotEnabled = runtimeReady && Boolean(uiSnapshots?.scan);
   const initialQueriesEnabled = runtimeReady && (!snapshotEnabled || initialBootstrapSettled);
   const runtimeActivityQuery = useRuntimeActivity({ enabled: runtimeReady });
+  const universeSelections = useMemo(
+    () => buildRuntimeUniverseSelections(universeOptions, runtimeActivityQuery.data),
+    [runtimeActivityQuery.data, universeOptions]
+  );
 
   useEffect(() => {
     if (!runtimeReady) {
@@ -123,13 +108,23 @@ function ScanPage() {
 
     const parsed = parseLegacyUniverseDefault(nextDefaults.universe ?? DEFAULT_SCAN_DEFAULTS.universe);
     setUniverseMarket(parsed.market);
-    setUniverseScope(parsed.scope);
+    setUniverseScope(resolveUniverseScopeValue(parsed.market, parsed.scope, universeSelections));
     setIncludeVcp(nextDefaults.criteria?.include_vcp ?? DEFAULT_SCAN_DEFAULTS.criteria.include_vcp);
     setSelectedScreeners(nextDefaults.screeners ?? DEFAULT_SCAN_DEFAULTS.screeners);
     setCompositeMethod(nextDefaults.composite_method ?? DEFAULT_SCAN_DEFAULTS.composite_method);
     setCustomFilters(nextDefaults.criteria?.custom_filters ?? DEFAULT_SCAN_DEFAULTS.criteria.custom_filters);
     scanDefaultsAppliedRef.current = profileKey;
-  }, [activeProfileDetail, runtimeReady, scanDefaults]);
+  }, [activeProfileDetail, runtimeReady, scanDefaults, universeSelections]);
+
+  useEffect(() => {
+    if (!universeMarket || !universeScope) {
+      return;
+    }
+    const resolvedScope = resolveUniverseScopeValue(universeMarket, universeScope, universeSelections);
+    if (resolvedScope !== universeScope) {
+      setUniverseScope(resolvedScope);
+    }
+  }, [universeMarket, universeScope, universeSelections]);
 
   const applyScanBootstrapSnapshot = useCallback(
     (snapshot, requestedScanId = null) => {
@@ -386,7 +381,7 @@ function ScanPage() {
     [filterOptionsData]
   );
   const refreshConflict = useMemo(
-    () => buildRefreshConflict(runtimeActivityQuery.data, universeMarket),
+    () => getMarketScanBlocker(runtimeActivityQuery.data, universeMarket),
     [runtimeActivityQuery.data, universeMarket]
   );
   const createScanError = useMemo(() => {
@@ -399,7 +394,7 @@ function ScanPage() {
     if (refreshConflict) {
       return;
     }
-    const universeDef = buildUniverseDef(universeMarket, universeScope);
+    const universeDef = buildUniverseDef(universeMarket, universeScope, universeSelections);
     if (!universeDef) {
       return;
     }
@@ -578,6 +573,7 @@ function ScanPage() {
         onUniverseMarketChange={handleUniverseMarketChange}
         onUniverseScopeChange={setUniverseScope}
         universeStats={universeStats}
+        universeSelections={universeSelections}
         statsLoading={statsLoading}
         selectedScreeners={selectedScreeners}
         onScreenerToggle={handleScreenerToggle}

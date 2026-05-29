@@ -6,11 +6,16 @@ attaches the reproducible fx_metadata snapshot.
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.models.stock import StockFundamental
+from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
 from app.services.fundamentals_cache_service import FundamentalsCacheService
 from app.services.fx_service import FXService
 
@@ -32,6 +37,12 @@ def _dummy_session():
     return fake
 
 
+def _make_sqlite_session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
 @pytest.fixture
 def captured_record():
     captured = {"added_record": None}
@@ -47,6 +58,150 @@ def captured_record():
 
 
 class TestEnrichmentComputesUSDColumns:
+    def test_fetch_and_cache_uses_universe_currency_when_provider_payload_omits_currency(
+        self,
+        monkeypatch,
+    ):
+        import app.wiring.bootstrap as bootstrap_module
+
+        session_factory = _make_sqlite_session_factory()
+        db = session_factory()
+        db.add(
+            StockUniverse(
+                symbol="0700.HK",
+                market="HK",
+                exchange="XHKG",
+                currency="HKD",
+                timezone="Asia/Hong_Kong",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+            )
+        )
+        db.commit()
+        db.close()
+
+        fx = _make_fx({"HKD": 0.128})
+        service = FundamentalsCacheService(
+            redis_client=None,
+            session_factory=session_factory,
+            fx_service=fx,
+        )
+        monkeypatch.setattr(service, "record_on_demand_fallback", lambda: None)
+        monkeypatch.setattr(
+            bootstrap_module,
+            "get_data_source_service",
+            lambda: SimpleNamespace(
+                get_fundamentals=lambda symbol, market=None: {
+                    "market_cap": 1_000_000_000,
+                    "shares_outstanding": 10_000_000,
+                    "avg_volume": 500_000,
+                    "data_source": "yfinance",
+                }
+            ),
+        )
+
+        result = service._fetch_and_cache("0700.HK", market="HK")
+
+        assert result is not None
+        assert result["market_cap_usd"] == 128_000_000
+        assert result["adv_usd"] == 6_400_000
+        assert result["fx_metadata"]["from_currency"] == "HKD"
+
+    def test_bulk_database_fallback_preserves_persisted_fx_snapshot(self):
+        session_factory = _make_sqlite_session_factory()
+        db = session_factory()
+        db.add(
+            StockUniverse(
+                symbol="0700.HK",
+                market="HK",
+                exchange="XHKG",
+                currency="HKD",
+                timezone="Asia/Hong_Kong",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+            )
+        )
+        db.add(
+            StockFundamental(
+                symbol="0700.HK",
+                market_cap=1_000_000_000,
+                shares_outstanding=10_000_000,
+                avg_volume=500_000,
+                market_cap_usd=128_000_000,
+                adv_usd=6_400_000,
+                fx_metadata={
+                    "from_currency": "HKD",
+                    "to_currency": "USD",
+                    "rate": 0.128,
+                    "as_of_date": "2026-04-12",
+                    "source": "persisted",
+                },
+            )
+        )
+        db.commit()
+        db.close()
+
+        service = FundamentalsCacheService(
+            redis_client=None,
+            session_factory=session_factory,
+            fx_service=_make_fx({"HKD": 0.2}),
+        )
+
+        result = service.get_many(["0700.HK"], market="HK")["0700.HK"]
+
+        assert result["market_cap_usd"] == 128_000_000
+        assert result["adv_usd"] == 6_400_000
+        assert result["fx_metadata"]["rate"] == 0.128
+
+    def test_row_currency_wins_over_market_default(self, captured_record):
+        fake_db, captured = captured_record
+        fx = _make_fx({"NOK": 0.095, "EUR": 1.08})
+        service = FundamentalsCacheService(
+            redis_client=None,
+            session_factory=lambda: fake_db,
+            fx_service=fx,
+        )
+        payload = {
+            "currency": "NOK",
+            "market_cap": 1_000_000_000,
+            "shares_outstanding": 10_000_000,
+            "avg_volume": 500_000,
+        }
+
+        service._enrich_with_fx_normalization(payload, currency="NOK", market="DE")
+        service._store_in_database("OSLO.TEST", payload, data_source="yfinance", market="DE")
+
+        rec = captured["added_record"]
+        assert rec.market_cap_usd == 95_000_000
+        assert rec.adv_usd == 4_750_000
+        assert rec.fx_metadata["from_currency"] == "NOK"
+
+    def test_missing_row_currency_fails_closed_without_market_default(self):
+        fx = _make_fx({"HKD": 0.128})
+        service = FundamentalsCacheService(
+            redis_client=None,
+            session_factory=lambda: _dummy_session(),
+            fx_service=fx,
+        )
+        payload = {
+            "market_cap": 1_000_000_000,
+            "shares_outstanding": 10_000_000,
+            "avg_volume": 500_000,
+        }
+
+        service._enrich_with_fx_normalization(payload, currency=None, market="HK")
+
+        assert payload["market_cap_usd"] is None
+        assert payload["adv_usd"] is None
+        assert payload["fx_metadata"] == {
+            "from_currency": None,
+            "to_currency": "USD",
+            "rate": None,
+            "as_of_date": None,
+            "source": "missing_currency",
+            "market": "HK",
+        }
+
     def test_hk_payload_normalises_market_cap_and_adv(self, captured_record):
         fake_db, captured = captured_record
         fx = _make_fx({"HKD": 0.128})
@@ -62,7 +217,7 @@ class TestEnrichmentComputesUSDColumns:
             "avg_volume": 500_000,
         }
         # The public write path computes FX; drive it end-to-end.
-        service._enrich_with_fx_normalization(payload, market="HK")
+        service._enrich_with_fx_normalization(payload, currency="HKD", market="HK")
         service._store_in_database("0700.HK", payload, data_source="yfinance", market="HK")
 
         rec = captured["added_record"]
@@ -93,7 +248,7 @@ class TestEnrichmentComputesUSDColumns:
             "shares_outstanding": 100_000_000,
             "avg_volume": 2_000_000,
         }
-        service._enrich_with_fx_normalization(payload, market="US")
+        service._enrich_with_fx_normalization(payload, currency="USD", market="US")
         service._store_in_database("AAPL", payload, data_source="yfinance", market="US")
 
         rec = captured["added_record"]
@@ -117,7 +272,7 @@ class TestEnrichmentComputesUSDColumns:
             "shares_outstanding": 10_000_000,
             "avg_volume": 500_000,
         }
-        service._enrich_with_fx_normalization(payload, market="HK")
+        service._enrich_with_fx_normalization(payload, currency="HKD", market="HK")
         service._store_in_database("0700.HK", payload, data_source="yfinance", market="HK")
 
         rec = captured["added_record"]
@@ -142,7 +297,7 @@ class TestEnrichmentComputesUSDColumns:
             "shares_outstanding": None,
             "avg_volume": 500_000,
         }
-        service._enrich_with_fx_normalization(payload, market="HK")
+        service._enrich_with_fx_normalization(payload, currency="HKD", market="HK")
         service._store_in_database("0700.HK", payload, data_source="yfinance", market="HK")
 
         rec = captured["added_record"]

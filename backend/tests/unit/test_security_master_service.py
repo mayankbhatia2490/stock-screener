@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.security_master_service import SecurityMasterResolver
 from app.domain.markets.registry import market_registry
 
@@ -100,10 +102,11 @@ def test_resolve_identity_defaults_india_market_to_nse_suffix():
 def test_resolve_identity_uses_bse_suffix_for_explicit_bse_exchange():
     resolver = SecurityMasterResolver()
 
-    identity = resolver.resolve_identity(symbol="500325", exchange="xbom")
+    identity = resolver.resolve_identity(symbol="500325", market="IN", exchange="bse")
 
     assert identity.market == "IN"
-    assert identity.exchange == "XBOM"
+    assert identity.exchange == "BSE"
+    assert identity.mic == "XBOM"
     assert identity.currency == "INR"
     assert identity.timezone == "Asia/Kolkata"
     assert identity.canonical_symbol == "500325.BO"
@@ -141,19 +144,57 @@ def test_resolve_identity_uses_china_suffixes_by_exchange():
     sse = resolver.resolve_identity(symbol="600519", exchange="xshg")
     szse = resolver.resolve_identity(symbol="000001.SS", exchange="szse")
     bjse = resolver.resolve_identity(symbol="920118", market="cn", exchange="bjse")
-    india_bse = resolver.resolve_identity(symbol="500325", exchange="bse")
+    china_bse = resolver.resolve_identity(symbol="920118", market="cn", exchange="bse")
 
     assert sse.market == "CN"
+    assert sse.mic == "XSHG"
     assert sse.currency == "CNY"
     assert sse.timezone == "Asia/Shanghai"
     assert sse.canonical_symbol == "600519.SS"
     assert szse.market == "CN"
+    assert szse.mic == "XSHE"
     assert szse.canonical_symbol == "000001.SZ"
     assert bjse.market == "CN"
     assert bjse.exchange == "BJSE"
+    assert bjse.mic == "XBSE"
     assert bjse.canonical_symbol == "920118.BJ"
-    assert india_bse.market == "IN"
-    assert india_bse.canonical_symbol == "500325.BO"
+    assert china_bse.market == "CN"
+    assert china_bse.exchange == "BSE"
+    assert china_bse.mic == "XBSE"
+    assert china_bse.canonical_symbol == "920118.BJ"
+
+
+def test_resolve_identity_infers_china_mic_from_suffix_without_exchange():
+    resolver = SecurityMasterResolver()
+
+    sse = resolver.resolve_identity(symbol="600519.SS")
+    szse = resolver.resolve_identity(symbol="000001.SZ")
+    bjse = resolver.resolve_identity(symbol="920118.BJ")
+
+    assert sse.market == "CN"
+    assert sse.mic == "XSHG"
+    assert szse.market == "CN"
+    assert szse.mic == "XSHE"
+    assert bjse.market == "CN"
+    assert bjse.mic == "XBSE"
+
+
+def test_resolve_identity_does_not_infer_market_from_ambiguous_bse_alias() -> None:
+    resolver = SecurityMasterResolver()
+
+    with pytest.raises(ValueError, match="Ambiguous exchange alias 'BSE'"):
+        resolver.resolve_identity(symbol="500325", exchange="bse")
+
+
+def test_resolve_identity_can_disambiguate_bse_alias_from_symbol_suffix() -> None:
+    resolver = SecurityMasterResolver()
+
+    identity = resolver.resolve_identity(symbol="500325.BO", exchange="bse")
+
+    assert identity.market == "IN"
+    assert identity.exchange == "BSE"
+    assert identity.mic == "XBOM"
+    assert identity.canonical_symbol == "500325.BO"
 
 
 def test_resolve_identity_uses_singapore_suffix_by_exchange_and_market():
@@ -171,6 +212,21 @@ def test_resolve_identity_uses_singapore_suffix_by_exchange_and_market():
     assert by_market.canonical_symbol == "A17U.SI"
     assert by_suffix.market == "SG"
     assert by_suffix.canonical_symbol == "C6L.SI"
+
+
+def test_resolve_identity_uses_malaysia_suffix_by_exchange_and_market():
+    resolver = SecurityMasterResolver()
+
+    by_exchange = resolver.resolve_identity(symbol="1155", exchange="KLSE")
+    by_market = resolver.resolve_identity(symbol="1295", market="MY")
+    by_suffix = resolver.resolve_identity(symbol="5347.KL")
+
+    assert by_exchange.market == "MY"
+    assert by_exchange.canonical_symbol == "1155.KL"
+    assert by_exchange.mic == "XKLS"
+    assert by_market.canonical_symbol == "1295.KL"
+    assert by_suffix.market == "MY"
+    assert by_suffix.canonical_symbol == "5347.KL"
 
 
 def test_resolve_identity_uses_canada_and_germany_suffixes_by_exchange():

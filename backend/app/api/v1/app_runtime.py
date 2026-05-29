@@ -24,6 +24,7 @@ from ...services.runtime_preferences_service import (
     get_runtime_bootstrap_status,
     save_runtime_preferences,
 )
+from ...services.runtime_universe_options import build_runtime_universe_options_payload
 from ...services.market_activity_service import get_runtime_activity_status
 from ...tasks.runtime_bootstrap_tasks import queue_local_runtime_bootstrap
 
@@ -65,6 +66,9 @@ async def get_app_capabilities(
         bootstrap_state=bootstrap_status.bootstrap_state,
         supported_markets=market_catalog.supported_market_codes(),
         market_catalog=market_catalog.as_runtime_payload(),
+        universe_options=build_runtime_universe_options_payload(
+            enabled_markets=bootstrap_status.enabled_markets,
+        ),
         auth=AppAuthStatusResponse(**auth.__dict__),
     )
 

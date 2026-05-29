@@ -527,34 +527,19 @@ class BulkDataFetcher:
         """Fetch prices for many symbols using market-aware batch routing.
 
         Background jobs should call this method instead of any per-symbol Yahoo path.
-        Korea uses KRX/pykrx first, then falls back to Yahoo for symbols KRX
-        cannot serve. China uses AKShare/BaoStock first, then falls back to
-        Yahoo only for Shanghai/Shenzhen symbols.
+        Provider order, fallback eligibility, and default batch size come from
+        ``ProviderDataPlanRegistry`` for the ``prices`` dataset.
 
         When ``market`` is supplied, per-market rate budget keys
-        (``yfinance:hk`` / ``yfinance:batch:hk``) and per-market batch sizes
-        from RateBudgetPolicy take effect, so cross-market refreshes don't
-        starve each other of provider tokens.
+        (``yfinance:hk`` / ``yfinance:batch:hk``) and backoff schedules still
+        apply, while the plan supplies the default batch size.
         """
         if not symbols:
             return {}
 
-        if str(market or "").strip().upper() == "KR":
-            return self._fetch_kr_prices_with_yfinance_fallback(
-                symbols,
-                period=period,
-                start_batch_size=start_batch_size,
-                market=market,
-            )
-        if str(market or "").strip().upper() == "CN":
-            return self._fetch_cn_prices_with_yfinance_fallback(
-                symbols,
-                period=period,
-                start_batch_size=start_batch_size,
-                market=market,
-            )
+        from .provider_adapters.price_plan_executor import PriceProviderPlanExecutor
 
-        return self._fetch_yfinance_prices_in_batches(
+        return PriceProviderPlanExecutor(self).fetch(
             symbols,
             period=period,
             start_batch_size=start_batch_size,
@@ -596,51 +581,6 @@ class BulkDataFetcher:
                     f"CN price fetch error: {exc}",
                 )
         return results
-
-    def _fetch_cn_prices_with_yfinance_fallback(
-        self,
-        symbols: List[str],
-        *,
-        period: str,
-        start_batch_size: Optional[int] = None,
-        market: Optional[str] = None,
-    ) -> Dict[str, Dict]:
-        cn_results = self._fetch_cn_price_batch(symbols, period=period)
-        fallback_symbols = [
-            symbol
-            for symbol, payload in cn_results.items()
-            if (
-                payload.get("has_error") or payload.get("price_data") is None
-            ) and not str(symbol or "").upper().endswith(".BJ")
-        ]
-        if not fallback_symbols:
-            return cn_results
-
-        logger.info(
-            "Falling back to Yahoo for %d/%d CN Shanghai/Shenzhen symbols with missing CN prices",
-            len(fallback_symbols),
-            len(symbols),
-        )
-        fallback_results = self._fetch_yfinance_prices_in_batches(
-            fallback_symbols,
-            period=period,
-            start_batch_size=start_batch_size,
-            market=market,
-        )
-        merged = dict(cn_results)
-        for symbol, fallback_payload in fallback_results.items():
-            primary_payload = cn_results.get(symbol, {})
-            enriched_payload = dict(fallback_payload)
-            enriched_payload.setdefault("provider", "yfinance")
-            enriched_payload["fallback_from"] = "akshare_baostock"
-            enriched_payload["primary_provider_failed"] = bool(
-                primary_payload.get("has_error") or primary_payload.get("price_data") is None
-            )
-            primary_error = primary_payload.get("error")
-            if primary_error:
-                enriched_payload["primary_provider_error"] = primary_error
-            merged[symbol] = enriched_payload
-        return merged
 
     def _fetch_yfinance_prices_in_batches(
         self,
@@ -765,49 +705,6 @@ class BulkDataFetcher:
                     f"KRX price fetch error: {exc}",
                 )
         return results
-
-    def _fetch_kr_prices_with_yfinance_fallback(
-        self,
-        symbols: List[str],
-        *,
-        period: str,
-        start_batch_size: Optional[int] = None,
-        market: Optional[str] = None,
-    ) -> Dict[str, Dict]:
-        krx_results = self._fetch_kr_price_batch(symbols, period=period)
-        fallback_symbols = [
-            symbol
-            for symbol, payload in krx_results.items()
-            if payload.get("has_error") or payload.get("price_data") is None
-        ]
-        if not fallback_symbols:
-            return krx_results
-
-        logger.info(
-            "Falling back to Yahoo for %d/%d KR symbols with missing KRX prices",
-            len(fallback_symbols),
-            len(symbols),
-        )
-        fallback_results = self._fetch_yfinance_prices_in_batches(
-            fallback_symbols,
-            period=period,
-            start_batch_size=start_batch_size,
-            market=market,
-        )
-        merged = dict(krx_results)
-        for symbol, fallback_payload in fallback_results.items():
-            primary_payload = krx_results.get(symbol, {})
-            enriched_payload = dict(fallback_payload)
-            enriched_payload.setdefault("provider", "yfinance")
-            enriched_payload["fallback_from"] = "krx"
-            enriched_payload["primary_provider_failed"] = bool(
-                primary_payload.get("has_error") or primary_payload.get("price_data") is None
-            )
-            primary_error = primary_payload.get("error")
-            if primary_error:
-                enriched_payload["primary_provider_error"] = primary_error
-            merged[symbol] = enriched_payload
-        return merged
 
     def _resolve_price_batch_backoff(self, market: Optional[str]) -> tuple[int, ...]:
         """Return the per-attempt sleep schedule for ``_fetch_price_batch_with_retries``.

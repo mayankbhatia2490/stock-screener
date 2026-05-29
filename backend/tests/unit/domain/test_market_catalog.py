@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain.markets import market_registry
+from app.domain.markets import (
+    MarketCapabilities,
+    MarketCatalogEntry,
+    MicFacts,
+    market_registry,
+)
 from app.domain.markets.catalog import MarketCatalogError, get_market_catalog
+from app.domain.universe.indexes import index_registry
 
 
 def test_market_catalog_lists_supported_markets_in_runtime_order() -> None:
@@ -28,6 +34,143 @@ def test_market_catalog_entry_contains_stable_market_facts() -> None:
     assert hk.capabilities.finviz_screening is False
 
 
+def test_market_catalog_index_summaries_derive_from_index_registry() -> None:
+    catalog = get_market_catalog()
+
+    for market in catalog.supported_market_codes():
+        assert catalog.get(market).indexes == tuple(
+            definition.key for definition in index_registry.definitions(market)
+        )
+
+
+def test_market_catalog_filters_market_codes_by_capability_in_runtime_order() -> None:
+    catalog = get_market_catalog()
+
+    assert catalog.market_codes_with_capability("breadth") == (
+        "US",
+        "HK",
+        "IN",
+        "JP",
+        "KR",
+        "TW",
+        "CN",
+        "CA",
+        "DE",
+    )
+    assert catalog.market_codes_with_capability("group_rankings") == (
+        "US",
+        "HK",
+        "IN",
+        "JP",
+        "KR",
+        "TW",
+        "CN",
+        "CA",
+    )
+
+
+def test_market_catalog_rejects_unknown_capability_filter() -> None:
+    catalog = get_market_catalog()
+
+    with pytest.raises(MarketCatalogError, match="Unsupported market capability"):
+        catalog.market_codes_with_capability("not_a_capability")
+
+
+def test_market_catalog_entry_exposes_canonical_mic_and_currency_facts() -> None:
+    catalog = get_market_catalog()
+
+    us = catalog.get("US")
+    india = catalog.get("IN")
+
+    assert us.primary_mic == "XNYS"
+    assert us.mics == ("XNYS", "XNAS", "XASE")
+    assert us.supported_currencies == ("USD",)
+    assert us.default_currency == "USD"
+    assert us.currency == "USD"  # Deprecated compatibility alias.
+    assert us.primary_mic_facts.calendar_id == "XNYS"
+    assert us.primary_mic_facts.timezone == "America/New_York"
+    assert us.primary_mic_facts.default_currency == "USD"
+    assert us.mic_facts_for("XNAS").timezone == "America/New_York"
+
+    assert india.primary_mic == "XNSE"
+    assert india.mics == ("XNSE", "XBOM")
+    assert india.supported_currencies == ("INR",)
+    assert india.primary_mic_facts.provider_calendar_id == "NSE"
+    assert india.mic_facts_for("XBOM").calendar_id == "XBOM"
+
+
+def test_market_catalog_entry_rejects_mic_facts_outside_declared_mics() -> None:
+    with pytest.raises(ValueError, match="MIC facts must match mics"):
+        MarketCatalogEntry(
+            code="XX",
+            label="Example",
+            primary_mic="XAAA",
+            mics=("XAAA",),
+            supported_currencies=("USD",),
+            default_currency="USD",
+            mic_facts=(
+                MicFacts(
+                    mic="XAAA",
+                    calendar_id="XAAA",
+                    timezone="America/New_York",
+                    default_currency="USD",
+                ),
+                MicFacts(
+                    mic="XBBB",
+                    calendar_id="XBBB",
+                    timezone="America/Toronto",
+                    default_currency="USD",
+                ),
+            ),
+            exchanges=("XAAA",),
+            capabilities=MarketCapabilities(
+                benchmark=False,
+                breadth=False,
+                fundamentals=False,
+                group_rankings=False,
+                feature_snapshot=False,
+                official_universe=False,
+                finviz_screening=False,
+            ),
+        )
+
+
+def test_market_catalog_entry_rejects_mic_fact_currency_outside_supported_currencies() -> None:
+    with pytest.raises(ValueError, match="MIC default currencies"):
+        MarketCatalogEntry(
+            code="XX",
+            label="Example",
+            primary_mic="XAAA",
+            mics=("XAAA", "XBBB"),
+            supported_currencies=("USD",),
+            default_currency="USD",
+            mic_facts=(
+                MicFacts(
+                    mic="XAAA",
+                    calendar_id="XAAA",
+                    timezone="America/New_York",
+                    default_currency="USD",
+                ),
+                MicFacts(
+                    mic="XBBB",
+                    calendar_id="XBBB",
+                    timezone="America/Toronto",
+                    default_currency="CAD",
+                ),
+            ),
+            exchanges=("XAAA", "XBBB"),
+            capabilities=MarketCapabilities(
+                benchmark=False,
+                breadth=False,
+                fundamentals=False,
+                group_rankings=False,
+                feature_snapshot=False,
+                official_universe=False,
+                finviz_screening=False,
+            ),
+        )
+
+
 def test_market_catalog_rejects_unknown_market() -> None:
     catalog = get_market_catalog()
 
@@ -45,9 +188,37 @@ def test_market_catalog_runtime_payload_is_frontend_ready() -> None:
     assert payload["markets"][0] == {
         "code": "US",
         "label": "United States",
+        "primary_mic": "XNYS",
+        "mics": ["XNYS", "XNAS", "XASE"],
+        "supported_currencies": ["USD"],
+        "default_currency": "USD",
+        "mic_facts": [
+            {
+                "mic": "XNYS",
+                "calendar_id": "XNYS",
+                "timezone": "America/New_York",
+                "default_currency": "USD",
+                "provider_calendar_id": None,
+            },
+            {
+                "mic": "XNAS",
+                "calendar_id": "XNAS",
+                "timezone": "America/New_York",
+                "default_currency": "USD",
+                "provider_calendar_id": None,
+            },
+            {
+                "mic": "XASE",
+                "calendar_id": "XASE",
+                "timezone": "America/New_York",
+                "default_currency": "USD",
+                "provider_calendar_id": None,
+            },
+        ],
         "currency": "USD",
         "timezone": "America/New_York",
         "calendar_id": "XNYS",
+        "provider_calendar_id": None,
         "exchanges": ["NYSE", "NASDAQ", "AMEX"],
         "indexes": ["SP500"],
         "capabilities": {

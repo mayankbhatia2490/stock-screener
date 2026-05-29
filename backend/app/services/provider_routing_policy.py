@@ -12,7 +12,7 @@ Fundamentals providers have different geographic coverage:
 - ``alphavantage`` : US-only free tier; overseas coverage is paid/limited and
   is not currently wired up in the hot path.
 - ``yfinance``     : Global — supports local-suffix symbols (``.HK``, ``.T``,
-  ``.TW``/``.TWO``, ``.TO``/``.V``) via the canonical symbols produced by
+  ``.TW``/``.TWO``, ``.TO``/``.V``, ``.KL``) via the canonical symbols produced by
   ``SecurityMasterService``.
 - ``krx``          : Korea Exchange data through ``pykrx``.
 - ``opendart``     : Korea FSS OpenDART statement data when configured.
@@ -46,37 +46,42 @@ Callers
 
 Extending the policy
 --------------------
-To add a new market or provider, bump ``POLICY_VERSION`` and update
-``_POLICY_MATRIX``. Keep this module the single source of truth — do NOT
-introduce per-caller routing logic.
+To add a new market or provider, update ``ProviderDataPlanRegistry`` in
+``app.domain.providers.data_plan`` and bump its ``PLAN_VERSION``. This module
+is the compatibility API for older callers; the provider data plan is the
+single source of truth for provider order, fallbacks, and provenance.
 """
 from __future__ import annotations
 
 import logging
-from typing import FrozenSet, Mapping, Tuple
+from typing import FrozenSet, Tuple
+
+from app.domain.markets.market import SUPPORTED_MARKET_CODES
+from app.domain.providers.data_plan import (
+    DATASET_FUNDAMENTALS,
+    PLAN_VERSION,
+    PROVIDER_AKSHARE,
+    PROVIDER_ALPHAVANTAGE,
+    PROVIDER_BAOSTOCK,
+    PROVIDER_FINVIZ,
+    PROVIDER_KRX,
+    PROVIDER_OPENDART,
+    PROVIDER_YFINANCE,
+    provider_data_plan_registry,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # --- Policy version ---------------------------------------------------------
 
-POLICY_VERSION = "2026.05.17.1"
+POLICY_VERSION = PLAN_VERSION
 """Bump (date-stamped) when routing semantics change.
 
 Consumed by audit logs, cache keys, and provenance tags so downstream
 consumers can detect a routing-semantics change and react accordingly.
 """
 
-
-# --- Known providers --------------------------------------------------------
-
-PROVIDER_FINVIZ = "finviz"
-PROVIDER_KRX = "krx"
-PROVIDER_OPENDART = "opendart"
-PROVIDER_YFINANCE = "yfinance"
-PROVIDER_ALPHAVANTAGE = "alphavantage"
-PROVIDER_AKSHARE = "akshare"
-PROVIDER_BAOSTOCK = "baostock"
 
 KNOWN_PROVIDERS: FrozenSet[str] = frozenset(
     {
@@ -105,9 +110,7 @@ MARKET_DE = "DE"
 MARKET_SG = "SG"
 MARKET_MY = "MY"
 
-KNOWN_MARKETS: FrozenSet[str] = frozenset(
-    {MARKET_US, MARKET_HK, MARKET_IN, MARKET_JP, MARKET_KR, MARKET_TW, MARKET_CN, MARKET_CA, MARKET_DE, MARKET_SG, MARKET_MY}
-)
+KNOWN_MARKETS: FrozenSet[str] = SUPPORTED_MARKET_CODES
 
 DEFAULT_MARKET = MARKET_US
 """Market used when the caller's value is ``None``/empty.
@@ -116,48 +119,6 @@ Defaulting to US preserves legacy behaviour for call sites that have not yet
 been threaded with market context — they continue to see the existing
 finviz -> yfinance -> alphavantage chain.
 """
-
-
-# --- Policy matrix ----------------------------------------------------------
-
-_POLICY_MATRIX: Mapping[str, Tuple[str, ...]] = {
-    # US: finviz primary, yfinance fallback, alphavantage tertiary.
-    # Matches the legacy DataSourceService ordering so default callers are
-    # unaffected.
-    MARKET_US: (PROVIDER_FINVIZ, PROVIDER_YFINANCE, PROVIDER_ALPHAVANTAGE),
-    # HK / JP / TW: yfinance only. finviz screener is US-only and the
-    # alphavantage free tier does not cover these markets.
-    MARKET_HK: (PROVIDER_YFINANCE,),
-    # IN: yfinance only. BSE-only .BO listings are admitted into the active
-    # universe only after India ingest verifies Yahoo price coverage and skips
-    # symbols with repeated unresolved Yahoo validation failures.
-    MARKET_IN: (PROVIDER_YFINANCE,),
-    MARKET_JP: (PROVIDER_YFINANCE,),
-    # KR: KRX supplies primary quotes/valuation, OpenDART enriches statements,
-    # yfinance remains a suffix-based fallback for fields not covered natively.
-    MARKET_KR: (PROVIDER_KRX, PROVIDER_OPENDART, PROVIDER_YFINANCE),
-    MARKET_TW: (PROVIDER_YFINANCE,),
-    # CN: AKShare/Eastmoney is primary because it offers no-key bulk A-share
-    # coverage; BaoStock is a no-key fallback; yfinance is last and only useful
-    # for .SS/.SZ fields where Yahoo coverage exists.
-    MARKET_CN: (PROVIDER_AKSHARE, PROVIDER_BAOSTOCK, PROVIDER_YFINANCE),
-    # CA: yfinance only. Finviz screener does not cover TSX/TSXV; the
-    # alphavantage free tier likewise excludes Canadian listings. yfinance
-    # natively supports the .TO and .V suffixes produced by SecurityMasterService.
-    MARKET_CA: (PROVIDER_YFINANCE,),
-    # DE: yfinance only. Finviz screener does not cover Xetra/Frankfurt; the
-    # alphavantage free tier likewise excludes German listings. yfinance
-    # natively supports the .DE and .F suffixes produced by SecurityMasterService.
-    MARKET_DE: (PROVIDER_YFINANCE,),
-    # SG: yfinance only. Finviz screener does not cover SGX; the alphavantage
-    # free tier likewise excludes Singapore listings. yfinance natively
-    # supports the .SI suffix produced by SecurityMasterService.
-    MARKET_SG: (PROVIDER_YFINANCE,),
-    # MY: yfinance only. Finviz screener does not cover Bursa Malaysia;
-    # alphavantage free tier likewise excludes MY listings. yfinance natively
-    # supports the .KL suffix produced by SecurityMasterService.
-    MARKET_MY: (PROVIDER_YFINANCE,),
-}
 
 
 # --- Public API -------------------------------------------------------------
@@ -207,7 +168,10 @@ def providers_for(market: str | None) -> Tuple[str, ...]:
                 market, POLICY_VERSION,
             )
             return ()
-    return _POLICY_MATRIX[normalize_market(market)]
+    normalized = normalize_market(market)
+    return provider_data_plan_registry.plan_for(
+        normalized, DATASET_FUNDAMENTALS
+    ).providers
 
 
 def is_supported(market: str | None, provider: str) -> bool:
@@ -223,7 +187,7 @@ def is_supported(market: str | None, provider: str) -> bool:
 
 def supported_markets() -> Tuple[str, ...]:
     """Return the sorted tuple of markets the matrix has explicit rules for."""
-    return tuple(sorted(_POLICY_MATRIX.keys()))
+    return provider_data_plan_registry.supported_markets(DATASET_FUNDAMENTALS)
 
 
 def policy_version() -> str:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -104,18 +104,20 @@ async def test_current_breadth_filters_by_market(client, session):
 @pytest.mark.asyncio
 async def test_historical_trend_and_summary_filter_by_market(client, session):
     app.dependency_overrides[get_db] = _override_db(session)
+    today = date.today()
+    previous_day = today - timedelta(days=1)
     session.add_all([
-        _breadth_row("US", date(2026, 4, 23), up=10, down=4),
-        _breadth_row("HK", date(2026, 4, 23), up=20, down=10),
-        _breadth_row("HK", date(2026, 4, 24), up=30, down=5),
+        _breadth_row("US", previous_day, up=10, down=4),
+        _breadth_row("HK", previous_day, up=20, down=10),
+        _breadth_row("HK", today, up=30, down=5),
     ])
     session.commit()
 
     historical = await client.get(
         "/api/v1/breadth/historical",
         params={
-            "start_date": "2026-04-23",
-            "end_date": "2026-04-24",
+            "start_date": previous_day.isoformat(),
+            "end_date": today.isoformat(),
             "market": "HK",
         },
     )
@@ -131,17 +133,17 @@ async def test_historical_trend_and_summary_filter_by_market(client, session):
 
     assert trend.status_code == 200
     assert trend.json()["data"] == [
-        {"date": "2026-04-23", "value": 2.0},
-        {"date": "2026-04-24", "value": 6.0},
+        {"date": previous_day.isoformat(), "value": 2.0},
+        {"date": today.isoformat(), "value": 6.0},
     ]
 
     assert summary.status_code == 200
     assert summary.json() == {
         "market": "HK",
-        "latest_date": "2026-04-24",
+        "latest_date": today.isoformat(),
         "total_records": 2,
-        "date_range_start": "2026-04-23",
-        "date_range_end": "2026-04-24",
+        "date_range_start": previous_day.isoformat(),
+        "date_range_end": today.isoformat(),
     }
 
 

@@ -82,13 +82,15 @@ def resolve_symbols(
         )
 
     elif t == UniverseType.MARKET:
-        return get_stock_universe_service().get_active_symbols(
-            db,
-            market=universe_def.market.value,
-            exchange=None,
-            sp500_only=False,
-            limit=limit,
-        )
+        kwargs = {
+            "market": universe_def.market.value,
+            "exchange": universe_def.mic,
+            "sp500_only": False,
+            "limit": limit,
+        }
+        if universe_def.listing_tier is not None:
+            kwargs["listing_tier"] = universe_def.listing_tier
+        return get_stock_universe_service().get_active_symbols(db, **kwargs)
 
     elif t == UniverseType.EXCHANGE:
         return get_stock_universe_service().get_active_symbols(
