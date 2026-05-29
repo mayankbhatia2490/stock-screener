@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from app.domain.markets import Market, SUPPORTED_MARKET_CODES
-from app.domain.markets.registry import MarketProfile, MarketRegistry, market_registry
+from app.domain.markets.catalog import get_market_catalog
+from app.domain.markets.registry import BenchmarkFacts, MarketProfile, MarketRegistry, market_registry
 from app.domain.universe.indexes import index_registry
 
 
@@ -28,9 +29,36 @@ def test_representative_profile_lookups_accept_string_and_market() -> None:
     assert market_registry.profile(Market("IN")).timezone_name == "Asia/Kolkata"
 
 
+def test_market_registry_identity_facts_derive_from_market_catalog() -> None:
+    catalog = get_market_catalog()
+
+    for code in catalog.supported_market_codes():
+        entry = catalog.get(code)
+        profile = market_registry.profile(code)
+
+        assert profile.label == entry.label
+        assert profile.currency == entry.default_currency
+        assert profile.timezone_name == entry.display_timezone
+        assert profile.calendar_id == entry.calendar_id
+        assert profile.provider_calendar_id == entry.provider_calendar_id
+        assert profile.exchanges == entry.exchanges
+
+
 def test_supported_codes_are_in_runtime_order() -> None:
-    assert market_registry.supported_market_codes() == ("US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG")
+    assert market_registry.supported_market_codes() == tuple(
+        get_market_catalog().supported_market_codes()
+    )
     assert market_registry.supported_markets() == tuple(Market(code) for code in market_registry.supported_market_codes())
+
+
+def test_catalog_registry_factory_rejects_missing_benchmark_facts() -> None:
+    with pytest.raises(ValueError, match="Benchmark facts are missing"):
+        MarketRegistry.from_catalog(
+            get_market_catalog(),
+            benchmark_facts={
+                "US": BenchmarkFacts("SPY", "IVV", "etf", "etf"),
+            },
+        )
 
 
 def test_market_for_index_uses_registry_mapping() -> None:

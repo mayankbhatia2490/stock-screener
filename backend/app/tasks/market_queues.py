@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional
 
-from ..domain.markets import Market, UnsupportedMarketError, market_registry
+from ..domain.markets import Market, UnsupportedMarketError, get_market_catalog
 
 
-SUPPORTED_MARKETS: tuple[str, ...] = market_registry.supported_market_codes()
+SUPPORTED_MARKETS: tuple[str, ...] = tuple(
+    get_market_catalog().supported_market_codes()
+)
 
 SHARED_SENTINEL = "SHARED"
 

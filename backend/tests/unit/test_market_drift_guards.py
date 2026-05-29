@@ -69,10 +69,7 @@ DOCUMENTED_CATALOG_CANONICAL_MICS: dict[str, tuple[str, ...]] = {
     "SG": ("XSES",),
 }
 
-DOCUMENTED_REGISTRY_ONLY_EXCHANGE_ALIASES: dict[str, set[str]] = {
-    "US": {"XNYS", "XNAS", "XASE"},
-    "CN": {"SHSE", "XBEI"},
-}
+DOCUMENTED_REGISTRY_ONLY_EXCHANGE_ALIASES: dict[str, set[str]] = {}
 
 DOCUMENTED_CATALOG_ONLY_EXCHANGE_ALIASES: dict[str, set[str]] = {}
 

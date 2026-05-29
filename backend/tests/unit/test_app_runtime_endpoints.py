@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 
 from app.database import get_db
-from app.domain.markets import market_registry
+from app.domain.markets.catalog import get_market_catalog
 from app.domain.scanning.defaults import get_default_scan_profile
 from app.main import app
 
@@ -73,13 +73,17 @@ async def test_app_capabilities_includes_scan_defaults(client, monkeypatch):
     assert data["primary_market"] == "US"
     assert data["enabled_markets"] == ["US", "HK"]
     assert data["bootstrap_state"] == "running"
-    assert data["supported_markets"] == list(market_registry.supported_market_codes())
+    assert data["supported_markets"] == get_market_catalog().supported_market_codes()
     assert data["market_catalog"]["version"]
     market_catalog = {
         market["code"]: market
         for market in data["market_catalog"]["markets"]
     }
     assert market_catalog["US"]["label"] == "United States"
+    assert market_catalog["US"]["primary_mic"] == "XNYS"
+    assert market_catalog["US"]["supported_currencies"] == ["USD"]
+    assert market_catalog["US"]["default_currency"] == "USD"
+    assert market_catalog["US"]["mic_facts"][0]["mic"] == "XNYS"
     assert market_catalog["HK"]["capabilities"]["finviz_screening"] is False
     assert data["api_base_path"] == "/api"
 

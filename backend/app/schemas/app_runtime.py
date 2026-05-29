@@ -6,6 +6,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.domain.markets.catalog import get_market_catalog
+
+
+def _supported_market_codes() -> list[str]:
+    return get_market_catalog().supported_market_codes()
+
 
 class ScanDefaultsResponse(BaseModel):
     """Backend-owned default scan profile exposed to the frontend."""
@@ -39,14 +45,30 @@ class MarketCapabilitiesResponse(BaseModel):
     finviz_screening: bool = False
 
 
+class MicFactsResponse(BaseModel):
+    """Canonical per-MIC facts in the runtime Market Catalog."""
+
+    mic: str
+    calendar_id: str
+    timezone: str
+    default_currency: str
+    provider_calendar_id: str | None = None
+
+
 class MarketCatalogEntryResponse(BaseModel):
     """Stable Market facts exposed to the frontend runtime."""
 
     code: str
     label: str
+    primary_mic: str | None = None
+    mics: list[str] = Field(default_factory=list)
+    supported_currencies: list[str] = Field(default_factory=list)
+    default_currency: str | None = None
+    mic_facts: list[MicFactsResponse] = Field(default_factory=list)
     currency: str
     timezone: str
     calendar_id: str
+    provider_calendar_id: str | None = None
     exchanges: list[str]
     indexes: list[str]
     capabilities: MarketCapabilitiesResponse
@@ -69,7 +91,7 @@ class AppCapabilitiesResponse(BaseModel):
     primary_market: str = "US"
     enabled_markets: list[str] = Field(default_factory=lambda: ["US"])
     bootstrap_state: str = "not_started"
-    supported_markets: list[str] = Field(default_factory=lambda: ["US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG"])
+    supported_markets: list[str] = Field(default_factory=_supported_market_codes)
     market_catalog: MarketCatalogResponse
     api_base_path: str = "/api"
     auth: AppAuthStatusResponse = Field(default_factory=AppAuthStatusResponse)
@@ -83,7 +105,7 @@ class RuntimeBootstrapStatusResponse(BaseModel):
     primary_market: str
     enabled_markets: list[str]
     bootstrap_state: str
-    supported_markets: list[str] = Field(default_factory=lambda: ["US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG"])
+    supported_markets: list[str] = Field(default_factory=_supported_market_codes)
 
 
 class RuntimeBootstrapRequest(BaseModel):

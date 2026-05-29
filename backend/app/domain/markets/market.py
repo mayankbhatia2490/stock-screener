@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .catalog import get_market_catalog
 
 SUPPORTED_MARKET_CODES: frozenset[str] = frozenset(
-    {"US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG"}
+    get_market_catalog().supported_market_codes()
 )
 
 

@@ -6,6 +6,7 @@ import dataclasses
 
 import pytest
 
+from app.domain.markets.catalog import get_market_catalog
 from app.domain.markets.market import Market, SUPPORTED_MARKET_CODES, UnsupportedMarketError
 
 
@@ -41,4 +42,6 @@ def test_market_from_str_rejects_non_string() -> None:
 
 
 def test_supported_market_codes_are_current_supported_markets() -> None:
-    assert SUPPORTED_MARKET_CODES == frozenset({"US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG"})
+    assert SUPPORTED_MARKET_CODES == frozenset(
+        get_market_catalog().supported_market_codes()
+    )
