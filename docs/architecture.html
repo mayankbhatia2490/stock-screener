@@ -416,7 +416,7 @@ flowchart LR
           <tbody>
             <tr><td class="mono">after each close</td><td><code>queue_daily_market_pipeline</code></td><td>Per-market: cache warmup → scans → breadth → group ranks → feature snapshot</td></tr>
             <tr><td class="mono">Sun 02:00 ET</td><td><code>weekly_full_refresh</code></td><td>Rebuild 5 years of historical OHLCV</td></tr>
-            <tr><td class="mono">Sat 01:00 ET</td><td><code>refresh_all_fundamentals</code></td><td>Hybrid yfinance + provider fundamentals refresh</td></tr>
+            <tr><td class="mono">Sat 08:00 ET</td><td><code>refresh_all_fundamentals</code></td><td>Hybrid yfinance + provider fundamentals refresh</td></tr>
             <tr><td class="mono">Sun 03:00 ET</td><td><code>refresh_*_universe</code></td><td>Re-ingest each market's ticker universe from official sources</td></tr>
             <tr><td class="mono">*/15 min</td><td><code>poll-content-sources</code></td><td>Theme discovery: fetch due RSS / news / social sources</td></tr>
             <tr><td class="mono">:10 / :40</td><td><code>periodic-theme-extraction</code></td><td>LLM extracts themes + tickers from pending content</td></tr>
@@ -424,6 +424,8 @@ flowchart LR
           </tbody>
         </table>
       </div>
+
+      <p class="sec-desc" style="margin-top:10px; font-size:13px;">Weekly refresh times (full price &amp; fundamentals) are configurable defaults read from <code>settings</code>; market-close and universe times are fixed crontabs.</p>
 
       <div class="callout animate" style="--i:1; --accent:var(--ext)">
         <span class="lab">Worker lifecycle safety</span>
