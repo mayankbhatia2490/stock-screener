@@ -44,3 +44,29 @@ def confidence_histogram(rows: Iterable[dict]) -> dict[str, int]:
         idx = max(0, min(idx, 9))
         hist[HISTOGRAM_BINS[idx]] += 1
     return hist
+
+
+def diff_classifications(prev_rows: Iterable[dict], new_rows: Iterable[dict]) -> dict:
+    """Compare two weeks of classifications keyed by symbol.
+
+    ``churn_pct`` is the share of symbols *present in both weeks* whose industry
+    group changed — the signal for "did classifications shift unexpectedly".
+    Symbols added/removed across weeks are reported separately so a normal
+    universe refresh isn't mistaken for churn.
+    """
+    prev = {r["symbol"]: r.get("industry_group") for r in prev_rows}
+    new = {r["symbol"]: r.get("industry_group") for r in new_rows}
+    prev_keys, new_keys = set(prev), set(new)
+    common = prev_keys & new_keys
+    changed = sorted(s for s in common if prev[s] != new[s])
+    compared = len(common)
+    return {
+        "compared": compared,
+        "added": len(new_keys - prev_keys),
+        "removed": len(prev_keys - new_keys),
+        "changed_group": len(changed),
+        "churn_pct": round(100.0 * len(changed) / compared, 2) if compared else 0.0,
+        "changed_examples": [
+            {"symbol": s, "prev": prev[s], "new": new[s]} for s in changed[:50]
+        ],
+    }
