@@ -320,7 +320,7 @@ flowchart TD
       direction TB
       REDIS[("Redis · DB2<br/><small>price 7d · fundamentals 7d · SPY 24h</small>")]:::store
       PG[("PostgreSQL<br/><small>stock_prices · stock_fundamentals · stock_universe</small>")]:::store
-      REDIS <--> PG
+      REDIS &lt;--&gt; PG
     end
 
     RL -->|"OHLCV (5y) + fundamentals"| REDIS
@@ -525,12 +525,14 @@ flowchart LR
     CTX --> I["IPO"]:::tf
     CTX --> V["Volume<br/>Breakthrough"]:::tf
     CTX --> U["Custom"]:::tf
+    CTX --> SE["Setup Engine<br/><small>default-on</small>"]:::tf
 
     M --> AGG["Composite score<br/><small>weighted_avg · max · min</small>"]:::sc
     C --> AGG
     I --> AGG
     V --> AGG
     U --> AGG
+    SE --> AGG
 
     classDef out fill:#3a1c30,stroke:#c98fb0,color:#f7e6f0,stroke-width:1.5px;
     classDef tf fill:#1d3318,stroke:#8fbf6f,color:#e9f5e2,stroke-width:1.5px;

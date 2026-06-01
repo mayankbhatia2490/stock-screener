@@ -309,10 +309,10 @@ flowchart TB
       HERMES["Hermes agent<br/><small>LLM gateway</small>"]:::infra
     end
 
-    WIRE <--> RDS
-    WIRE <--> PG
-    WORK <--> RDS
-    WORK <--> PG
+    WIRE &lt;--&gt; RDS
+    WIRE &lt;--&gt; PG
+    WORK &lt;--&gt; RDS
+    WORK &lt;--&gt; PG
     WORK -->|"fetch"| PROV
     API -->|"assistant"| HERMES
 
@@ -497,7 +497,7 @@ flowchart LR
         <span class="lab">Signals — computed, not fetched</span>
         Technical signals come from <code>TechnicalCalculatorService</code>, which derives RSI(14), ATR(14), SMA distances,
         performance windows, volatility and relative volume <em>purely from cached price data</em> — no external calls. This is
-        why the platform can screen 9,000+ symbols offline from cache.
+        why the platform can screen 9,000+ symbols from cache without any live API calls.
       </div>
     </section>
 
