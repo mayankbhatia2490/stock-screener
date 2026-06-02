@@ -436,6 +436,42 @@ def test_llm_tier_declines_past_deadline_but_serves_cache():
     assert tier.cache_hits == 1
 
 
+def test_llm_tier_caches_none_result():
+    # A "no match" (LLM declined / hallucinated off-list) is cached too, so the same
+    # industry+shortlist is never re-queried.
+    calls = {"n": 0}
+
+    def tb(text, shortlist):
+        calls["n"] += 1
+        return None
+
+    tier = _LLMTier(tb, model_id="m", max_calls=5, deadline_seconds=None, clock=lambda: 0.0)
+    a = StockContext("A", "SG", sector="Fin", industry="Banks")
+
+    assert tier.choose(a, ["G1"]) is None     # miss → one call
+    assert tier.choose(a, ["G1"]) is None     # same key → cache hit, not a retry
+    assert calls["n"] == 1
+    assert tier.cache_hits == 1
+
+
+def test_llm_tier_raising_tiebreaker_is_charged_and_cached():
+    # A raising tiebreaker must not break the run, must still consume budget (so it
+    # can't bypass the ceiling), and its (None) outcome is cached.
+    calls = {"n": 0}
+
+    def tb(text, shortlist):
+        calls["n"] += 1
+        raise RuntimeError("provider down")
+
+    tier = _LLMTier(tb, model_id="m", max_calls=5, deadline_seconds=None, clock=lambda: 0.0)
+    a = StockContext("A", "SG", sector="Fin", industry="Banks")
+
+    assert tier.choose(a, ["G1"]) is None     # swallowed → no match
+    assert tier.calls == 1                    # budget charged despite the raise
+    assert tier.choose(a, ["G1"]) is None     # cached → not retried
+    assert calls["n"] == 1
+
+
 def test_llm_tier_without_tiebreaker_declines():
     tier = _LLMTier(None, model_id=None, max_calls=None, deadline_seconds=None, clock=lambda: 0.0)
     a = StockContext("A", "SG", sector="Fin", industry="Banks")

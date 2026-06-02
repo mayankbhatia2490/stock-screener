@@ -178,8 +178,15 @@ class _LLMTier:
             return None
         if self.budget_exhausted:
             return None
-        chosen = self._tiebreaker(ctx.text(), shortlist)
+        # Consume the budget slot *before* the call so a slow or raising tiebreaker
+        # can't bypass the ceiling, and cache the outcome (including None / a raised
+        # error) so the same industry+shortlist is never retried.
         self.calls += 1
+        try:
+            chosen = self._tiebreaker(ctx.text(), shortlist)
+        except Exception:  # noqa: BLE001 — a misbehaving tiebreaker must not break the run
+            logger.warning("IBD LLM tier: tiebreaker raised; treating as no match")
+            chosen = None
         self._cache[key] = chosen
         return chosen
 
@@ -488,7 +495,7 @@ class IBDClassificationService:
                 logger.warning(
                     "IBD %s: deadline (%ss) reached after %d/%d symbols; the LLM tier is "
                     "now disabled (deterministic fallback only)",
-                    market, deadline_seconds, i, total,
+                    market, deadline_seconds, i - 1, total,
                 )
 
             if progress_every and (i % progress_every == 0 or i == total):
