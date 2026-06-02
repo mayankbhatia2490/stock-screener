@@ -311,18 +311,44 @@ def test_progress_callback_receives_counts():
     assert "by_source" in seen[-1]
 
 
-def test_canonical_taxonomy_ignores_non_us_and_derived_rows():
+def test_canonical_taxonomy_excludes_machine_derived_rows():
     session = _make_session()
     _seed_taxonomy(session)  # US csv groups
-    # A derived non-US row with a novel group must NOT widen the taxonomy.
+    # Machine-derived rows (any market) must NOT widen the taxonomy — otherwise a
+    # bad guess becomes a "real" group and grows its own centroid (feedback loop).
     session.add(IBDIndustryGroup(
-        symbol="X.SG", industry_group="Bogus-Derived-Group",
+        symbol="X.SG", industry_group="Bogus-Embedding-Group",
         market="SG", source="embedding", confidence=0.3,
+    ))
+    session.add(IBDIndustryGroup(
+        symbol="Y.SG", industry_group="Bogus-LLM-Group", market="SG", source="llm",
     ))
     session.commit()
 
     svc = IBDClassificationService(crosswalk=None, embedding_engine=None)
     taxonomy = svc.canonical_taxonomy(session)
 
-    assert "Bogus-Derived-Group" not in taxonomy
+    assert "Bogus-Embedding-Group" not in taxonomy
+    assert "Bogus-LLM-Group" not in taxonomy
     assert set(taxonomy) == {"Computers-Software", "Medical-Drugs", "Energy-Oil"}
+
+
+def test_canonical_taxonomy_includes_manual_foreign_group():
+    session = _make_session()
+    _seed_taxonomy(session)  # US csv groups
+    # A human-curated (manual) row for a genuinely foreign industry extends the
+    # ONE shared namespace, regardless of market — the escape hatch for industries
+    # the US CSV doesn't cover (e.g. a CN-specific group).
+    session.add(IBDIndustryGroup(
+        symbol="600519.SS", industry_group="Beverages-Baijiu",
+        market="CN", source="manual",
+    ))
+    session.commit()
+
+    svc = IBDClassificationService(crosswalk=None, embedding_engine=None)
+    taxonomy = svc.canonical_taxonomy(session)
+
+    assert "Beverages-Baijiu" in taxonomy
+    assert set(taxonomy) == {
+        "Computers-Software", "Medical-Drugs", "Energy-Oil", "Beverages-Baijiu",
+    }

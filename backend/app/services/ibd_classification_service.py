@@ -167,15 +167,21 @@ class IBDClassificationService:
     # ---- taxonomy & centroids ------------------------------------------------
 
     def canonical_taxonomy(self, db: Session) -> list[str]:
-        """The canonical IBD group list (distinct US CSV/manual groups)."""
+        """The canonical IBD group list — one shared namespace across all markets.
+
+        Includes only *authoritative* rows (``csv``/``manual``), so a machine-derived
+        assignment (crosswalk/embedding/llm) can never widen the taxonomy on a later
+        run and grow a centroid for its own guess. Crucially this is **not** scoped to
+        ``market == "US"``: a human ``manual`` curation in *any* market extends the
+        shared namespace (the escape hatch for industries the US CSV doesn't cover,
+        e.g. a CN-specific group), keeping groups cross-market comparable for
+        ``IBDGroupRankService`` rather than forking a per-market taxonomy.
+        """
         if self._taxonomy is None:
-            # Authoritative US rows only — never let a derived (crosswalk/embedding/
-            # llm) or non-US assignment widen the canonical taxonomy on a later run.
             rows = (
                 db.query(IBDIndustryGroup.industry_group)
                 .filter(
                     IBDIndustryGroup.industry_group.isnot(None),
-                    IBDIndustryGroup.market == "US",
                     IBDIndustryGroup.source.in_(IBDIndustryService.AUTHORITATIVE_SOURCES),
                 )
                 .distinct()
