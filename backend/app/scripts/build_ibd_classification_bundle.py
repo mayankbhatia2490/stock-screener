@@ -26,11 +26,22 @@ from app.services.ibd_classification_bundle import (
     build_manifest,
     build_payload,
     latest_manifest_name,
+    read_bundle,
     write_bundle,
     write_manifest,
 )
+from app.services.ibd_classification_health import (
+    build_health_report,
+    health_asset_name,
+    write_health_report,
+)
 from app.services.ibd_classification_service import IBDClassificationService
 from app.services.ibd_crosswalk import IBDCrosswalk
+
+
+# Single source of truth for the embedding model id, recorded in the health
+# report's `embedding_model` fingerprint so a model swap is visible in the diff.
+EMBEDDING_MODEL_ID = "all-MiniLM-L6-v2"
 
 
 def _default_crosswalk_path() -> Path:
@@ -50,7 +61,7 @@ def _build_engine(disabled: bool):
     try:
         from app.services.theme_embedding_service import ThemeEmbeddingEngine
 
-        return ThemeEmbeddingEngine("all-MiniLM-L6-v2")
+        return ThemeEmbeddingEngine(EMBEDDING_MODEL_ID)
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: embedding engine unavailable ({exc}); skipping embedding tier", flush=True)
         return None
@@ -71,6 +82,12 @@ def main() -> int:
         "shortlist, so this also disables the LLM tier (crosswalk-only).",
     )
     parser.add_argument("--as-of", default=None, help="Override as-of date (YYYY-MM-DD).")
+    parser.add_argument(
+        "--prev-bundle",
+        default=None,
+        help="Path to the previous week's bundle (.json.gz) for the churn diff. "
+        "When omitted, the health report's diff is null (e.g. first run).",
+    )
     args = parser.parse_args()
 
     prepare_runtime()
@@ -121,12 +138,34 @@ def main() -> int:
     manifest = build_manifest(payload=payload, bundle_name=resolved_bundle_name, sha256=sha256)
     write_manifest(manifest_path, manifest)
 
+    prev_payload = None
+    if args.prev_bundle:
+        prev_path = Path(args.prev_bundle)
+        if prev_path.exists():
+            prev_payload = read_bundle(prev_path)
+        else:
+            print(
+                f"WARNING: --prev-bundle {prev_path} not found; "
+                "health report churn diff will be null",
+                flush=True,
+            )
+    health = build_health_report(
+        payload=payload,
+        prev_payload=prev_payload,
+        embedding_model=EMBEDDING_MODEL_ID,
+    )
+    health_path = output_dir / health_asset_name(market)
+    write_health_report(health_path, health)
+
     print("IBD classification bundle complete:")
     print(f"  - market:   {market}")
     print(f"  - summary:  {summary}")
     print(f"  - bundle:   {bundle_path}")
     print(f"  - manifest: {manifest_path}")
     print(f"  - sha256:   {sha256}")
+    print(f"  - health:   {health_path}")
+    if health.get("diff") is not None:
+        print(f"  - churn:    {health['diff']['churn_pct']}%")
     return 0
 
 
