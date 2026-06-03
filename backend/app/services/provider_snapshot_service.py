@@ -557,9 +557,16 @@ class ProviderSnapshotService:
                 ]
             )
 
-        run.symbols_total = int(coverage_stats.get("snapshot_symbols", len(materialized_rows)) or 0)
-        run.symbols_published = int(
-            coverage_stats.get("covered_active_symbols", len(materialized_rows)) or 0
+        # ``coverage_stats`` is computed by the caller before this method dedups, so
+        # clamp the persisted counts to the actual number of rows written — the run
+        # metadata must never claim more symbols than exist in provider_snapshot_row.
+        persisted_count = len(materialized_rows)
+        run.symbols_total = min(
+            int(coverage_stats.get("snapshot_symbols", persisted_count) or 0), persisted_count
+        )
+        run.symbols_published = min(
+            int(coverage_stats.get("covered_active_symbols", persisted_count) or 0),
+            persisted_count,
         )
         run.coverage_stats_json = json.dumps(coverage_stats, sort_keys=True)
         run.parity_stats_json = json.dumps(parity_stats, sort_keys=True)

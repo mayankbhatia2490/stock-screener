@@ -1668,10 +1668,13 @@ def test_publish_market_snapshot_run_dedups_colliding_canonical_symbols():
         }
 
     rows = [_row("8906.TW", "first"), _row("8906.TW", "second")]
+    # coverage_stats reflects the PRE-dedup count, exactly as the weekly builder
+    # computes it (len(snapshot_rows) before this method dedups). Persisted run
+    # metadata must not claim more symbols than rows actually written.
     coverage_stats = {
-        "active_symbols": 1,
-        "snapshot_symbols": 1,
-        "covered_active_symbols": 1,
+        "active_symbols": 2,
+        "snapshot_symbols": 2,
+        "covered_active_symbols": 2,
         "missing_active_symbols": 0,
     }
 
@@ -1692,4 +1695,8 @@ def test_publish_market_snapshot_run_dedups_colliding_canonical_symbols():
     )
     assert len(persisted) == 1
     assert persisted[0].symbol == "8906.TW"
+
+    run = db.query(ProviderSnapshotRun).filter(ProviderSnapshotRun.id == result["run_id"]).one()
+    assert run.symbols_total == 1  # clamped to actual persisted rows, not pre-dedup 2
+    assert run.symbols_published == 1
     db.close()
