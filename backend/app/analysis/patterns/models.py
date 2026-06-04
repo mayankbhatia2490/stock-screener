@@ -649,7 +649,9 @@ SETUP_ENGINE_REQUIRED_KEYS: tuple[str, ...] = (
     "quiet_days_10d",
     "rs",
     "rs_line_new_high",
-    "rs_line_blue_dot",
+    # rs_line_blue_dot is intentionally NOT required: it's a new additive field,
+    # so payloads persisted before it existed (and hand-built test fixtures) must
+    # still validate. Producers emit it; it stays in the TypedDict + field specs.
     "rs_vs_spy_65d",
     "rs_vs_spy_trend_20d",
     "stage",
