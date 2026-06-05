@@ -254,7 +254,7 @@ class FailureDiagnosticsCollector:
         *,
         symbol: str,
         reason: str,
-        error: object | None = None,
+        error: str | None = None,
         data_errors: dict[str, str] | None = None,
     ) -> None:
         self.reason_counts[reason] += 1
@@ -705,6 +705,9 @@ class BuildDailyFeatureSnapshotUseCase:
                             sym, cmd.as_of_date, result
                         )
                         return sym, row, bool(result.get("passes_template")), None
+                    error = None
+                    if isinstance(result, dict) and result.get("error") is not None:
+                        error = str(result.get("error"))
                     return (
                         sym,
                         None,
@@ -712,11 +715,7 @@ class BuildDailyFeatureSnapshotUseCase:
                         {
                             "symbol": sym,
                             "reason": "scanner_error_result",
-                            "error": (
-                                result.get("error")
-                                if isinstance(result, dict)
-                                else None
-                            ),
+                            "error": error,
                             "data_errors": _extract_data_errors(result),
                         },
                     )
