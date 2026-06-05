@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -45,6 +46,7 @@ STATIC_BUILD_MODE_FULL = "full"
 STATIC_EXPORT_MARKETS = market_registry.supported_market_codes()
 STATIC_DEFAULT_MARKET = "US"
 STATIC_EXPORT_SKIPPED_EXIT_CODE = 78
+STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE = 79
 
 # Markets where Yahoo's 429 backoff windows are long enough that a single
 # refresh pass routinely leaves a tail of rate-limited symbols. For these
@@ -107,6 +109,57 @@ def _upsert_feature_run_pointer(*, pointer_key: str, run_id: int) -> None:
         else:
             pointer.run_id = run_id
         db.commit()
+
+
+def _snapshot_publishable(snapshot: dict[str, Any]) -> bool:
+    status = snapshot.get("status")
+    if status == "published":
+        return True
+    if status == "skipped" and snapshot.get("reason") == "already_published":
+        return True
+    if status is None and (
+        snapshot.get("run_id") is not None
+        or snapshot.get("existing_run_id") is not None
+    ):
+        return True
+    return False
+
+
+def _selected_market_non_publishable_snapshot(
+    refresh_results: dict[str, Any],
+    market: str | None,
+) -> dict[str, Any] | None:
+    if market is None:
+        return None
+    feature_snapshots = refresh_results.get("feature_snapshots", {})
+    if not isinstance(feature_snapshots, dict):
+        return None
+    snapshot = feature_snapshots.get(market.upper())
+    if not isinstance(snapshot, dict):
+        return None
+    return None if _snapshot_publishable(snapshot) else snapshot
+
+
+def _write_market_diagnostics(output_dir: Path, market: str, snapshot: dict[str, Any]) -> Path:
+    diagnostics_dir = output_dir / "diagnostics" / market.lower()
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_path = diagnostics_dir / "snapshot-failure.json"
+    payload: dict[str, Any] = {
+        "market": market.upper(),
+        "status": snapshot.get("status"),
+        "failed_symbols": snapshot.get("failed_symbols", []),
+        "row_count": snapshot.get("row_count"),
+        "warnings": snapshot.get("warnings", []),
+        "failure_diagnostics": snapshot.get("failure_diagnostics", {}),
+    }
+    for key in ("reason", "run_id", "existing_run_id"):
+        if key in snapshot:
+            payload[key] = snapshot[key]
+    diagnostics_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return diagnostics_path
 
 
 def _refresh_static_daily_prices(*, as_of_date: date, market: str | None = None) -> dict[str, Any]:
@@ -556,16 +609,6 @@ def _run_daily_refresh(
 
     warnings: list[str] = []
 
-    def _snapshot_ready(snapshot: dict[str, Any]) -> bool:
-        status = snapshot.get("status")
-        if status == "published":
-            return True
-        if status == "skipped" and snapshot.get("reason") == "already_published":
-            return True
-        if status is None and (snapshot.get("run_id") is not None or snapshot.get("existing_run_id") is not None):
-            return True
-        return False
-
     selected_markets = (market,) if market is not None else STATIC_EXPORT_MARKETS
     as_of_by_market: dict[str, date] = {
         selected_market: _resolve_latest_completed_trading_date(selected_market)
@@ -629,7 +672,7 @@ def _run_daily_refresh(
         group_rank_history: dict[str, Any] = {}
         for selected_market in selected_markets:
             snapshot = feature_snapshots.get(selected_market, {})
-            if not _snapshot_ready(snapshot):
+            if not _snapshot_publishable(snapshot):
                 group_rank_history[selected_market] = {
                     "status": "skipped",
                     "market": selected_market,
@@ -659,7 +702,7 @@ def _run_daily_refresh(
         ibd_metadata_refresh: dict[str, Any] = {}
         for selected_market in selected_markets:
             snapshot = feature_snapshots.get(selected_market, {})
-            if not _snapshot_ready(snapshot):
+            if not _snapshot_publishable(snapshot):
                 ibd_metadata_refresh[selected_market] = {
                     "status": "skipped",
                     "market": selected_market,
@@ -693,7 +736,7 @@ def _run_daily_refresh(
         for snapshot_market, snapshot in feature_snapshots.items():
             if snapshot_market == STATIC_DEFAULT_MARKET:
                 continue
-            if _snapshot_ready(snapshot):
+            if _snapshot_publishable(snapshot):
                 continue
             status = snapshot.get("status")
             reason = snapshot.get("reason")
@@ -707,7 +750,7 @@ def _run_daily_refresh(
         if STATIC_DEFAULT_MARKET in feature_snapshots:
             default_snapshot = feature_snapshots.get(STATIC_DEFAULT_MARKET, {})
             default_snapshot_status = default_snapshot.get("status")
-            default_snapshot_ready = _snapshot_ready(default_snapshot)
+            default_snapshot_ready = _snapshot_publishable(default_snapshot)
             default_run_id = (
                 default_snapshot.get("run_id")
                 or default_snapshot.get("existing_run_id")
@@ -746,6 +789,10 @@ def _market_refresh_skipped_not_trading_day(refresh_results: dict[str, Any], mar
     if not isinstance(snapshot, dict):
         return False
     return snapshot.get("status") == "skipped" and snapshot.get("reason") == "not_trading_day"
+
+
+def _is_no_current_artifact_error(exc: RuntimeError) -> bool:
+    return "No published feature run is available for static-site export" in str(exc)
 
 
 def main() -> int:
@@ -809,6 +856,8 @@ def main() -> int:
         raise SystemExit("--fallback-artifacts-dir requires --combine-artifacts-dir")
 
     refresh_warnings: list[str] = []
+    selected_market_non_publishable_snapshot: dict[str, Any] | None = None
+    selected_market_diagnostics_path: Path | None = None
     if args.combine_artifacts_dir:
         result = StaticSiteExportService.combine_market_artifacts(
             Path(args.combine_artifacts_dir),
@@ -837,6 +886,21 @@ def main() -> int:
             for warning in refresh_warnings:
                 print(f"  - warning: {warning}")
 
+            selected_market_non_publishable_snapshot = _selected_market_non_publishable_snapshot(
+                refresh_results,
+                args.market,
+            )
+            if selected_market_non_publishable_snapshot is not None and args.market is not None:
+                selected_market_diagnostics_path = _write_market_diagnostics(
+                    Path(args.output_dir),
+                    args.market,
+                    selected_market_non_publishable_snapshot,
+                )
+                print(
+                    f"Static site export diagnostics written for market {args.market}: "
+                    f"{selected_market_diagnostics_path}"
+                )
+
             if _market_refresh_skipped_not_trading_day(refresh_results, args.market):
                 print(
                     f"Static site export skipped for market {args.market} because it is not a trading day."
@@ -844,12 +908,29 @@ def main() -> int:
                 return STATIC_EXPORT_SKIPPED_EXIT_CODE
 
         service = StaticSiteExportService(SessionLocal)
-        result = service.export(
-            Path(args.output_dir),
-            clean=not args.no_clean,
-            markets=((args.market,) if args.market else None),
-            write_manifest=args.market is None,
-        )
+        try:
+            result = service.export(
+                Path(args.output_dir),
+                clean=not args.no_clean,
+                markets=((args.market,) if args.market else None),
+                write_manifest=args.market is None,
+            )
+        except RuntimeError as exc:
+            if (
+                args.market is not None
+                and args.refresh_daily
+                and selected_market_non_publishable_snapshot is not None
+                and selected_market_diagnostics_path is not None
+                and selected_market_diagnostics_path.exists()
+                and _is_no_current_artifact_error(exc)
+            ):
+                print(
+                    f"Static site export skipped for market {args.market}; "
+                    "no current artifact was produced, diagnostics were uploaded, "
+                    "and the combine job can use fallback artifacts."
+                )
+                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+            raise
 
     print("Static site export complete:")
     print(f"  - output_dir: {result.output_dir}")

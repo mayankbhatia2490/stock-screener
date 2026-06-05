@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -1298,6 +1299,150 @@ def test_main_returns_skip_code_for_market_not_trading_day(monkeypatch, tmp_path
     captured = capsys.readouterr()
     assert "Static site export skipped for market TW because it is not a trading day." in captured.out
     assert export_calls == []
+
+
+def test_write_market_diagnostics_records_quarantined_snapshot(tmp_path):
+    path = export_script._write_market_diagnostics(  # noqa: SLF001 - intentional unit test coverage
+        tmp_path / "out",
+        "in",
+        {
+            "status": "quarantined",
+            "reason": "data_quality_gate",
+            "run_id": 91,
+            "existing_run_id": 77,
+            "failed_symbols": ["RELIANCE.NS", "TCS.NS"],
+            "row_count": 4312,
+            "warnings": ["price rows missing"],
+            "failure_diagnostics": {"failed_symbol_count": 2},
+            "ignored": "not exported",
+        },
+    )
+
+    assert path == tmp_path / "out" / "diagnostics" / "in" / "snapshot-failure.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload == {
+        "market": "IN",
+        "status": "quarantined",
+        "reason": "data_quality_gate",
+        "run_id": 91,
+        "existing_run_id": 77,
+        "failed_symbols": ["RELIANCE.NS", "TCS.NS"],
+        "row_count": 4312,
+        "warnings": ["price rows missing"],
+        "failure_diagnostics": {"failed_symbol_count": 2},
+    }
+
+
+def test_main_returns_no_current_artifact_code_for_quarantined_selected_market(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    output_dir = tmp_path / "out"
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "feature_snapshots": {
+                    "IN": {
+                        "status": "quarantined",
+                        "reason": "data_quality_gate",
+                        "market": "IN",
+                        "run_id": 91,
+                        "failed_symbols": ["TCS.NS"],
+                        "row_count": 4312,
+                        "failure_diagnostics": {"failed_symbol_count": 1},
+                    }
+                }
+            },
+            [],
+        ),
+    )
+
+    class ExportRaisesNoCurrentArtifact:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def export(self, *_args, **_kwargs):
+            raise RuntimeError(
+                "No published feature run is available for static-site export market IN"
+            )
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportRaisesNoCurrentArtifact)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+            "--market",
+            "IN",
+        ],
+    )
+
+    assert export_script.main() == 79
+
+    diagnostics_path = output_dir / "diagnostics" / "in" / "snapshot-failure.json"
+    assert diagnostics_path.exists()
+    payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert payload["market"] == "IN"
+    assert payload["status"] == "quarantined"
+    assert payload["failure_diagnostics"] == {"failed_symbol_count": 1}
+    captured = capsys.readouterr()
+    assert "fallback" in captured.out
+    assert "skipped" in captured.out
+
+
+def test_main_reraises_unrelated_runtime_errors_for_non_ready_selected_market(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "feature_snapshots": {
+                    "IN": {
+                        "status": "quarantined",
+                        "market": "IN",
+                        "failure_diagnostics": {"failed_symbol_count": 1},
+                    }
+                }
+            },
+            [],
+        ),
+    )
+
+    class ExportRaisesUnrelatedRuntimeError:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def export(self, *_args, **_kwargs):
+            raise RuntimeError("database connection dropped")
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportRaisesUnrelatedRuntimeError)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--refresh-daily",
+            "--market",
+            "IN",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="database connection dropped"):
+        export_script.main()
 
 
 def _seed_in_universe(session_factory):
