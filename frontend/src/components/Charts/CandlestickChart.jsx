@@ -407,6 +407,16 @@ function CandlestickChart({
   // remain on a stale weekly aggregation chosen before the toggle disappeared.
   const effectiveTimeframe = hideTimeframeToggle ? 'daily' : timeframe;
 
+  // Single source of truth for "is the RS line actually drawn right now". The
+  // RS series is daily-only and toggleable, so it's hidden on weekly or when
+  // toggled off. This drives BOTH the reserved-strip layout (price/volume
+  // reclaim the strip's space when RS is hidden) and the "RS" label.
+  const rsStripShown =
+    showRSLine &&
+    effectiveTimeframe === 'daily' &&
+    Array.isArray(rsData?.rs_line) &&
+    rsData.rs_line.length > 0;
+
   // Transform data - memoized to avoid expensive EMA recalculations on every render
   const chartData = useMemo(() => {
     if (!apiData) return null;
@@ -464,7 +474,7 @@ function CandlestickChart({
     });
     volumeSeries.priceScale().applyOptions({
       scaleMargins: {
-        top: 0.7, // Volume takes bottom 30% of chart
+        top: 0.7, // Neutral default; reapplied by the RS strip layout effect.
         bottom: 0,
       },
     });
@@ -479,11 +489,11 @@ function CandlestickChart({
       wickDownColor: '#E619CD',
       priceScaleId: 'right',
     });
+    // Price/volume vertical bands are applied reactively below (see the
+    // "RS strip layout" effect) so they can reclaim the RS strip's space when
+    // the RS line is hidden. A neutral default avoids a flash before it runs.
     candlestickSeries.priceScale().applyOptions({
-      scaleMargins: {
-        top: 0.1,
-        bottom: 0.3, // Leave room for volume
-      },
+      scaleMargins: { top: 0.05, bottom: 0.3 },
     });
     candlestickSeriesRef.current = candlestickSeries;
 
@@ -512,8 +522,10 @@ function CandlestickChart({
     ema50SeriesRef.current = ema50Series;
 
     // Create RS line series on its own overlay price scale so the ratio doesn't
-    // distort the price axis. The scale floats in the upper band and stays
-    // hidden (no axis labels). Blue-dot markers attach to this series.
+    // distort the price axis. The scale occupies a dedicated band *below* the
+    // candlesticks (between price and volume), so it reads as a separate strip
+    // rather than another moving average; it stays hidden (no axis labels).
+    // Blue-dot markers attach to this series.
     const rsLineSeries = chart.addSeries(LineSeries, {
       color: '#FFA726', // orange — distinct from the green/cyan EMAs
       lineWidth: 2,
@@ -522,7 +534,7 @@ function CandlestickChart({
       priceLineVisible: false,
     });
     rsLineSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.05, bottom: 0.55 },
+      scaleMargins: { top: 0.64, bottom: 0.24 },
       visible: false,
     });
     rsLineSeriesRef.current = rsLineSeries;
@@ -720,15 +732,13 @@ function CandlestickChart({
     const markers = rsMarkersRef.current;
     if (!series || !chartRef.current) return;
 
-    const points = Array.isArray(rsData?.rs_line) ? rsData.rs_line : [];
-    const shouldShow = showRSLine && effectiveTimeframe === 'daily' && points.length > 0;
-
-    if (!shouldShow) {
+    if (!rsStripShown) {
       series.setData([]);
       if (markers) markers.setMarkers([]);
       return;
     }
 
+    const points = rsData.rs_line;
     series.setData(points.map((p) => ({ time: p.time, value: p.value })));
 
     const timesInSeries = new Set(points.map((p) => p.time));
@@ -736,7 +746,27 @@ function CandlestickChart({
       .filter((t) => timesInSeries.has(t))
       .map((t) => ({ time: t, position: 'inBar', color: '#2196f3', shape: 'circle' }));
     if (markers) markers.setMarkers(markerList);
-  }, [rsData, showRSLine, effectiveTimeframe]);
+  }, [rsData, rsStripShown]);
+
+  // RS strip layout: when the RS line is shown, compress price + volume to
+  // leave a dedicated strip between them (the 'rs' scale lives at [0.64, 0.76]);
+  // when it's hidden, expand price + volume to reclaim that space so the chart
+  // doesn't carry an empty band. Runs after the init layout effect (same commit,
+  // ordered after) and re-runs on chart re-creation so fresh series get the
+  // right bands. useLayoutEffect keeps the resize off-screen (no flash).
+  useLayoutEffect(() => {
+    const candle = candlestickSeriesRef.current;
+    const volume = volumeSeriesRef.current;
+    if (!candle || !volume || !chartRef.current) return;
+
+    if (rsStripShown) {
+      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.4 } });
+      volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    } else {
+      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.3 } });
+      volume.priceScale().applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
+    }
+  }, [rsStripShown, symbol, height, isDarkMode, compact]);
 
   // Determine overlay state
   // Only show full loading state if we have no data at all (not even placeholder)
@@ -746,6 +776,11 @@ function CandlestickChart({
   const showNoData = !effectiveIsLoading && !effectiveError && !hasData;
   // Show refresh indicator when fetching but we have data to display
   const showRefreshIndicator = effectiveIsFetching && hasData;
+
+  // The "RS" label rides the strip, so it shows whenever the strip is drawn —
+  // except in compact mode, where (like the OHLC legend/toggles) overlays are
+  // suppressed for dense grid tiles.
+  const rsLineVisible = !compact && rsStripShown;
 
   return (
     <Box
@@ -854,6 +889,30 @@ function CandlestickChart({
           height: '100%',
         }}
       />
+
+      {/* RS strip label - pinned to the top of the RS band (scaleMargins.top
+          of the 'rs' scale) so the lower line is clearly the relative-strength
+          overlay, not another moving average. */}
+      {rsLineVisible && (
+        <Typography
+          variant="caption"
+          sx={{
+            position: 'absolute',
+            top: '64%',
+            left: 8,
+            zIndex: 10,
+            color: '#FFA726',
+            fontFamily: 'monospace',
+            fontWeight: 600,
+            fontSize: '0.65rem',
+            letterSpacing: '0.05em',
+            pointerEvents: 'none',
+            textShadow: '0 0 3px rgba(0, 0, 0, 0.6)',
+          }}
+        >
+          RS
+        </Typography>
+      )}
 
       {/* Loading skeleton overlay */}
       {showLoading && (
