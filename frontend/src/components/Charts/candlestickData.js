@@ -34,9 +34,12 @@ export const aggregateToWeekly = (dailyData) => {
   let currentWeek = null;
 
   dailyData.forEach((day) => {
-    const date = new Date(day.date);
+    // Bucket weeks in UTC. `day.date` is a date-only string (UTC midnight); using
+    // local getDay/setDate before a UTC toISOString() would shift week boundaries
+    // by the viewer's timezone, so use the UTC getters/setters throughout.
+    const date = new Date(`${day.date}T00:00:00Z`);
     const weekStart = new Date(date);
-    weekStart.setDate(date.getDate() - date.getDay()); // Start of week (Sunday)
+    weekStart.setUTCDate(date.getUTCDate() - date.getUTCDay()); // Start of week (Sunday, UTC)
     const weekKey = weekStart.toISOString().split('T')[0];
 
     if (!currentWeek || currentWeek.weekKey !== weekKey) {
