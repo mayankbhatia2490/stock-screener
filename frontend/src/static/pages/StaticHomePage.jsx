@@ -34,7 +34,6 @@ import DailyScanRowsTable from '../components/DailyScanRowsTable';
 import { buildFiltersFromPreset } from '../hooks/usePresetScreens';
 
 const EMPTY_RESULTS = [];
-const DEFAULT_MIN_VOLUME = 100_000_000;
 const DEFAULT_TOP_RESULTS = 20;
 const LEADERS_SCREEN_ID = 'leaders_in_leading_groups';
 
@@ -76,6 +75,7 @@ function StaticHomePage() {
       });
       return {
         rows: Array.from(rowsBySymbol.values()),
+        defaultFilters: scanManifest.default_filters || {},
         presetScreens: scanManifest.preset_screens || [],
       };
     },
@@ -90,12 +90,16 @@ function StaticHomePage() {
   const [modalNavigationSymbols, setModalNavigationSymbols] = useState([]);
   const [marketCapMin, setMarketCapMin] = useState('');
   const topGroups = homeQuery.data?.top_groups ?? EMPTY_RESULTS;
+  const scanDefaultFilters = useMemo(
+    () => scanBundleQuery.data?.defaultFilters ?? {},
+    [scanBundleQuery.data?.defaultFilters]
+  );
   const topCandidateFilters = useMemo(
     () => applyScanFilterDefaults({
-      minVolume: DEFAULT_MIN_VOLUME,
+      ...scanDefaultFilters,
       ...(marketCapMin !== '' ? { marketCapUsd: { min: Number(marketCapMin), max: null } } : {}),
     }),
-    [marketCapMin]
+    [marketCapMin, scanDefaultFilters]
   );
   const scanRows = scanBundleQuery.data?.rows ?? EMPTY_RESULTS;
   const topResults = useMemo(() => {
@@ -114,12 +118,12 @@ function StaticHomePage() {
       return EMPTY_RESULTS;
     }
     return sortStaticScanRows(
-      filterStaticScanRows(scanRows, buildFiltersFromPreset(leadingGroupScreen)),
+      filterStaticScanRows(scanRows, buildFiltersFromPreset(leadingGroupScreen, scanDefaultFilters)),
       leadingGroupScreen.sort_by,
       leadingGroupScreen.sort_order,
       { prioritizeCompositeScanMode: false }
     ).slice(0, DEFAULT_TOP_RESULTS);
-  }, [leadingGroupScreen, scanRows]);
+  }, [leadingGroupScreen, scanDefaultFilters, scanRows]);
 
   const chartEntries = useMemo(() => chartIndexQuery.data?.symbols || [], [chartIndexQuery.data]);
   const chartEnabledSymbols = useMemo(() => new Set(chartEntries.map((e) => e.symbol)), [chartEntries]);
@@ -261,7 +265,11 @@ function StaticHomePage() {
       <DailyScanRowsTable
         testId="top-scan-candidates-section"
         title="Top Scan Candidates"
-        subtitle="Dollar volume > $100M. Click a row for chart details."
+        subtitle={
+          topCandidateFilters.minVolume == null
+            ? 'No default liquidity floor. Click a row for chart details.'
+            : `Dollar volume >= ${formatNumber(topCandidateFilters.minVolume)}. Click a row for chart details.`
+        }
         rows={topResults}
         chartEnabledSymbols={chartEnabledSymbols}
         navigationSymbols={topNavigationSymbols}
@@ -293,7 +301,7 @@ function StaticHomePage() {
       <DailyScanRowsTable
         testId="leaders-in-leading-groups-section"
         title="Leaders in Leading Groups"
-        subtitle="Top 20 by report card: group rank <=40, RS >=80, score >=70, dollar volume >= $100M."
+        subtitle="Top 20 by report card: group rank <=40, RS >=80, using this market's default liquidity floor."
         rows={leadingGroupRows}
         chartEnabledSymbols={chartEnabledSymbols}
         navigationSymbols={leadingGroupNavigationSymbols}

@@ -320,7 +320,7 @@ describe('StaticScanPage', () => {
             run_id: 9,
             sort: { field: 'composite_score', order: 'desc' },
             default_page_size: 50,
-            rows_total: 3,
+            rows_total: 4,
             default_filters: { minVolume: 100000000 },
             default_filtered_rows_total: 3,
             filter_options: {
@@ -355,6 +355,14 @@ describe('StaticScanPage', () => {
                 volume: 150000000,
                 ibd_group_rank: 41,
               },
+              {
+                symbol: 'THINLEAD',
+                company_name: 'Thin Leader Inc',
+                composite_score: 99,
+                rs_rating: 99,
+                volume: 500000,
+                ibd_group_rank: 5,
+              },
             ],
             preset_screens: [
               {
@@ -363,11 +371,10 @@ describe('StaticScanPage', () => {
                 short_name: 'Leaders',
                 description: 'Strong report-card stocks in top 40 IBD groups',
                 tier: 2,
+                apply_default_filters: true,
                 filters: {
                   ibdGroupRank: { min: null, max: 40 },
                   rsRating: { min: 80, max: null },
-                  compositeScore: { min: 70, max: null },
-                  minVolume: 100000000,
                 },
                 sort_by: 'composite_score',
                 sort_order: 'desc',
@@ -410,6 +417,7 @@ describe('StaticScanPage', () => {
     await waitFor(() => {
       expect(screen.getByTestId('results-table-rows')).toHaveTextContent('IPOLEAD,LEAD');
       expect(screen.getByTestId('results-table-rows')).not.toHaveTextContent('LATE');
+      expect(screen.getByTestId('results-table-rows')).not.toHaveTextContent('THINLEAD');
     });
   });
 

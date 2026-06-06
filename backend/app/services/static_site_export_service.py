@@ -869,8 +869,14 @@ class StaticSiteExportService:
 
         # --- Pass 2: expand preset screen top-N charts ---
         if serialized_rows is not None:
+            preset_default_filters = self.resolve_static_default_filters(market)
             _expand_extra_charts(
-                get_preset_chart_symbols(serialized_rows, PRESET_SCREENS, STATIC_CHART_PRESET_TOP_N),
+                get_preset_chart_symbols(
+                    serialized_rows,
+                    PRESET_SCREENS,
+                    STATIC_CHART_PRESET_TOP_N,
+                    default_filters=preset_default_filters,
+                ),
                 log_label="Preset screen expansion",
             )
 

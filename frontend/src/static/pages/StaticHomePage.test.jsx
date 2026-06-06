@@ -70,11 +70,10 @@ const leadersPresetScreen = {
   short_name: 'Leaders',
   description: 'Strong report-card stocks in top 40 IBD groups',
   tier: 2,
+  apply_default_filters: true,
   filters: {
     ibdGroupRank: { min: null, max: 40 },
     rsRating: { min: 80, max: null },
-    compositeScore: { min: 70, max: null },
-    minVolume: 100_000_000,
   },
   sort_by: 'composite_score',
   sort_order: 'desc',
@@ -137,6 +136,7 @@ describe('StaticHomePage', () => {
       top_groups: [],
     };
     scanManifestPayload = {
+      default_filters: { minVolume: 100_000_000 },
       initial_rows: [
         {
           symbol: 'NVDA',
@@ -298,6 +298,69 @@ describe('StaticHomePage', () => {
         navigationSymbols: ['NVDA', 'AAPL'],
       });
     });
+  });
+
+  it('uses the static scan manifest default volume for Daily top candidates', async () => {
+    scanManifestPayload.default_filters = { minVolume: 1_300_000 };
+    scanManifestPayload.initial_rows = [
+      {
+        symbol: 'LOCALPASS',
+        company_name: 'Local Liquid',
+        composite_score: 88.0,
+        current_price: 12,
+        rating: 'Buy',
+        volume: 5_000_000,
+        market_cap: 2_000_000_000,
+        currency: 'SGD',
+        price_sparkline_data: null,
+        rs_sparkline_data: null,
+      },
+      {
+        symbol: 'TOOTHIN',
+        company_name: 'Too Thin',
+        composite_score: 99.0,
+        current_price: 8,
+        rating: 'Buy',
+        volume: 900_000,
+        market_cap: 2_000_000_000,
+        currency: 'SGD',
+        price_sparkline_data: null,
+        rs_sparkline_data: null,
+      },
+    ];
+    scanManifestPayload.chunks = [];
+
+    renderWithProviders(<StaticHomePage />);
+
+    expect(await screen.findByText('LOCALPASS')).toBeInTheDocument();
+    expect(screen.queryByText('TOOTHIN')).not.toBeInTheDocument();
+  });
+
+  it('uses market liquidity defaults and composite ranking for leaders in leading groups', async () => {
+    scanManifestPayload.default_filters = { minVolume: 1_300_000 };
+    scanManifestPayload.initial_rows = [
+      makeLeaderRow(1, {
+        symbol: 'LOCALLEAD',
+        composite_score: 64.23,
+        rs_rating: 94.94,
+        volume: 2_000_000,
+        ibd_group_rank: 26,
+      }),
+      makeLeaderRow(2, {
+        symbol: 'THINLEAD',
+        composite_score: 65.0,
+        rs_rating: 99,
+        volume: 900_000,
+        ibd_group_rank: 10,
+      }),
+    ];
+    scanManifestPayload.chunks = [];
+
+    renderWithProviders(<StaticHomePage />);
+
+    const leadersSection = await screen.findByTestId('leaders-in-leading-groups-section');
+    expect(within(leadersSection).getByText('LOCALLEAD')).toBeInTheDocument();
+    expect(within(leadersSection).queryByText('THINLEAD')).not.toBeInTheDocument();
   });
 
   it('shows top 20 leaders in leading groups after top scan candidates with leader-scoped chart navigation', async () => {
