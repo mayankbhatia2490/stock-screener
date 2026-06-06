@@ -3,6 +3,7 @@ import { createChart, CrosshairMode, CandlestickSeries, LineSeries, HistogramSer
 import { Box, CircularProgress, Alert, AlertTitle, Button, ToggleButtonGroup, ToggleButton, useTheme, Skeleton, Typography } from '@mui/material';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchPriceHistory, fetchRSLine, priceHistoryKeys, PRICE_HISTORY_STALE_TIME } from '../../api/priceHistory';
+import { rsBandForRange } from './rsBand';
 
 /**
  * Chart skeleton placeholder that shows chart structure while loading
@@ -330,6 +331,7 @@ function CandlestickChart({
   const [timeframe, setTimeframe] = useState('daily');
   const [showRSLine, setShowRSLine] = useState(true); // RS line overlay toggle
   const [legendData, setLegendData] = useState(null); // OHLC legend data on hover
+  const [rsBandTop, setRsBandTop] = useState(0.66); // top margin of the live RS band
   const theme = useTheme();
   const isDarkMode = theme.palette.mode === 'dark';
 
@@ -534,7 +536,7 @@ function CandlestickChart({
       priceLineVisible: false,
     });
     rsLineSeries.priceScale().applyOptions({
-      scaleMargins: { top: 0.64, bottom: 0.24 },
+      scaleMargins: { top: 0.66, bottom: 0.22 },
       visible: false,
     });
     rsLineSeriesRef.current = rsLineSeries;
@@ -748,25 +750,64 @@ function CandlestickChart({
     if (markers) markers.setMarkers(markerList);
   }, [rsData, rsStripShown]);
 
-  // RS strip layout: when the RS line is shown, compress price + volume to
-  // leave a dedicated strip between them (the 'rs' scale lives at [0.64, 0.76]);
-  // when it's hidden, expand price + volume to reclaim that space so the chart
-  // doesn't carry an empty band. Runs after the init layout effect (same commit,
-  // ordered after) and re-runs on chart re-creation so fresh series get the
-  // right bands. useLayoutEffect keeps the resize off-screen (no flash).
+  // RS strip layout: when the RS line is shown, compress price to a 0.66 floor
+  // so the [0.66, 0.78] band below it is always empty (the RS scale floats in
+  // [rTop, 0.78], sized dynamically by the effect below); when hidden, expand
+  // price to 0.78 to reclaim that space so the chart doesn't carry an empty
+  // band. Runs after the init layout effect (same commit, ordered after) and
+  // re-runs on chart re-creation so fresh series get the right bands.
+  // useLayoutEffect keeps the resize off-screen (no flash).
   useLayoutEffect(() => {
     const candle = candlestickSeriesRef.current;
     const volume = volumeSeriesRef.current;
     if (!candle || !volume || !chartRef.current) return;
 
     if (rsStripShown) {
-      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.4 } });
+      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.34 } });
       volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
     } else {
-      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.3 } });
-      volume.priceScale().applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
+      candle.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.22 } });
+      volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
     }
   }, [rsStripShown, symbol, height, isDarkMode, compact]);
+
+  // Dynamic RS band: size the RS overlay scale so the line fills the empty space
+  // below the candles without overlapping them. Recomputes on data change and on
+  // pan/zoom (price re-auto-scales to the visible window, so the safe band moves).
+  // Debounced; the 12%-38% clamp lives in computeRsBand. Skipped when RS is hidden.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !rsLineSeriesRef.current || !rsStripShown) return;
+
+    // candles/rsLine are captured per effect run. They stay fresh because the
+    // effect re-subscribes (and the cleanup cancels the pending debounce) whenever
+    // chartData/rsData change, so a stale debounced callback can never fire.
+    const candles = chartData?.candlesticks || [];
+    const rsLine = rsData?.rs_line || [];
+
+    const apply = () => {
+      const liveChart = chartRef.current;
+      const rsSeries = rsLineSeriesRef.current;
+      if (!liveChart || !rsSeries) return; // guard against teardown mid-debounce
+      const rTop = rsBandForRange(candles, rsLine, liveChart.timeScale().getVisibleRange());
+      rsSeries.priceScale().applyOptions({ scaleMargins: { top: rTop, bottom: 0.22 } });
+      setRsBandTop(rTop);
+    };
+
+    apply();
+    const debouncedApply = debounce(apply, 80);
+    const timeScale = chart.timeScale();
+    timeScale.subscribeVisibleTimeRangeChange(debouncedApply);
+    return () => {
+      debouncedApply.cancel();
+      // Only unsubscribe if this exact chart is still mounted. On unmount or a
+      // symbol-change recreate, the old chart (and its time scale) is already
+      // disposed, and calling unsubscribe on it would throw.
+      if (chartRef.current === chart) {
+        timeScale.unsubscribeVisibleTimeRangeChange(debouncedApply);
+      }
+    };
+  }, [chartData, rsData, rsStripShown]);
 
   // Determine overlay state
   // Only show full loading state if we have no data at all (not even placeholder)
@@ -898,7 +939,7 @@ function CandlestickChart({
           variant="caption"
           sx={{
             position: 'absolute',
-            top: '64%',
+            top: `${(rsBandTop * 100).toFixed(1)}%`,
             left: 8,
             zIndex: 10,
             color: '#FFA726',
