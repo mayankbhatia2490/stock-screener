@@ -28,6 +28,28 @@ describe('useRRGFilters', () => {
     expect(result.current.shown.map((g) => g.industry_group)).toEqual(['C']);
   });
 
+  it('clamps a stale rank range when maxRank shrinks on a same-scope refresh', () => {
+    const big = [
+      { industry_group: 'A', rank: 1 },
+      { industry_group: 'B', rank: 40 },
+      { industry_group: 'C', rank: 50 },
+    ];
+    const small = [
+      { industry_group: 'A', rank: 1 },
+      { industry_group: 'B', rank: 10 },
+    ]; // maxRank drops 50 -> 10, same scope/market (no reset)
+    const { result, rerender } = renderHook(
+      ({ g }) => useRRGFilters(g, { scope: 'groups', market: 'US' }),
+      { initialProps: { g: big } },
+    );
+    act(() => result.current.filter.setRankRange([40, 50]));
+    expect(result.current.shown.map((x) => x.industry_group)).toEqual(['B', 'C']);
+
+    rerender({ g: small });
+    expect(result.current.filter.rankValue).toEqual([10, 10]); // clamped into [1, 10]
+    expect(result.current.shown.map((x) => x.industry_group)).toEqual(['B']);
+  });
+
   it('resets filters when the scope changes', () => {
     const { result, rerender } = renderHook(
       ({ scope }) => useRRGFilters(groups, { scope, market: 'US' }),

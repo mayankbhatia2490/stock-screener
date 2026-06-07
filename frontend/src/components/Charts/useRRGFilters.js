@@ -26,12 +26,17 @@ export function useRRGFilters(groups, { scope, market } = {}) {
     () => groups.reduce((m, g) => (g.rank != null && g.rank > m ? g.rank : m), 1),
     [groups],
   );
-  const rankValue = rankRange ?? [1, maxRank];
-  const rankActive = rankRange != null && (rankRange[0] > 1 || rankRange[1] < maxRank);
+  // Clamp the stored range to the current [1, maxRank] at derivation time, so a
+  // stale range from a prior data refresh (where maxRank shrank) can never feed
+  // the slider an out-of-range value or filter to nothing.
+  const rankLo = rankRange ? Math.min(Math.max(1, rankRange[0]), maxRank) : 1;
+  const rankHi = rankRange ? Math.min(Math.max(1, rankRange[1]), maxRank) : maxRank;
+  const rankValue = [rankLo, rankHi];
+  const rankActive = rankLo > 1 || rankHi < maxRank;
 
   const shown = useMemo(
-    () => filterGroups(groups, { names: selected, rankRange: rankActive ? rankRange : null }),
-    [groups, selected, rankActive, rankRange],
+    () => filterGroups(groups, { names: selected, rankRange: rankActive ? [rankLo, rankHi] : null }),
+    [groups, selected, rankActive, rankLo, rankHi],
   );
 
   return {
