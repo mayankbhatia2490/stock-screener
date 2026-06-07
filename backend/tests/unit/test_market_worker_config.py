@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from app.tasks.market_queues import SUPPORTED_MARKETS
@@ -60,7 +61,7 @@ def test_enabled_market_compose_wrapper_reads_env_files_and_preserves_profiles()
 
 def _fake_docker_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
     docker.write_text(
         "\n".join(
@@ -77,6 +78,13 @@ def _fake_docker_bin(tmp_path: Path) -> Path:
     )
     docker.chmod(0o755)
     return bin_dir
+
+
+def _write_fake_python(bin_dir: Path, name: str, body: str) -> Path:
+    python = bin_dir / name
+    python.write_text(body, encoding="utf-8")
+    python.chmod(0o755)
+    return python
 
 
 def _wrapper_env(tmp_path: Path) -> dict[str, str]:
@@ -138,3 +146,51 @@ def test_enabled_market_compose_wrapper_down_enables_all_market_profiles(tmp_pat
 
     assert f"COMPOSE_PROFILES={expected_market_profiles}" in result.stdout
     assert f"DOCKER_ARGS|compose|--env-file|{env_file}|down|--remove-orphans" in result.stdout
+
+
+def test_enabled_market_compose_wrapper_prefers_python311_over_old_python3(tmp_path):
+    bin_dir = _fake_docker_bin(tmp_path)
+    marker = tmp_path / "python311.invocations"
+    _write_fake_python(
+        bin_dir,
+        "python3",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "if [[ \"$1\" == \"-\" ]]; then exit 1; fi",
+                "printf 'old python3 should not run backend helpers\\n' >&2",
+                "exit 42",
+            ]
+        ),
+    )
+    _write_fake_python(
+        bin_dir,
+        "python3.11",
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"printf '%s\\n' \"$*\" >> {marker}",
+                f"exec {sys.executable} \"$@\"",
+            ]
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            str(ROOT / "scripts" / "docker-compose-enabled-markets.sh"),
+            "config",
+        ],
+        cwd=ROOT,
+        env={**_wrapper_env(tmp_path), "ENABLED_MARKETS": "US,HK"},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "ENABLED_MARKETS=US,HK" in result.stdout
+    assert "COMPOSE_PROFILES=market-us,market-hk" in result.stdout
+    assert "DOCKER_ARGS|compose|" in result.stdout
+    assert result.stdout.splitlines()[2].endswith("|config")
+    assert str(ROOT / "backend" / "scripts" / "compose_enabled_markets.py") in marker.read_text(
+        encoding="utf-8"
+    )

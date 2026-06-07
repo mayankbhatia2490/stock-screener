@@ -3,6 +3,48 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+select_backend_python() {
+  local explicit="${STOCKSCREEN_PYTHON:-}"
+  local candidate
+
+  if [[ -n "$explicit" ]]; then
+    if "$explicit" - <<'PY' >/dev/null 2>&1; then
+from __future__ import annotations
+
+import sys
+
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+      printf '%s\n' "$explicit"
+      return 0
+    fi
+
+    printf 'StockScreen Docker Compose wrapper requires Python 3.11+; STOCKSCREEN_PYTHON=%s is not compatible.\n' "$explicit" >&2
+    return 1
+  fi
+
+  for candidate in python3.11 python3.12 python3.13 python3; do
+    if ! command -v "$candidate" >/dev/null 2>&1; then
+      continue
+    fi
+    if "$candidate" - <<'PY' >/dev/null 2>&1; then
+from __future__ import annotations
+
+import sys
+
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  printf 'StockScreen Docker Compose wrapper requires Python 3.11+ on PATH, or set STOCKSCREEN_PYTHON to a Python 3.11+ interpreter.\n' >&2
+  return 1
+}
+
+BACKEND_PYTHON_BIN="$(select_backend_python)"
+
 read_env_value() {
   local file="$1"
   local key="$2"
@@ -11,7 +53,7 @@ read_env_value() {
     return 1
   fi
 
-  python3 - "$file" "$key" <<'PY'
+  "$BACKEND_PYTHON_BIN" - "$file" "$key" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -135,9 +177,9 @@ if [[ -z "$MARKETS" ]]; then
   fi
 fi
 
-MARKET_PROFILES="$(python3 "$ROOT_DIR/backend/scripts/compose_enabled_markets.py" profiles --markets "$MARKETS")"
+MARKET_PROFILES="$("$BACKEND_PYTHON_BIN" "$ROOT_DIR/backend/scripts/compose_enabled_markets.py" profiles --markets "$MARKETS")"
 if is_down_command "$@"; then
-  ALL_MARKET_PROFILES="$(python3 "$ROOT_DIR/backend/scripts/compose_enabled_markets.py" profiles --markets "$(python3 - "$ROOT_DIR" <<'PY'
+  ALL_MARKET_PROFILES="$("$BACKEND_PYTHON_BIN" "$ROOT_DIR/backend/scripts/compose_enabled_markets.py" profiles --markets "$("$BACKEND_PYTHON_BIN" - "$ROOT_DIR" <<'PY'
 from __future__ import annotations
 
 import sys

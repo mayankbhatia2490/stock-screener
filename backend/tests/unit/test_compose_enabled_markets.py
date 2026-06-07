@@ -42,7 +42,7 @@ def test_normalize_markets_rejects_unsupported_market():
     module = load_module()
 
     with pytest.raises(ValueError, match="Unsupported market"):
-        module.normalize_markets("US,AU")
+        module.normalize_markets("US,ZZ")
 
 
 def test_compose_profiles_for_markets():
