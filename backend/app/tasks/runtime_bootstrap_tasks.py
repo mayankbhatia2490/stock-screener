@@ -17,6 +17,7 @@ from ..domain.bootstrap.plan import (
 from ..services.market_activity_service import (
     mark_current_market_activity_failed,
     mark_market_activity_failed,
+    save_runtime_bootstrap_run,
 )
 from ..tasks.market_queues import (
     data_fetch_queue_for_market,
@@ -104,6 +105,26 @@ def _queue_market_bootstrap_workflow(
     )
 
 
+def record_runtime_bootstrap_run(
+    *,
+    primary_market: str,
+    enabled_markets: Iterable[str],
+    primary_task_id: str,
+    market_task_ids: dict[str, str],
+) -> dict:
+    db = SessionLocal()
+    try:
+        return save_runtime_bootstrap_run(
+            db,
+            primary_market=primary_market,
+            enabled_markets=list(enabled_markets),
+            primary_task_id=primary_task_id,
+            market_task_ids=market_task_ids,
+        )
+    finally:
+        db.close()
+
+
 def _readiness_failure(market_result) -> ReadinessFailure:
     if market_result is None or not market_result.core_ready:
         return ReadinessFailure(
@@ -162,34 +183,67 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
 
     market_plans_by_code = {market_plan.market: market_plan for market_plan in plan.market_plans}
     primary_plan = market_plans_by_code[primary]
-    primary_task = _queue_market_bootstrap_workflow(
-        primary_plan,
-        completion_task=complete_local_runtime_bootstrap,
-        completion_kwargs={"primary_market": primary},
-        errback_task=fail_local_runtime_bootstrap,
-        errback_kwargs={"primary_market": primary},
-    )
-
-    for market_plan in plan.market_plans:
-        if market_plan.market == primary:
-            continue
-        _queue_market_bootstrap_workflow(
-            market_plan,
-            completion_task=complete_background_market_bootstrap,
-            completion_kwargs={"market": market_plan.market},
-            errback_task=fail_background_market_bootstrap,
-            errback_kwargs={"market": market_plan.market},
+    market_task_ids: dict[str, str] = {}
+    primary_task_id: str | None = None
+    try:
+        primary_task = _queue_market_bootstrap_workflow(
+            primary_plan,
+            completion_task=complete_local_runtime_bootstrap,
+            completion_kwargs={"primary_market": primary},
+            errback_task=fail_local_runtime_bootstrap,
+            errback_kwargs={"primary_market": primary},
         )
+        primary_task_id = primary_task.id
+        market_task_ids[primary] = primary_task.id
+
+        for market_plan in plan.market_plans:
+            if market_plan.market == primary:
+                continue
+            background_task = _queue_market_bootstrap_workflow(
+                market_plan,
+                completion_task=complete_background_market_bootstrap,
+                completion_kwargs={"market": market_plan.market},
+                errback_task=fail_background_market_bootstrap,
+                errback_kwargs={"market": market_plan.market},
+            )
+            market_task_ids[market_plan.market] = background_task.id
+
+        record_runtime_bootstrap_run(
+            primary_market=primary,
+            enabled_markets=enabled,
+            primary_task_id=primary_task.id,
+            market_task_ids=market_task_ids,
+        )
+    except Exception:
+        if primary_task_id is not None and market_task_ids:
+            try:
+                record_runtime_bootstrap_run(
+                    primary_market=primary,
+                    enabled_markets=enabled,
+                    primary_task_id=primary_task_id,
+                    market_task_ids=market_task_ids,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record partial bootstrap task manifest",
+                    extra={
+                        "primary_market": primary,
+                        "enabled_markets": enabled,
+                        "market_task_ids": market_task_ids,
+                    },
+                    exc_info=True,
+                )
+        raise
 
     logger.info(
         "Queued local runtime bootstrap",
         extra={
             "primary_market": primary,
             "enabled_markets": enabled,
-            "task_id": primary_task.id,
+            "task_id": primary_task_id,
         },
     )
-    return primary_task.id
+    return primary_task_id
 
 
 @celery_app.task(

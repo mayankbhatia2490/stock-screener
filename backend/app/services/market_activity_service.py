@@ -14,6 +14,7 @@ from ..wiring.bootstrap import get_data_fetch_lock
 
 RUNTIME_ACTIVITY_CATEGORY = "runtime_activity"
 MARKET_ACTIVITY_KEY_PREFIX = "runtime.activity.market."
+BOOTSTRAP_RUN_KEY = "runtime.activity.bootstrap_run"
 
 STAGE_SEQUENCE = (
     "universe",
@@ -82,6 +83,55 @@ def _load_market_activity(db: Session, market: str) -> dict[str, Any] | None:
         return None
     if not isinstance(payload, dict):
         return None
+    return payload
+
+
+def _load_runtime_bootstrap_run(db: Session) -> dict[str, Any] | None:
+    setting = _get_setting(db, BOOTSTRAP_RUN_KEY)
+    if setting is None:
+        return None
+    try:
+        payload = json.loads(setting.value)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def save_runtime_bootstrap_run(
+    db: Session,
+    *,
+    primary_market: str,
+    enabled_markets: list[str],
+    primary_task_id: str,
+    market_task_ids: dict[str, str],
+) -> dict[str, Any]:
+    payload = {
+        "primary_market": str(primary_market).upper(),
+        "enabled_markets": [str(market).upper() for market in enabled_markets],
+        "primary_task_id": primary_task_id,
+        "market_task_ids": {
+            str(market).upper(): task_id
+            for market, task_id in market_task_ids.items()
+        },
+        "queued_at": _utcnow_iso(),
+    }
+    encoded = json.dumps(payload)
+    setting = _get_setting(db, BOOTSTRAP_RUN_KEY)
+    if setting is None:
+        setting = AppSetting(
+            key=BOOTSTRAP_RUN_KEY,
+            value=encoded,
+            category=RUNTIME_ACTIVITY_CATEGORY,
+            description="Latest local runtime bootstrap run task manifest.",
+        )
+        db.add(setting)
+    else:
+        setting.value = encoded
+        setting.category = RUNTIME_ACTIVITY_CATEGORY
+        setting.description = "Latest local runtime bootstrap run task manifest."
+    db.commit()
     return payload
 
 
@@ -520,7 +570,12 @@ def _is_active_bootstrap_payload(payload: dict[str, Any]) -> bool:
     )
 
 
-def _queued_bootstrap_market_payload(market: str, _primary_market: str) -> dict[str, Any]:
+def _queued_bootstrap_market_payload(
+    market: str,
+    _primary_market: str,
+    *,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     return {
         "market": str(market).upper(),
         "lifecycle": "bootstrap",
@@ -533,7 +588,7 @@ def _queued_bootstrap_market_payload(market: str, _primary_market: str) -> dict[
         "total": None,
         "message": "Bootstrap queued.",
         "task_name": None,
-        "task_id": None,
+        "task_id": task_id,
         "updated_at": None,
     }
 
@@ -579,9 +634,15 @@ def _market_payload(
     bootstrap_state: str,
     bootstrap_required: bool,
     primary_market: str,
+    bootstrap_run: dict[str, Any],
 ) -> dict[str, Any]:
     if record is None and bootstrap_state == "running" and bootstrap_required:
-        return _queued_bootstrap_market_payload(market, primary_market)
+        market_task_ids = bootstrap_run.get("market_task_ids") or {}
+        return _queued_bootstrap_market_payload(
+            market,
+            primary_market,
+            task_id=market_task_ids.get(str(market).upper()),
+        )
     if record is None:
         return _idle_market_payload(market, None)
     return _idle_market_payload(market, _overlay_live_progress(record, market))
@@ -591,6 +652,7 @@ def get_runtime_activity_status(db: Session) -> dict[str, Any]:
     bootstrap_status = get_runtime_bootstrap_status(db)
     enabled_markets = list(bootstrap_status.enabled_markets)
     primary_market = bootstrap_status.primary_market
+    bootstrap_run = _load_runtime_bootstrap_run(db) or {}
 
     market_payloads = []
     for market in enabled_markets:
@@ -602,6 +664,7 @@ def get_runtime_activity_status(db: Session) -> dict[str, Any]:
                 bootstrap_state=bootstrap_status.bootstrap_state,
                 bootstrap_required=bootstrap_status.bootstrap_required,
                 primary_market=primary_market,
+                bootstrap_run=bootstrap_run,
             )
         )
 
@@ -689,6 +752,8 @@ def get_runtime_activity_status(db: Session) -> dict[str, Any]:
             "app_ready": not bootstrap_status.bootstrap_required,
             "primary_market": primary_market,
             "enabled_markets": enabled_markets,
+            "task_id": bootstrap_run.get("primary_task_id"),
+            "market_task_ids": bootstrap_run.get("market_task_ids") or {},
             "current_stage": bootstrap_stage,
             "progress_mode": bootstrap_progress_mode,
             "percent": bootstrap_percent,

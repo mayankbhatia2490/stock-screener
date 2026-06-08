@@ -133,6 +133,42 @@ def test_smart_refresh_cache_reraises_soft_time_limit(monkeypatch):
     fake_db.close.assert_called_once()
 
 
+def test_smart_refresh_cache_delegates_to_price_refresh_workflow(monkeypatch):
+    import app.tasks.cache_tasks as module
+
+    delegated_calls = []
+
+    def _run_workflow(*, task, mode, market, activity_lifecycle):
+        delegated_calls.append(
+            {
+                "task": task,
+                "mode": mode,
+                "market": market,
+                "activity_lifecycle": activity_lifecycle,
+            }
+        )
+        return {"status": "completed", "mode": mode, "market": market}
+
+    monkeypatch.setattr(module, "run_smart_price_refresh", _run_workflow)
+
+    result = module.smart_refresh_cache.run.__wrapped__(
+        module.smart_refresh_cache,
+        mode="bootstrap",
+        market="HK",
+        activity_lifecycle="bootstrap",
+    )
+
+    assert result == {"status": "completed", "mode": "bootstrap", "market": "HK"}
+    assert delegated_calls == [
+        {
+            "task": module.smart_refresh_cache,
+            "mode": "bootstrap",
+            "market": "HK",
+            "activity_lifecycle": "bootstrap",
+        }
+    ]
+
+
 def test_smart_refresh_cache_allows_in_process_bypass_outside_time_window(monkeypatch):
     import app.tasks.cache_tasks as module
 

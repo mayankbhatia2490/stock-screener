@@ -34,6 +34,10 @@ def test_price_history_coverage_splits_fresh_stale_and_no_history(universe_sessi
 
 def test_bootstrap_plan_uses_stale_top_up_and_full_bootstrap_for_no_history(universe_session):
     from app.services.price_refresh_planning import (
+        GitHubSeedOutcome,
+        PriceRefreshJobKind,
+        PriceRefreshMode,
+        PriceRefreshSource,
         NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
         STALE_PRICE_TOP_UP_PERIOD,
         plan_price_refresh,
@@ -50,7 +54,7 @@ def test_bootstrap_plan_uses_stale_top_up_and_full_bootstrap_for_no_history(univ
     plan = plan_price_refresh(
         universe_session,
         all_symbols=["0700.HK", "9999.HK"],
-        mode="bootstrap",
+        mode=PriceRefreshMode.BOOTSTRAP,
         effective_market="HK",
         market_calendar_service=_calendar(date(2026, 6, 8)),
         github_sync={
@@ -61,12 +65,14 @@ def test_bootstrap_plan_uses_stale_top_up_and_full_bootstrap_for_no_history(univ
         },
     )
 
-    assert plan.source == "github+live"
+    assert plan.source is PriceRefreshSource.GITHUB_AND_LIVE
     assert plan.github_seed_used is True
+    assert isinstance(plan.github_seed, GitHubSeedOutcome)
+    assert plan.github_seed.status.value == "success"
     assert plan.symbols == ("0700.HK", "9999.HK")
     assert [(job.kind, job.symbols, job.period) for job in plan.jobs] == [
-        ("stale", ("0700.HK",), STALE_PRICE_TOP_UP_PERIOD),
-        ("no_history", ("9999.HK",), NO_HISTORY_PRICE_BOOTSTRAP_PERIOD),
+        (PriceRefreshJobKind.STALE, ("0700.HK",), STALE_PRICE_TOP_UP_PERIOD),
+        (PriceRefreshJobKind.NO_HISTORY, ("9999.HK",), NO_HISTORY_PRICE_BOOTSTRAP_PERIOD),
     ]
 
 

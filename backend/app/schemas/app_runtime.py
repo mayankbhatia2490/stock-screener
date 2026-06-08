@@ -200,6 +200,8 @@ class RuntimeActivityBootstrapResponse(BaseModel):
     app_ready: bool
     primary_market: str
     enabled_markets: list[str] = Field(default_factory=list)
+    task_id: str | None = None
+    market_task_ids: dict[str, str] = Field(default_factory=dict)
     current_stage: str | None = None
     progress_mode: str = "indeterminate"
     percent: float | None = None

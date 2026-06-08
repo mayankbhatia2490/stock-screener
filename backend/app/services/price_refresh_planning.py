@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import Enum
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -14,13 +15,129 @@ from .price_history_coverage import PriceHistoryCoverage, classify_price_history
 
 STALE_PRICE_TOP_UP_PERIOD = "7d"
 NO_HISTORY_PRICE_BOOTSTRAP_PERIOD = "2y"
-LIVE_TOP_UP_MODES = frozenset({"bootstrap", "delta"})
-GITHUB_SYNC_SUCCESS_STATUSES = frozenset({"success", "up_to_date"})
+
+
+class PriceRefreshMode(str, Enum):
+    AUTO = "auto"
+    FULL = "full"
+    BOOTSTRAP = "bootstrap"
+    DELTA = "delta"
+
+    @classmethod
+    def parse(cls, value: "PriceRefreshMode | str") -> "PriceRefreshMode":
+        if isinstance(value, cls):
+            return value
+        return cls(str(value))
+
+
+class PriceRefreshJobKind(str, Enum):
+    AUTO = "auto"
+    FULL = "full"
+    STALE = "stale"
+    NO_HISTORY = "no_history"
+
+
+class PriceRefreshSource(str, Enum):
+    LIVE = "live"
+    GITHUB = "github"
+    GITHUB_AND_LIVE = "github+live"
+
+
+class GitHubSeedStatus(str, Enum):
+    SUCCESS = "success"
+    UP_TO_DATE = "up_to_date"
+    MISSING = "missing"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def parse(cls, value: Any) -> "GitHubSeedStatus":
+        try:
+            return cls(str(value))
+        except ValueError:
+            return cls.UNKNOWN
+
+
+LIVE_TOP_UP_MODES = frozenset({PriceRefreshMode.BOOTSTRAP, PriceRefreshMode.DELTA})
+GITHUB_SYNC_SUCCESS_STATUSES = frozenset({
+    GitHubSeedStatus.SUCCESS,
+    GitHubSeedStatus.UP_TO_DATE,
+})
+
+
+@dataclass(frozen=True)
+class GitHubSeedOutcome:
+    status: GitHubSeedStatus
+    raw_status: str | None = None
+    as_of_date: date | None = None
+    source_revision: str | None = None
+    reason: str | None = None
+    error: str | None = None
+    stale_reason: str | None = None
+    raw: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        payload: "GitHubSeedOutcome | Mapping[str, Any] | None",
+    ) -> "GitHubSeedOutcome | None":
+        if isinstance(payload, cls):
+            return payload
+        if not payload:
+            return None
+        raw_status = str(payload.get("status")) if payload.get("status") is not None else None
+        return cls(
+            status=GitHubSeedStatus.parse(raw_status),
+            raw_status=raw_status,
+            as_of_date=_parse_bundle_date(payload.get("as_of_date")),
+            source_revision=(
+                str(payload["source_revision"])
+                if payload.get("source_revision") is not None
+                else None
+            ),
+            reason=str(payload["reason"]) if payload.get("reason") is not None else None,
+            error=str(payload["error"]) if payload.get("error") is not None else None,
+            stale_reason=(
+                str(payload["stale_reason"])
+                if payload.get("stale_reason") is not None
+                else None
+            ),
+            raw=dict(payload),
+        )
+
+    @property
+    def status_value(self) -> str:
+        return self.raw_status or self.status.value
+
+    @property
+    def is_success(self) -> bool:
+        return self.status in GITHUB_SYNC_SUCCESS_STATUSES
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_mapping().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_mapping()[key]
+
+    def to_mapping(self) -> dict[str, Any]:
+        payload = dict(self.raw or {})
+        payload["status"] = self.status_value
+        if self.as_of_date is not None:
+            payload["as_of_date"] = self.as_of_date.isoformat()
+        if self.source_revision is not None:
+            payload["source_revision"] = self.source_revision
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        if self.error is not None:
+            payload["error"] = self.error
+        if self.stale_reason is not None:
+            payload["stale_reason"] = self.stale_reason
+        return payload
 
 
 @dataclass(frozen=True)
 class PriceRefreshJob:
-    kind: str
+    kind: PriceRefreshJobKind
     symbols: tuple[str, ...]
     period: str
 
@@ -29,19 +146,23 @@ class PriceRefreshJob:
 class PriceRefreshPlan:
     symbols: tuple[str, ...]
     jobs: tuple[PriceRefreshJob, ...] = ()
-    github_sync: Mapping[str, Any] | None = None
+    github_seed: GitHubSeedOutcome | None = None
     github_seed_used: bool = False
     completion_message: str | None = None
 
     @property
-    def source(self) -> str:
+    def source(self) -> PriceRefreshSource:
         if self.github_seed_used:
-            return "github+live" if self.jobs else "github"
-        return "live"
+            return PriceRefreshSource.GITHUB_AND_LIVE if self.jobs else PriceRefreshSource.GITHUB
+        return PriceRefreshSource.LIVE
 
     @property
     def used_github_seed(self) -> bool:
         return self.github_seed_used
+
+    @property
+    def github_sync(self) -> Mapping[str, Any] | None:
+        return self.github_seed.to_mapping() if self.github_seed else None
 
 
 def _normalize_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
@@ -59,12 +180,20 @@ def _parse_bundle_date(value: Any) -> date | None:
         return None
 
 
+def _normalize_github_seed(
+    github_sync: GitHubSeedOutcome | Mapping[str, Any] | None,
+) -> GitHubSeedOutcome | None:
+    if isinstance(github_sync, GitHubSeedOutcome):
+        return github_sync
+    return GitHubSeedOutcome.from_mapping(github_sync)
+
+
 def build_top_up_jobs(coverage: PriceHistoryCoverage) -> tuple[PriceRefreshJob, ...]:
     jobs: list[PriceRefreshJob] = []
     if coverage.stale:
         jobs.append(
             PriceRefreshJob(
-                kind="stale",
+                kind=PriceRefreshJobKind.STALE,
                 symbols=coverage.stale,
                 period=STALE_PRICE_TOP_UP_PERIOD,
             )
@@ -72,7 +201,7 @@ def build_top_up_jobs(coverage: PriceHistoryCoverage) -> tuple[PriceRefreshJob, 
     if coverage.no_history:
         jobs.append(
             PriceRefreshJob(
-                kind="no_history",
+                kind=PriceRefreshJobKind.NO_HISTORY,
                 symbols=coverage.no_history,
                 period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
             )
@@ -87,7 +216,7 @@ def _symbols_from_jobs(jobs: Sequence[PriceRefreshJob]) -> tuple[str, ...]:
 def _plan_live_full(symbols: tuple[str, ...]) -> PriceRefreshPlan:
     jobs = (
         PriceRefreshJob(
-            kind="full",
+            kind=PriceRefreshJobKind.FULL,
             symbols=symbols,
             period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
         ),
@@ -107,7 +236,7 @@ def _plan_live_auto(
     )
     jobs = (
         PriceRefreshJob(
-            kind="auto",
+            kind=PriceRefreshJobKind.AUTO,
             symbols=refresh_symbols,
             period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
         ),
@@ -121,7 +250,7 @@ def _plan_live_top_up(
     symbols: tuple[str, ...],
     effective_market: str,
     market_calendar_service,
-    github_sync: Mapping[str, Any] | None = None,
+    github_seed: GitHubSeedOutcome | None = None,
 ) -> PriceRefreshPlan:
     target_as_of = market_calendar_service.last_completed_trading_day(effective_market)
     coverage = classify_price_history(db, symbols=symbols, as_of_date=target_as_of)
@@ -129,7 +258,7 @@ def _plan_live_top_up(
     return PriceRefreshPlan(
         symbols=_symbols_from_jobs(jobs),
         jobs=jobs,
-        github_sync=github_sync,
+        github_seed=github_seed,
     )
 
 
@@ -138,11 +267,11 @@ def _plan_github_top_up(
     *,
     symbols: tuple[str, ...],
     effective_market: str,
-    github_sync: Mapping[str, Any],
+    github_seed: GitHubSeedOutcome,
     market_calendar_service,
 ) -> PriceRefreshPlan:
     target_as_of = market_calendar_service.last_completed_trading_day(effective_market)
-    github_as_of = _parse_bundle_date(github_sync.get("as_of_date"))
+    github_as_of = github_seed.as_of_date
     coverage = classify_price_history(db, symbols=symbols, as_of_date=target_as_of)
     jobs = build_top_up_jobs(coverage)
     live_symbols = _symbols_from_jobs(jobs)
@@ -156,7 +285,7 @@ def _plan_github_top_up(
     return PriceRefreshPlan(
         symbols=live_symbols,
         jobs=jobs,
-        github_sync=github_sync,
+        github_seed=github_seed,
         github_seed_used=True,
         completion_message=completion_message,
     )
@@ -166,13 +295,15 @@ def plan_price_refresh(
     db: Session,
     *,
     all_symbols: Sequence[str],
-    mode: str,
+    mode: PriceRefreshMode | str,
     effective_market: str,
     market_calendar_service,
-    github_sync: Mapping[str, Any] | None = None,
+    github_sync: GitHubSeedOutcome | Mapping[str, Any] | None = None,
     recently_refreshed_filter: Callable[[Sequence[str]], Sequence[str]] | None = None,
 ) -> PriceRefreshPlan:
     """Plan live price-fetch work without performing any fetches."""
+    parsed_mode = PriceRefreshMode.parse(mode)
+    github_seed = _normalize_github_seed(github_sync)
     normalized_symbols = _normalize_symbols(all_symbols)
     if not normalized_symbols:
         return PriceRefreshPlan(
@@ -181,22 +312,20 @@ def plan_price_refresh(
             completion_message="No active symbols found in universe",
         )
 
-    if mode == "auto":
+    if parsed_mode is PriceRefreshMode.AUTO:
         return _plan_live_auto(
             normalized_symbols,
             recently_refreshed_filter=recently_refreshed_filter,
         )
-    if mode == "full":
+    if parsed_mode is PriceRefreshMode.FULL:
         return _plan_live_full(normalized_symbols)
-    if mode not in LIVE_TOP_UP_MODES:
-        raise ValueError(f"Unknown price refresh mode: {mode}")
 
-    if github_sync and github_sync.get("status") in GITHUB_SYNC_SUCCESS_STATUSES:
+    if github_seed and github_seed.is_success:
         return _plan_github_top_up(
             db,
             symbols=normalized_symbols,
             effective_market=effective_market,
-            github_sync=github_sync,
+            github_seed=github_seed,
             market_calendar_service=market_calendar_service,
         )
 
@@ -205,5 +334,5 @@ def plan_price_refresh(
         symbols=normalized_symbols,
         effective_market=effective_market,
         market_calendar_service=market_calendar_service,
-        github_sync=github_sync,
+        github_seed=github_seed,
     )

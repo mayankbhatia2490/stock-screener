@@ -93,6 +93,39 @@ def test_runtime_activity_status_reports_primary_bootstrap_progress(db_session, 
     assert us_market["percent"] == 50.0
 
 
+def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(db_session, monkeypatch):
+    from app.services import market_activity_service as module
+
+    module.save_runtime_bootstrap_run(
+        db_session,
+        primary_market="US",
+        enabled_markets=["US", "HK", "TW"],
+        primary_task_id="primary-task-123",
+        market_task_ids={
+            "US": "primary-task-123",
+            "HK": "background-task-2",
+            "TW": "background-task-3",
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "get_runtime_bootstrap_status",
+        lambda _db: _bootstrap_status(required=True, enabled=["US", "HK", "TW"], state="running"),
+    )
+    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
+
+    payload = module.get_runtime_activity_status(db_session)
+
+    assert payload["bootstrap"]["task_id"] == "primary-task-123"
+    assert payload["bootstrap"]["market_task_ids"] == {
+        "US": "primary-task-123",
+        "HK": "background-task-2",
+        "TW": "background-task-3",
+    }
+    hk_market = next(item for item in payload["markets"] if item["market"] == "HK")
+    assert hk_market["task_id"] == "background-task-2"
+
+
 def test_runtime_activity_status_marks_running_stage_without_real_percent_as_indeterminate(
     db_session,
     monkeypatch,
