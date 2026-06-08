@@ -72,6 +72,49 @@ describe('BootstrapSetupScreen', () => {
     expect(screen.getByRole('progressbar', { name: 'Bootstrap progress' })).toBeInTheDocument();
   });
 
+  it('does not invent a background warning when the API omits one', () => {
+    useRuntimeActivityMock.mockReturnValue({
+      data: {
+        bootstrap: {
+          primary_market: 'US',
+          current_stage: 'Price Refresh',
+          progress_mode: 'determinate',
+          percent: 25,
+          message: 'Refreshing prices',
+          background_warning: null,
+        },
+        markets: [
+          {
+            market: 'US',
+            stage_key: 'prices',
+            stage_label: 'Price Refresh',
+            status: 'running',
+            progress_mode: 'determinate',
+            percent: 25,
+            current: 250,
+            total: 1000,
+            message: 'Refreshing prices',
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(
+      <BootstrapSetupScreen
+        primaryMarket="US"
+        enabledMarkets={['US']}
+        supportedMarkets={['US', 'HK', 'JP', 'TW']}
+        bootstrapState="running"
+        isStartingBootstrap={false}
+        bootstrapError={null}
+        onStartBootstrap={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText(/Additional enabled markets/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/continue loading after the workspace opens/i)).not.toBeInTheDocument();
+  });
+
   it('renders indeterminate bootstrap progress when no real percent is available yet', () => {
     useRuntimeActivityMock.mockReturnValue({
       data: {

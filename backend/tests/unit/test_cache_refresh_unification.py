@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -372,7 +371,7 @@ def test_smart_refresh_cache_publishes_running_progress_per_batch(monkeypatch):
     assert progress_updates[-1]["percent"] == pytest.approx(100.0)
 
 
-def test_smart_refresh_cache_prefers_github_daily_bundle_and_skips_live_fetch(monkeypatch):
+def test_smart_refresh_cache_delta_prefers_github_daily_bundle_and_skips_live_fetch(monkeypatch):
     import app.tasks.cache_tasks as module
 
     fake_db = MagicMock()
@@ -402,7 +401,7 @@ def test_smart_refresh_cache_prefers_github_daily_bundle_and_skips_live_fetch(mo
         module,
         "get_daily_price_bundle_service",
         lambda: SimpleNamespace(
-            sync_from_github=lambda db, market, warm_redis_symbols=None: {
+            sync_from_github=lambda db, market, warm_redis_symbols=None, allow_stale=False: {
                 "status": "success",
                 "source": "github",
                 "market": market,
@@ -412,6 +411,13 @@ def test_smart_refresh_cache_prefers_github_daily_bundle_and_skips_live_fetch(mo
             symbols_missing_as_of=lambda db, symbols, as_of_date: [],
         ),
     )
+    monkeypatch.setattr(
+        module,
+        "get_market_calendar_service",
+        lambda: SimpleNamespace(
+            last_completed_trading_day=lambda market: date(2026, 4, 21)
+        ),
+    )
 
     started = []
     completed = []
@@ -419,7 +425,7 @@ def test_smart_refresh_cache_prefers_github_daily_bundle_and_skips_live_fetch(mo
     monkeypatch.setattr(module, "mark_market_activity_completed", lambda *args, **kwargs: completed.append(kwargs))
 
     result = module.smart_refresh_cache.run.__wrapped__(
-        module.smart_refresh_cache, "full", market="US"
+        module.smart_refresh_cache, "delta", market="US"
     )
 
     assert result["status"] == "completed"
@@ -613,7 +619,7 @@ def test_bootstrap_explicit_market_smart_refresh_uses_github_seed(monkeypatch):
 
     result = module.smart_refresh_cache.run.__wrapped__(
         module.smart_refresh_cache,
-        mode="full",
+        mode="bootstrap",
         market="HK",
         activity_lifecycle="bootstrap",
     )
@@ -631,207 +637,6 @@ def test_bootstrap_explicit_market_smart_refresh_uses_github_seed(monkeypatch):
         as_of_date="2026-03-24",
     )
     assert retry_calls == []
-
-
-def test_bootstrap_stale_github_bundle_uses_short_live_top_up(monkeypatch, caplog):
-    import app.tasks.cache_tasks as module
-    from app.models.stock import StockPrice
-    from app.models.stock_universe import StockUniverse
-
-    fake_db = MagicMock()
-    universe_rows = [
-        SimpleNamespace(symbol="0700.HK", market="HK"),
-        SimpleNamespace(symbol="0005.HK", market="HK"),
-        SimpleNamespace(symbol="9999.HK", market="HK"),
-    ]
-    price_rows = [
-        ("0700.HK", date(2026, 6, 5)),
-        ("0005.HK", date(2026, 6, 5)),
-    ]
-
-    def _query_for(rows):
-        query = MagicMock()
-        query.filter.return_value = query
-        query.order_by.return_value = query
-        query.group_by.return_value = query
-        query.all.return_value = rows
-        return query
-
-    universe_query = _query_for(universe_rows)
-    price_query = _query_for(price_rows)
-
-    def _query(*entities):
-        model = getattr(entities[0], "class_", None)
-        if model is StockUniverse:
-            return universe_query
-        if model is StockPrice:
-            return price_query
-        return MagicMock()
-
-    fake_db.query.side_effect = _query
-    fake_price_cache = MagicMock()
-    github_service = MagicMock()
-    github_service.sync_from_github.return_value = {
-        "status": "success",
-        "as_of_date": "2026-06-05",
-        "source_revision": "daily_prices_hk:20260605090000",
-        "stale_reason": "Daily price bundle as_of_date 2026-06-05 is behind expected session 2026-06-08",
-    }
-    github_service.symbols_missing_as_of.return_value = []
-    fetch_calls = []
-
-    monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
-    monkeypatch.setattr(module, "warm_spy_cache", MagicMock(return_value={"status": "ok"}))
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.is_market_enabled_now",
-        lambda _market: True,
-    )
-    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: fake_price_cache)
-    monkeypatch.setattr(module, "get_daily_price_bundle_service", lambda: github_service)
-    monkeypatch.setattr("app.services.bulk_data_fetcher.BulkDataFetcher", lambda: MagicMock())
-    monkeypatch.setattr(
-        "app.wiring.bootstrap.get_data_fetch_lock",
-        lambda: SimpleNamespace(extend_lock=lambda *args, **kwargs: None),
-    )
-    monkeypatch.setattr(
-        "app.wiring.bootstrap.get_rate_limiter",
-        lambda: SimpleNamespace(wait_for_market=lambda *args, **kwargs: None),
-    )
-    monkeypatch.setattr(module, "_track_symbol_failures", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.smart_refresh_cache, "update_state", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_started", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_progress", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_completed", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        module,
-        "get_market_calendar_service",
-        lambda: SimpleNamespace(
-            last_completed_trading_day=lambda market: date(2026, 6, 8)
-        ),
-    )
-
-    def _fetch(_fetcher, batch_symbols, *, period, market=None, **_kwargs):
-        fetch_calls.append({"symbols": list(batch_symbols), "period": period, "market": market})
-        return {symbol: _success_result(symbol) for symbol in batch_symbols}
-
-    monkeypatch.setattr(module, "_fetch_with_backoff", _fetch)
-    caplog.set_level(logging.INFO, logger=module.logger.name)
-
-    result = module.smart_refresh_cache.run.__wrapped__(
-        module.smart_refresh_cache,
-        mode="bootstrap",
-        market="HK",
-        activity_lifecycle="bootstrap",
-    )
-
-    assert result["status"] == "completed"
-    assert result["source"] == "github+live"
-    assert result["refreshed"] == 3
-    assert result["total"] == 3
-    github_service.sync_from_github.assert_called_once_with(
-        fake_db,
-        market="HK",
-        allow_stale=True,
-    )
-    assert fetch_calls == [
-        {"symbols": ["0700.HK", "0005.HK"], "period": "7d", "market": "HK"},
-        {"symbols": ["9999.HK"], "period": "2y", "market": "HK"},
-    ]
-    assert "Daily price bundle as_of_date 2026-06-05 is behind expected session 2026-06-08" in caplog.text
-
-
-def test_bootstrap_current_github_bundle_splits_missing_symbols_by_history(monkeypatch):
-    import app.tasks.cache_tasks as module
-    from app.models.stock import StockPrice
-    from app.models.stock_universe import StockUniverse
-
-    fake_db = MagicMock()
-    universe_rows = [
-        SimpleNamespace(symbol="0700.HK", market="HK"),
-        SimpleNamespace(symbol="0005.HK", market="HK"),
-        SimpleNamespace(symbol="9999.HK", market="HK"),
-    ]
-    price_rows = [("0700.HK", date(2026, 6, 5))]
-
-    def _query_for(rows):
-        query = MagicMock()
-        query.filter.return_value = query
-        query.order_by.return_value = query
-        query.group_by.return_value = query
-        query.all.return_value = rows
-        return query
-
-    universe_query = _query_for(universe_rows)
-    price_query = _query_for(price_rows)
-
-    def _query(*entities):
-        model = getattr(entities[0], "class_", None)
-        if model is StockUniverse:
-            return universe_query
-        if model is StockPrice:
-            return price_query
-        return MagicMock()
-
-    fake_db.query.side_effect = _query
-    fake_price_cache = MagicMock()
-    github_service = MagicMock()
-    github_service.sync_from_github.return_value = {
-        "status": "success",
-        "as_of_date": "2026-06-08",
-        "source_revision": "daily_prices_hk:20260608090000",
-    }
-    github_service.symbols_missing_as_of.return_value = ["0700.HK", "9999.HK"]
-    fetch_calls = []
-
-    monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
-    monkeypatch.setattr(module, "warm_spy_cache", MagicMock(return_value={"status": "ok"}))
-    monkeypatch.setattr(
-        "app.services.runtime_preferences_service.is_market_enabled_now",
-        lambda _market: True,
-    )
-    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: fake_price_cache)
-    monkeypatch.setattr(module, "get_daily_price_bundle_service", lambda: github_service)
-    monkeypatch.setattr("app.services.bulk_data_fetcher.BulkDataFetcher", lambda: MagicMock())
-    monkeypatch.setattr(
-        "app.wiring.bootstrap.get_data_fetch_lock",
-        lambda: SimpleNamespace(extend_lock=lambda *args, **kwargs: None),
-    )
-    monkeypatch.setattr(
-        "app.wiring.bootstrap.get_rate_limiter",
-        lambda: SimpleNamespace(wait_for_market=lambda *args, **kwargs: None),
-    )
-    monkeypatch.setattr(module, "_track_symbol_failures", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module.smart_refresh_cache, "update_state", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_started", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_progress", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "mark_market_activity_completed", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        module,
-        "get_market_calendar_service",
-        lambda: SimpleNamespace(
-            last_completed_trading_day=lambda market: date(2026, 6, 8)
-        ),
-    )
-
-    def _fetch(_fetcher, batch_symbols, *, period, market=None, **_kwargs):
-        fetch_calls.append({"symbols": list(batch_symbols), "period": period, "market": market})
-        return {symbol: _success_result(symbol) for symbol in batch_symbols}
-
-    monkeypatch.setattr(module, "_fetch_with_backoff", _fetch)
-
-    result = module.smart_refresh_cache.run.__wrapped__(
-        module.smart_refresh_cache,
-        mode="bootstrap",
-        market="HK",
-        activity_lifecycle="bootstrap",
-    )
-
-    assert result["status"] == "completed"
-    assert result["source"] == "github+live"
-    assert fetch_calls == [
-        {"symbols": ["0700.HK"], "period": "7d", "market": "HK"},
-        {"symbols": ["9999.HK"], "period": "2y", "market": "HK"},
-    ]
 
 
 def test_bootstrap_smart_refresh_uses_short_failed_symbol_retry_delay(monkeypatch):

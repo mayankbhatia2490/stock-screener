@@ -1,0 +1,284 @@
+"""Price refresh planning for GitHub-seeded and live market refreshes."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import Any
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from ..models.stock import StockPrice
+
+
+STALE_PRICE_TOP_UP_PERIOD = "7d"
+NO_HISTORY_PRICE_BOOTSTRAP_PERIOD = "2y"
+LIVE_TOP_UP_MODES = frozenset({"bootstrap", "delta"})
+GITHUB_SYNC_SUCCESS_STATUSES = frozenset({"success", "up_to_date"})
+
+
+@dataclass(frozen=True)
+class PriceHistoryCoverage:
+    fresh: tuple[str, ...] = ()
+    stale: tuple[str, ...] = ()
+    no_history: tuple[str, ...] = ()
+
+    @property
+    def refresh_symbols(self) -> tuple[str, ...]:
+        return self.stale + self.no_history
+
+
+@dataclass(frozen=True)
+class PriceRefreshJob:
+    kind: str
+    symbols: tuple[str, ...]
+    period: str
+
+
+@dataclass(frozen=True)
+class PriceRefreshPlan:
+    source: str
+    symbols: tuple[str, ...]
+    jobs: tuple[PriceRefreshJob, ...] = ()
+    github_sync: Mapping[str, Any] | None = None
+    completion_message: str | None = None
+
+    @property
+    def used_github_seed(self) -> bool:
+        return (
+            self.github_sync is not None
+            and self.github_sync.get("status") in GITHUB_SYNC_SUCCESS_STATUSES
+        )
+
+
+def _normalize_symbols(symbols: Sequence[str]) -> tuple[str, ...]:
+    return tuple(str(symbol).upper() for symbol in symbols)
+
+
+def _parse_bundle_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_price_history(
+    db: Session,
+    *,
+    symbols: Sequence[str],
+    as_of_date: date,
+) -> PriceHistoryCoverage:
+    """Split symbols by whether persisted prices already cover ``as_of_date``."""
+    normalized_symbols = _normalize_symbols(symbols)
+    latest_by_symbol: dict[str, date | None] = {}
+    for chunk_start in range(0, len(normalized_symbols), 500):
+        chunk_symbols = normalized_symbols[chunk_start:chunk_start + 500]
+        rows = (
+            db.query(StockPrice.symbol, func.max(StockPrice.date))
+            .filter(StockPrice.symbol.in_(chunk_symbols))
+            .group_by(StockPrice.symbol)
+            .all()
+        )
+        latest_by_symbol.update(
+            {str(symbol).upper(): latest_date for symbol, latest_date in rows}
+        )
+
+    fresh_symbols: list[str] = []
+    stale_symbols: list[str] = []
+    no_history_symbols: list[str] = []
+    for symbol in normalized_symbols:
+        latest_date = latest_by_symbol.get(symbol)
+        if latest_date is None:
+            no_history_symbols.append(symbol)
+        elif latest_date < as_of_date:
+            stale_symbols.append(symbol)
+        else:
+            fresh_symbols.append(symbol)
+
+    return PriceHistoryCoverage(
+        fresh=tuple(fresh_symbols),
+        stale=tuple(stale_symbols),
+        no_history=tuple(no_history_symbols),
+    )
+
+
+def build_top_up_jobs(coverage: PriceHistoryCoverage) -> tuple[PriceRefreshJob, ...]:
+    jobs: list[PriceRefreshJob] = []
+    if coverage.stale:
+        jobs.append(
+            PriceRefreshJob(
+                kind="stale",
+                symbols=coverage.stale,
+                period=STALE_PRICE_TOP_UP_PERIOD,
+            )
+        )
+    if coverage.no_history:
+        jobs.append(
+            PriceRefreshJob(
+                kind="no_history",
+                symbols=coverage.no_history,
+                period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
+            )
+        )
+    return tuple(jobs)
+
+
+def _symbols_from_jobs(jobs: Sequence[PriceRefreshJob]) -> tuple[str, ...]:
+    return tuple(symbol for job in jobs for symbol in job.symbols)
+
+
+def _plan_live_full(symbols: tuple[str, ...]) -> PriceRefreshPlan:
+    jobs = (
+        PriceRefreshJob(
+            kind="full",
+            symbols=symbols,
+            period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
+        ),
+    ) if symbols else ()
+    return PriceRefreshPlan(source="live", symbols=symbols, jobs=jobs)
+
+
+def _plan_live_auto(
+    symbols: tuple[str, ...],
+    *,
+    recently_refreshed_filter: Callable[[Sequence[str]], Sequence[str]] | None,
+) -> PriceRefreshPlan:
+    refresh_symbols = (
+        _normalize_symbols(recently_refreshed_filter(symbols))
+        if recently_refreshed_filter is not None
+        else symbols
+    )
+    jobs = (
+        PriceRefreshJob(
+            kind="auto",
+            symbols=refresh_symbols,
+            period=NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,
+        ),
+    ) if refresh_symbols else ()
+    return PriceRefreshPlan(source="live", symbols=refresh_symbols, jobs=jobs)
+
+
+def _plan_live_top_up(
+    db: Session,
+    *,
+    symbols: tuple[str, ...],
+    effective_market: str,
+    market_calendar_service,
+    github_sync: Mapping[str, Any] | None = None,
+) -> PriceRefreshPlan:
+    target_as_of = market_calendar_service.last_completed_trading_day(effective_market)
+    coverage = classify_price_history(db, symbols=symbols, as_of_date=target_as_of)
+    jobs = build_top_up_jobs(coverage)
+    source = "github+live" if github_sync and jobs else "live"
+    return PriceRefreshPlan(
+        source=source,
+        symbols=_symbols_from_jobs(jobs),
+        jobs=jobs,
+        github_sync=github_sync,
+    )
+
+
+def _plan_github_top_up(
+    db: Session,
+    *,
+    symbols: tuple[str, ...],
+    effective_market: str,
+    github_sync: Mapping[str, Any],
+    price_bundle_service,
+    market_calendar_service,
+) -> PriceRefreshPlan:
+    target_as_of = market_calendar_service.last_completed_trading_day(effective_market)
+    github_as_of = _parse_bundle_date(github_sync.get("as_of_date"))
+
+    if github_as_of == target_as_of:
+        candidates = price_bundle_service.symbols_missing_as_of(
+            db,
+            symbols=list(symbols),
+            as_of_date=target_as_of.isoformat(),
+        )
+    else:
+        candidates = symbols
+
+    coverage = classify_price_history(db, symbols=candidates, as_of_date=target_as_of)
+    jobs = build_top_up_jobs(coverage)
+    live_symbols = _symbols_from_jobs(jobs)
+    source = "github+live" if live_symbols else "github"
+    completion_message = None
+    if not live_symbols:
+        completion_message = (
+            "GitHub daily price bundle is current - no live fetch needed"
+            if github_as_of == target_as_of
+            else "All symbols already fresh - no live fetch needed"
+        )
+    return PriceRefreshPlan(
+        source=source,
+        symbols=live_symbols,
+        jobs=jobs,
+        github_sync=github_sync,
+        completion_message=completion_message,
+    )
+
+
+def plan_price_refresh(
+    db: Session,
+    *,
+    all_symbols: Sequence[str],
+    mode: str,
+    activity_lifecycle: str,
+    effective_market: str,
+    price_bundle_service,
+    market_calendar_service,
+    github_seed_allowed: bool = True,
+    recently_refreshed_filter: Callable[[Sequence[str]], Sequence[str]] | None = None,
+) -> PriceRefreshPlan:
+    """Plan live price-fetch work without performing any fetches."""
+    normalized_symbols = _normalize_symbols(all_symbols)
+    if not normalized_symbols:
+        return PriceRefreshPlan(
+            source="live",
+            symbols=(),
+            jobs=(),
+            completion_message="No active symbols found in universe",
+        )
+
+    if mode == "auto":
+        return _plan_live_auto(
+            normalized_symbols,
+            recently_refreshed_filter=recently_refreshed_filter,
+        )
+    if mode == "full":
+        return _plan_live_full(normalized_symbols)
+    if mode not in LIVE_TOP_UP_MODES:
+        raise ValueError(f"Unknown price refresh mode: {mode}")
+
+    github_sync: Mapping[str, Any] | None = None
+    if github_seed_allowed and activity_lifecycle in {"daily_refresh", "bootstrap"}:
+        github_sync = price_bundle_service.sync_from_github(
+            db,
+            market=effective_market,
+            allow_stale=True,
+        )
+
+    if github_sync and github_sync.get("status") in GITHUB_SYNC_SUCCESS_STATUSES:
+        return _plan_github_top_up(
+            db,
+            symbols=normalized_symbols,
+            effective_market=effective_market,
+            github_sync=github_sync,
+            price_bundle_service=price_bundle_service,
+            market_calendar_service=market_calendar_service,
+        )
+
+    return _plan_live_top_up(
+        db,
+        symbols=normalized_symbols,
+        effective_market=effective_market,
+        market_calendar_service=market_calendar_service,
+        github_sync=github_sync,
+    )

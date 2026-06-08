@@ -274,10 +274,11 @@ export default function BootstrapSetupScreen({
                     </Typography>
                   </Stack>
                 </Box>
-                <Alert severity="warning">
-                  {bootstrap?.background_warning
-                    || 'Additional enabled markets may continue loading after the workspace opens.'}
-                </Alert>
+                {bootstrap?.background_warning && (
+                  <Alert severity="warning">
+                    {bootstrap.background_warning}
+                  </Alert>
+                )}
                 <Box>
                   <Typography variant="subtitle2" sx={{ mb: 1 }}>
                     Enabled market queue
