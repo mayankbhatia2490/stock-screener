@@ -239,6 +239,7 @@ async def test_runtime_activity_endpoint_returns_runtime_activity_payload(client
                 "app_ready": False,
                 "primary_market": "US",
                 "enabled_markets": ["US", "HK"],
+                "queue_state": "partial",
                 "current_stage": "Price Refresh",
                 "progress_mode": "indeterminate",
                 "percent": None,
@@ -279,6 +280,7 @@ async def test_runtime_activity_endpoint_returns_runtime_activity_payload(client
     assert response.status_code == 200
     payload = response.json()
     assert payload["bootstrap"]["current_stage"] == "Price Refresh"
+    assert payload["bootstrap"]["queue_state"] == "partial"
     assert payload["bootstrap"]["progress_mode"] == "indeterminate"
     assert payload["bootstrap"]["percent"] is None
     assert payload["summary"]["active_markets"] == ["US"]

@@ -12,6 +12,11 @@ from typing import Any
 from celery.exceptions import SoftTimeLimitExceeded
 
 from ..config import settings
+from ..services.price_refresh_actions import (
+    PriceRefreshAction,
+    PriceRefreshActionFactory,
+    PriceRefreshPreparation,
+)
 from ..services.price_refresh_activity import (
     CeleryTaskLike,
     PriceRefreshActivityReporter,
@@ -27,7 +32,6 @@ from ..services.price_refresh_execution import PriceRefreshExecutionSummary
 from ..services.price_refresh_planning import (
     GitHubSeedOutcome,
     LIVE_TOP_UP_MODES,
-    PriceRefreshJob,
     PriceRefreshMode,
     PriceRefreshPlan,
     PriceRefreshSource,
@@ -63,23 +67,6 @@ class PriceRefreshWorkflowDependencies:
     raise_if_transient_database_error: Callable[[Exception], None]
     safe_rollback: Callable[[Any], None]
     time_window_bypass_enabled: Callable[[], bool] = lambda: False
-
-
-@dataclass(frozen=True)
-class PriceRefreshPreparation:
-    all_symbols: list[str]
-    symbol_markets: dict[str, str]
-    github_seed: GitHubSeedOutcome | None
-    refresh_plan: PriceRefreshPlan
-    refresh_source: PriceRefreshSource
-    symbols: list[str]
-    live_refresh_jobs: list[PriceRefreshJob]
-
-
-@dataclass(frozen=True)
-class PriceRefreshTerminalCompletion:
-    outcome: PriceRefreshOutcome
-    finalization: PriceRefreshFinalization
 
 
 class PriceRefreshWorkflow:
@@ -166,19 +153,21 @@ class PriceRefreshWorkflow:
                 activity_lifecycle=activity_lifecycle,
                 log_extra=log_extra,
             )
-
-            no_live_result = self._complete_without_live_fetch(
-                db,
-                price_cache,
-                task=task,
+            action = self._build_executable_action(
                 mode=parsed_mode,
-                market=market,
                 effective_market=effective_market,
-                activity_lifecycle=activity_lifecycle,
                 preparation=preparation,
             )
-            if no_live_result is not None:
-                return no_live_result
+            if not action.requires_live_fetch:
+                return self._complete_terminal_action(
+                    db,
+                    price_cache,
+                    task=task,
+                    market=market,
+                    effective_market=effective_market,
+                    activity_lifecycle=activity_lifecycle,
+                    action=action,
+                )
 
             outcome = self._execute_live_refresh(
                 db,
@@ -188,7 +177,7 @@ class PriceRefreshWorkflow:
                 market=market,
                 effective_market=effective_market,
                 activity_lifecycle=activity_lifecycle,
-                preparation=preparation,
+                preparation=action.preparation,
             )
             return outcome.to_task_result()
 
@@ -394,26 +383,40 @@ class PriceRefreshWorkflow:
         )
         return preparation
 
-    def _complete_without_live_fetch(
+    def _build_executable_action(
+        self,
+        *,
+        mode: PriceRefreshMode,
+        effective_market: str,
+        preparation: PriceRefreshPreparation,
+    ) -> PriceRefreshAction:
+        def last_completed_trading_day(action_market: str) -> Any:
+            return (
+                self._deps.market_calendar_service_factory()
+                .last_completed_trading_day(action_market)
+            )
+
+        return PriceRefreshActionFactory(
+            last_completed_trading_day=last_completed_trading_day,
+        ).build(
+            mode=mode,
+            effective_market=effective_market,
+            preparation=preparation,
+        )
+
+    def _complete_terminal_action(
         self,
         db,
         price_cache,
         *,
         task: CeleryTaskLike,
-        mode: PriceRefreshMode,
         market: str | None,
         effective_market: str,
         activity_lifecycle: str,
-        preparation: PriceRefreshPreparation,
-    ) -> dict[str, Any] | None:
-        if preparation.symbols:
-            return None
-
-        completion = self._terminal_completion(
-            mode=mode,
-            effective_market=effective_market,
-            preparation=preparation,
-        )
+        action: PriceRefreshAction,
+    ) -> dict[str, Any]:
+        if action.terminal_completion is None:
+            raise ValueError("price refresh action requires live fetch")
         self._deps.activity_reporter.finalize_success(
             db,
             price_cache,
@@ -421,58 +424,9 @@ class PriceRefreshWorkflow:
             market=market,
             effective_market=effective_market,
             lifecycle=activity_lifecycle,
-            finalization=completion.finalization,
+            finalization=action.terminal_completion.finalization,
         )
-        return completion.outcome.to_task_result()
-
-    def _terminal_completion(
-        self,
-        *,
-        mode: PriceRefreshMode,
-        effective_market: str,
-        preparation: PriceRefreshPreparation,
-    ) -> PriceRefreshTerminalCompletion:
-        if preparation.refresh_source is PriceRefreshSource.GITHUB:
-            message = (
-                preparation.refresh_plan.completion_message
-                or "GitHub daily price bundle is current - no live fetch needed"
-            )
-            symbol_count = len(preparation.all_symbols)
-            trading_day = self._completion_trading_day(
-                preparation.github_seed,
-                effective_market,
-            )
-            finalization = PriceRefreshFinalization(
-                metadata_status="completed",
-                metadata_refreshed=symbol_count,
-                metadata_total=symbol_count,
-                activity_current=symbol_count,
-                activity_total=symbol_count,
-                message=message,
-                market_success_rates={effective_market: (trading_day, 1.0)},
-            )
-        else:
-            message = self._empty_refresh_message(preparation.refresh_plan, mode)
-            finalization = PriceRefreshFinalization(
-                metadata_status="completed",
-                metadata_refreshed=0,
-                metadata_total=0,
-                activity_current=0,
-                activity_total=0,
-                message=message,
-                heartbeat_status=None,
-            )
-
-        return PriceRefreshTerminalCompletion(
-            outcome=PriceRefreshOutcome(
-                status="completed",
-                source=preparation.refresh_source,
-                mode=mode,
-                message=message,
-                github_seed=preparation.github_seed,
-            ),
-            finalization=finalization,
-        )
+        return action.terminal_completion.outcome.to_task_result()
 
     def _execute_live_refresh(
         self,
@@ -735,27 +689,3 @@ class PriceRefreshWorkflow:
                 self._deps.market_gateway.market_tag(market),
                 extra=log_extra,
             )
-
-    def _completion_trading_day(
-        self,
-        github_seed: GitHubSeedOutcome | None,
-        effective_market: str,
-    ):
-        if github_seed and github_seed.as_of_date is not None:
-            return github_seed.as_of_date
-        return self._deps.market_calendar_service_factory().last_completed_trading_day(
-            effective_market
-        )
-
-    @staticmethod
-    def _empty_refresh_message(
-        refresh_plan: PriceRefreshPlan,
-        mode: PriceRefreshMode,
-    ) -> str:
-        if refresh_plan.completion_message:
-            return refresh_plan.completion_message
-        if mode is PriceRefreshMode.AUTO:
-            return "All symbols recently refreshed - nothing to do"
-        if mode in {PriceRefreshMode.BOOTSTRAP, PriceRefreshMode.DELTA}:
-            return "All symbols already fresh - no live fetch needed"
-        return "No active symbols found in universe"

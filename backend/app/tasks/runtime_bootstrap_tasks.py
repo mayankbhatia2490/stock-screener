@@ -195,6 +195,26 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
     market_task_ids: dict[str, str] = {}
     primary_task_id: str | None = None
 
+    def record_partial_manifest() -> None:
+        try:
+            record_runtime_bootstrap_run(
+                primary_market=primary,
+                enabled_markets=enabled,
+                primary_task_id=primary_task_id,
+                market_task_ids=market_task_ids,
+                queue_state="partial",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to record partial bootstrap task manifest",
+                extra={
+                    "primary_market": primary,
+                    "enabled_markets": enabled,
+                    "market_task_ids": market_task_ids,
+                },
+                exc_info=True,
+            )
+
     record_runtime_bootstrap_run(
         primary_market=primary,
         enabled_markets=enabled,
@@ -213,6 +233,7 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
         )
         primary_task_id = primary_task.id
         market_task_ids[primary] = primary_task.id
+        record_partial_manifest()
 
         for market_plan in plan.market_plans:
             if market_plan.market == primary:
@@ -225,27 +246,9 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
                 errback_kwargs={"market": market_plan.market},
             )
             market_task_ids[market_plan.market] = background_task.id
+            record_partial_manifest()
 
     except Exception:
-        if primary_task_id is not None and market_task_ids:
-            try:
-                record_runtime_bootstrap_run(
-                    primary_market=primary,
-                    enabled_markets=enabled,
-                    primary_task_id=primary_task_id,
-                    market_task_ids=market_task_ids,
-                    queue_state="partial",
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to record partial bootstrap task manifest",
-                    extra={
-                        "primary_market": primary,
-                        "enabled_markets": enabled,
-                        "market_task_ids": market_task_ids,
-                    },
-                    exc_info=True,
-                )
         raise
 
     try:

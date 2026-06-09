@@ -309,6 +309,36 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
+            },
+            "queue_state": "partial",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK", "TW"),
+            "primary_task_id": "primary-task-123",
+            "market_task_ids": {
+                "US": "primary-task-123",
+                "HK": "background-task-2",
+            },
+            "queue_state": "partial",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK", "TW"),
+            "primary_task_id": "primary-task-123",
+            "market_task_ids": {
+                "US": "primary-task-123",
+                "HK": "background-task-2",
+                "TW": "background-task-3",
+            },
+            "queue_state": "partial",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK", "TW"),
+            "primary_task_id": "primary-task-123",
+            "market_task_ids": {
+                "US": "primary-task-123",
                 "HK": "background-task-2",
                 "TW": "background-task-3",
             },
@@ -392,6 +422,20 @@ def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeyp
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
             "primary_task_id": "task-us",
+            "market_task_ids": {"US": "task-us"},
+            "queue_state": "partial",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
+            "primary_task_id": "task-us",
+            "market_task_ids": {"US": "task-us", "HK": "task-hk"},
+            "queue_state": "partial",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
+            "primary_task_id": "task-us",
             "market_task_ids": {"US": "task-us", "HK": "task-hk"},
             "queue_state": "queued",
         }
@@ -449,7 +493,7 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
             "primary_task_id": "primary-task-123",
             "market_task_ids": {"US": "primary-task-123"},
             "queue_state": "partial",
-        }
+        },
     ]
 
 

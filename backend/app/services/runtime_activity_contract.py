@@ -6,7 +6,22 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 ACTIVE_ACTIVITY_STATUSES = frozenset({"queued", "running"})
-_MISSING = object()
+RUNTIME_PROGRESS_MODES = frozenset({"determinate", "indeterminate"})
+RUNTIME_ACTIVITY_PAYLOAD_FIELDS = frozenset({
+    "market",
+    "lifecycle",
+    "stage_key",
+    "stage_label",
+    "status",
+    "progress_mode",
+    "percent",
+    "current",
+    "total",
+    "message",
+    "task_name",
+    "task_id",
+    "updated_at",
+})
 
 RUNTIME_STAGE_SEQUENCE = (
     "universe",
@@ -134,49 +149,47 @@ class RuntimeActivityRecord:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "RuntimeActivityRecord":
+        missing_fields = RUNTIME_ACTIVITY_PAYLOAD_FIELDS.difference(payload)
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise ValueError(f"missing required runtime activity fields: {missing}")
+
         stage_key = payload.get("stage_key")
         status = str(payload.get("status") or "idle")
-        lifecycle = payload.get("lifecycle") or default_lifecycle(stage_key)
+        lifecycle = str(payload.get("lifecycle") or "")
+        if not lifecycle:
+            raise ValueError("missing lifecycle")
+        raw_progress_mode = str(payload.get("progress_mode") or "")
+        if raw_progress_mode not in RUNTIME_PROGRESS_MODES:
+            raise ValueError(f"invalid progress_mode: {raw_progress_mode}")
         current = payload.get("current")
         total = payload.get("total")
 
-        raw_percent = payload.get("percent", _MISSING)
+        raw_percent = payload.get("percent")
         percent = (
-            resolve_progress_percent(None, current, total)
-            if raw_percent is _MISSING
-            else (float(raw_percent) if raw_percent is not None else None)
+            float(raw_percent)
+            if raw_percent is not None
+            else None
         )
-
-        raw_stage_label = payload.get("stage_label", _MISSING)
-        raw_progress_mode = payload.get("progress_mode", _MISSING)
-        raw_message = payload.get("message", _MISSING)
 
         return cls(
             market=str(payload.get("market") or "").upper(),
-            lifecycle=str(lifecycle),
+            lifecycle=lifecycle,
             stage_key=stage_key,
             stage_label=(
-                stage_label(stage_key)
-                if raw_stage_label is _MISSING
-                else (
-                    str(raw_stage_label)
-                    if raw_stage_label is not None
-                    else None
-                )
+                str(payload["stage_label"])
+                if payload.get("stage_label") is not None
+                else None
             ),
             status=status,
-            progress_mode=(
-                progress_mode(status, percent, current, total)
-                if raw_progress_mode is _MISSING
-                else str(raw_progress_mode)
-            ),
+            progress_mode=raw_progress_mode,
             percent=percent,
             current=current,
             total=total,
             message=(
-                _default_message(status, stage_label(stage_key))
-                if raw_message is _MISSING
-                else (str(raw_message) if raw_message is not None else None)
+                str(payload["message"])
+                if payload.get("message") is not None
+                else None
             ),
             task_name=payload.get("task_name"),
             task_id=payload.get("task_id"),

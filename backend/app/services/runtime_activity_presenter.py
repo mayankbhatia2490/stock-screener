@@ -121,6 +121,7 @@ def build_runtime_activity_status(
             "app_ready": not bootstrap_status.bootstrap_required,
             "primary_market": primary_market,
             "enabled_markets": enabled_markets,
+            "queue_state": bootstrap_run.get("queue_state") or "queued",
             "task_id": bootstrap_run.get("primary_task_id"),
             "market_task_ids": bootstrap_run.get("market_task_ids") or {},
             "current_stage": bootstrap_stage,

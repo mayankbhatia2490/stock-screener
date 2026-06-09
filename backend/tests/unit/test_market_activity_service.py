@@ -116,6 +116,7 @@ def test_runtime_activity_status_exposes_bootstrap_run_task_manifest(db_session,
 
     payload = module.get_runtime_activity_status(db_session)
 
+    assert payload["bootstrap"]["queue_state"] == "queued"
     assert payload["bootstrap"]["task_id"] == "primary-task-123"
     assert payload["bootstrap"]["market_task_ids"] == {
         "US": "primary-task-123",
@@ -187,6 +188,40 @@ def test_runtime_activity_record_from_payload_preserves_explicit_contract_fields
     assert record.current == 25
     assert record.total == 100
     assert record.message == "Waiting on provider"
+
+
+def test_runtime_activity_record_from_payload_rejects_invalid_contract_fields():
+    from app.services.runtime_activity_contract import RuntimeActivityRecord
+
+    with pytest.raises(ValueError, match="missing required runtime activity fields"):
+        RuntimeActivityRecord.from_payload(
+            {
+                "market": "US",
+                "stage_key": "prices",
+                "status": "running",
+                "progress_mode": "determinate",
+                "percent": 50,
+            }
+        )
+
+    with pytest.raises(ValueError, match="invalid progress_mode"):
+        RuntimeActivityRecord.from_payload(
+            {
+                "market": "US",
+                "lifecycle": "bootstrap",
+                "stage_key": "prices",
+                "stage_label": "Price Refresh",
+                "status": "running",
+                "progress_mode": "mostly",
+                "percent": 50,
+                "current": 50,
+                "total": 100,
+                "message": "Refreshing prices",
+                "task_name": "smart_refresh_cache",
+                "task_id": "task-us",
+                "updated_at": "2026-06-09T01:02:03+00:00",
+            }
+        )
 
 
 def test_mark_market_activity_progress_updates_running_record_with_determinate_progress(
