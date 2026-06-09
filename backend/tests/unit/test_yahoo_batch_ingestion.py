@@ -363,7 +363,13 @@ def test_fetch_prices_in_batches_delays_growth_until_cooldown_expires(monkeypatc
     fetcher = BulkDataFetcher()
     observed_batch_sizes = []
 
-    def fake_fetch_price_batch_with_retries(batch_symbols, *, period, initial_batch_size, market=None):
+    def fake_fetch_price_batch_with_retries(
+        batch_symbols,
+        *,
+        period,
+        initial_batch_size,
+        market=None,
+    ):
         _ = period
         _ = market
         observed_batch_sizes.append(initial_batch_size)
@@ -398,7 +404,11 @@ def test_fetch_prices_in_batches_delays_growth_until_cooldown_expires(monkeypatc
         def wait(*args, **kwargs):
             return None
 
-    monkeypatch.setattr(fetcher, "_fetch_price_batch_with_retries", fake_fetch_price_batch_with_retries)
+    monkeypatch.setattr(
+        fetcher,
+        "_fetch_price_batch_with_retries",
+        fake_fetch_price_batch_with_retries,
+    )
     monkeypatch.setattr(fetcher, "_rate_limiter", _StubRateLimiter())
     monkeypatch.setattr("app.services.bulk_data_fetcher.settings.yfinance_batch_rate_limit_interval", 0)
 
@@ -406,6 +416,64 @@ def test_fetch_prices_in_batches_delays_growth_until_cooldown_expires(monkeypatc
     fetcher.fetch_prices_in_batches(symbols, period="2y", start_batch_size=100)
 
     assert observed_batch_sizes[:8] == [100, 50, 50, 50, 50, 50, 50, 75]
+
+
+def test_fetch_prices_in_batches_shrinks_on_attempted_transient_failures(monkeypatch):
+    fetcher = BulkDataFetcher()
+    observed_batch_sizes = []
+    breaker = MagicMock()
+    breaker.check.return_value = "closed"
+
+    def fake_fetch_price_batch_with_retries(batch_symbols, *, period, initial_batch_size, market=None):
+        _ = period
+        _ = market
+        observed_batch_sizes.append(initial_batch_size)
+        if len(observed_batch_sizes) == 1:
+            results = {}
+            for symbol in batch_symbols:
+                if symbol.startswith("0"):
+                    results[symbol] = fetcher._build_error_result(
+                        symbol,
+                        "JP local code is zero-prefixed",
+                        error_kind="no_price_data",
+                    )
+                else:
+                    results[symbol] = fetcher._build_error_result(
+                        symbol,
+                        "429 rate limited",
+                        error_kind="rate_limit",
+                    )
+            return results
+        return {symbol: _success_result(symbol) for symbol in batch_symbols}
+
+    class _StubRateLimiter:
+        @staticmethod
+        def wait(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def wait_for_market(*args, **kwargs):
+            return None
+
+    invalid_symbols = [f"{index:04d}.T" for index in range(1, 50)]
+    symbols = [*invalid_symbols, "7203.T", *[f"NEXT{index}" for index in range(25)]]
+
+    monkeypatch.setattr(fetcher, "_fetch_price_batch_with_retries", fake_fetch_price_batch_with_retries)
+    monkeypatch.setattr(fetcher, "_rate_limiter", _StubRateLimiter())
+    monkeypatch.setattr(
+        "app.services.provider_circuit_breaker.get_circuit_breaker",
+        lambda: breaker,
+    )
+
+    fetcher._fetch_yfinance_prices_in_batches(
+        symbols,
+        period="2y",
+        start_batch_size=50,
+        market="JP",
+    )
+
+    assert observed_batch_sizes[:2] == [50, 25]
+    breaker.record_429.assert_called_once_with("yfinance", "JP")
 
 
 def test_fetch_prices_in_batches_uses_krx_first_for_korea(monkeypatch):

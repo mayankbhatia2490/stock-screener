@@ -25,6 +25,7 @@ from .price_fetch_failures import (
     classify_price_fetch_error,
     is_no_data_price_failure,
     is_rate_limit_error,
+    is_retryable_price_failure,
     normalize_price_fetch_failure_kind,
 )
 from .price_symbol_validation import yahoo_price_no_data_error_for_symbol
@@ -190,15 +191,15 @@ class BulkDataFetcher:
         if not results:
             return 1.0
 
+        retryable_results = 0
         transient_failures = 0
         for data in results.values():
-            if not data.get("has_error"):
-                continue
             error = data.get("error", "")
             error_kind = normalize_price_fetch_failure_kind(data.get("error_kind"))
-            if error_kind is not None and error_kind.value == "no_price_data":
+            if not is_retryable_price_failure(kind=error_kind, error=error):
                 continue
-            if error_kind is None and self._is_permanent_missing_price_error(error):
+            retryable_results += 1
+            if not data.get("has_error"):
                 continue
             if (
                 (error_kind is not None and error_kind.value in {"rate_limit", "transient"})
@@ -206,7 +207,9 @@ class BulkDataFetcher:
                 or "empty" in error.lower()
             ):
                 transient_failures += 1
-        return transient_failures / len(results)
+        if retryable_results == 0:
+            return 0.0
+        return transient_failures / retryable_results
 
     def fetch_batch_data(
         self,
@@ -877,7 +880,7 @@ class BulkDataFetcher:
 
             attempt_results = {**permanent_failures, **fetch_results}
             last_results = attempt_results
-            failure_rate = self._transient_failure_rate(fetch_results)
+            failure_rate = self._transient_failure_rate(attempt_results)
             if failure_rate <= 0.20 or attempt == len(backoff_schedule):
                 return attempt_results
 
