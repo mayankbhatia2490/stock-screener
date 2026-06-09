@@ -199,6 +199,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     market_chains = []
     applied_chains = []
     recorded_runs = []
+    events = []
 
     class _FakeChain:
         def __init__(self, *signatures) -> None:
@@ -206,6 +207,7 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
             market_chains.append([signature.task for signature in signatures])
 
         def apply_async(self, **kwargs):
+            events.append(("apply", self.signatures[0].task))
             applied_chains.append(
                 {
                     "tasks": [signature.task for signature in self.signatures],
@@ -249,13 +251,17 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids: recorded_runs.append(
-            {
-                "primary_market": primary_market,
-                "enabled_markets": tuple(enabled_markets),
-                "primary_task_id": primary_task_id,
-                "market_task_ids": dict(market_task_ids),
-            }
+        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state: (
+            events.append(("record", queue_state, primary_task_id, dict(market_task_ids))),
+            recorded_runs.append(
+                {
+                    "primary_market": primary_market,
+                    "enabled_markets": tuple(enabled_markets),
+                    "primary_task_id": primary_task_id,
+                    "market_task_ids": dict(market_task_ids),
+                    "queue_state": queue_state,
+                }
+            ),
         ),
     )
 
@@ -265,6 +271,17 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
     )
 
     assert result == "primary-task-123"
+    assert events[0] == ("record", "queueing", None, {})
+    assert events[-1] == (
+        "record",
+        "queued",
+        "primary-task-123",
+        {
+            "US": "primary-task-123",
+            "HK": "background-task-2",
+            "TW": "background-task-3",
+        },
+    )
     assert market_chains == [
         ["task:US", "app.tasks.runtime_bootstrap_tasks.complete_local_runtime_bootstrap"],
         ["task:HK", "app.tasks.runtime_bootstrap_tasks.complete_background_market_bootstrap"],
@@ -282,12 +299,101 @@ def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chai
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK", "TW"),
+            "primary_task_id": None,
+            "market_task_ids": {},
+            "queue_state": "queueing",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK", "TW"),
             "primary_task_id": "primary-task-123",
             "market_task_ids": {
                 "US": "primary-task-123",
                 "HK": "background-task-2",
                 "TW": "background-task-3",
             },
+            "queue_state": "queued",
+        },
+    ]
+
+
+def test_queue_local_runtime_bootstrap_does_not_dispatch_when_initial_manifest_fails(monkeypatch):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    applied = []
+
+    class _FakeAsyncResult:
+        def __init__(self, task_id: str) -> None:
+            self.id = task_id
+
+    def _queue(market_plan, **_kwargs):
+        applied.append(market_plan.market)
+        return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
+
+    monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
+    monkeypatch.setattr(
+        module,
+        "record_runtime_bootstrap_run",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("manifest write failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="manifest write failed"):
+        module.queue_local_runtime_bootstrap(
+            primary_market="US",
+            enabled_markets=["US", "HK"],
+        )
+
+    assert applied == []
+
+
+def test_queue_local_runtime_bootstrap_logs_late_manifest_update_failure(monkeypatch):
+    from app.tasks import runtime_bootstrap_tasks as module
+
+    class _FakeAsyncResult:
+        def __init__(self, task_id: str) -> None:
+            self.id = task_id
+
+    recorded_runs = []
+
+    def _queue(market_plan, **_kwargs):
+        return _FakeAsyncResult(f"task-{market_plan.market.lower()}")
+
+    def _record(*, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state):
+        recorded_runs.append(
+            {
+                "primary_market": primary_market,
+                "enabled_markets": tuple(enabled_markets),
+                "primary_task_id": primary_task_id,
+                "market_task_ids": dict(market_task_ids),
+                "queue_state": queue_state,
+            }
+        )
+        if queue_state == "queued":
+            raise RuntimeError("late manifest write failed")
+
+    monkeypatch.setattr(module, "_queue_market_bootstrap_workflow", _queue)
+    monkeypatch.setattr(module, "record_runtime_bootstrap_run", _record)
+
+    result = module.queue_local_runtime_bootstrap(
+        primary_market="US",
+        enabled_markets=["US", "HK"],
+    )
+
+    assert result == "task-us"
+    assert recorded_runs == [
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
+            "primary_task_id": None,
+            "market_task_ids": {},
+            "queue_state": "queueing",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
+            "primary_task_id": "task-us",
+            "market_task_ids": {"US": "task-us", "HK": "task-hk"},
+            "queue_state": "queued",
         }
     ]
 
@@ -312,12 +418,13 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
     monkeypatch.setattr(
         module,
         "record_runtime_bootstrap_run",
-        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids: recorded_runs.append(
+        lambda *, primary_market, enabled_markets, primary_task_id, market_task_ids, queue_state: recorded_runs.append(
             {
                 "primary_market": primary_market,
                 "enabled_markets": tuple(enabled_markets),
                 "primary_task_id": primary_task_id,
                 "market_task_ids": dict(market_task_ids),
+                "queue_state": queue_state,
             }
         ),
     )
@@ -332,8 +439,16 @@ def test_queue_local_runtime_bootstrap_records_partial_manifest_when_background_
         {
             "primary_market": "US",
             "enabled_markets": ("US", "HK"),
+            "primary_task_id": None,
+            "market_task_ids": {},
+            "queue_state": "queueing",
+        },
+        {
+            "primary_market": "US",
+            "enabled_markets": ("US", "HK"),
             "primary_task_id": "primary-task-123",
             "market_task_ids": {"US": "primary-task-123"},
+            "queue_state": "partial",
         }
     ]
 

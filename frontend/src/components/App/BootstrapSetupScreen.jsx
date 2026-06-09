@@ -32,14 +32,15 @@ function formatCount(value) {
   return new Intl.NumberFormat('en-US').format(value);
 }
 
-function resolveDeterminatePercent(percent, current, total) {
-  if (Number.isFinite(percent)) {
-    return Math.max(0, Math.min(100, Number(percent)));
+function normalizeProgressPercent(percent) {
+  if (percent === null || percent === undefined) {
+    return null;
   }
-  if (current != null && total != null && total > 0) {
-    return Math.max(0, Math.min(100, (Number(current) / Number(total)) * 100));
+  const value = Number(percent);
+  if (!Number.isFinite(value)) {
+    return null;
   }
-  return null;
+  return Math.max(0, Math.min(100, value));
 }
 
 function normalizeEnabled(primaryMarket, enabledMarkets) {
@@ -96,11 +97,7 @@ export default function BootstrapSetupScreen({
     () => activityQuery.data?.markets ?? [],
     [activityQuery.data?.markets]
   );
-  const bootstrapResolvedPercent = resolveDeterminatePercent(
-    bootstrap?.percent,
-    bootstrap?.current,
-    bootstrap?.total,
-  );
+  const bootstrapResolvedPercent = normalizeProgressPercent(bootstrap?.percent);
   const requestedBootstrapProgressMode = (
     bootstrap?.progress_mode
     || 'indeterminate'

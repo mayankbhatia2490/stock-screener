@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 ACTIVE_ACTIVITY_STATUSES = frozenset({"queued", "running"})
+_MISSING = object()
 
 RUNTIME_STAGE_SEQUENCE = (
     "universe",
@@ -133,17 +134,52 @@ class RuntimeActivityRecord:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "RuntimeActivityRecord":
-        return cls.create(
-            market=str(payload.get("market") or ""),
-            stage_key=payload.get("stage_key"),
-            lifecycle=payload.get("lifecycle"),
-            status=str(payload.get("status") or "idle"),
+        stage_key = payload.get("stage_key")
+        status = str(payload.get("status") or "idle")
+        lifecycle = payload.get("lifecycle") or default_lifecycle(stage_key)
+        current = payload.get("current")
+        total = payload.get("total")
+
+        raw_percent = payload.get("percent", _MISSING)
+        percent = (
+            resolve_progress_percent(None, current, total)
+            if raw_percent is _MISSING
+            else (float(raw_percent) if raw_percent is not None else None)
+        )
+
+        raw_stage_label = payload.get("stage_label", _MISSING)
+        raw_progress_mode = payload.get("progress_mode", _MISSING)
+        raw_message = payload.get("message", _MISSING)
+
+        return cls(
+            market=str(payload.get("market") or "").upper(),
+            lifecycle=str(lifecycle),
+            stage_key=stage_key,
+            stage_label=(
+                stage_label(stage_key)
+                if raw_stage_label is _MISSING
+                else (
+                    str(raw_stage_label)
+                    if raw_stage_label is not None
+                    else None
+                )
+            ),
+            status=status,
+            progress_mode=(
+                progress_mode(status, percent, current, total)
+                if raw_progress_mode is _MISSING
+                else str(raw_progress_mode)
+            ),
+            percent=percent,
+            current=current,
+            total=total,
+            message=(
+                _default_message(status, stage_label(stage_key))
+                if raw_message is _MISSING
+                else (str(raw_message) if raw_message is not None else None)
+            ),
             task_name=payload.get("task_name"),
             task_id=payload.get("task_id"),
-            percent=payload.get("percent"),
-            current=payload.get("current"),
-            total=payload.get("total"),
-            message=payload.get("message"),
             updated_at=payload.get("updated_at"),
         )
 

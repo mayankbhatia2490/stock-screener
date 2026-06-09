@@ -207,7 +207,7 @@ describe('BootstrapSetupScreen', () => {
     expect(screen.getByText('Fundamentals Refresh')).toBeInTheDocument();
   });
 
-  it('derives bootstrap summary percent from bootstrap counts when percent is absent', () => {
+  it('does not derive bootstrap summary percent from counts when percent is absent', () => {
     useRuntimeActivityMock.mockReturnValue({
       data: {
         bootstrap: {
@@ -248,7 +248,7 @@ describe('BootstrapSetupScreen', () => {
       />
     );
 
-    expect(screen.getByText('25%')).toBeInTheDocument();
+    expect(screen.queryByText('25%')).not.toBeInTheDocument();
     expect(screen.getByText('250 / 1,000 stocks')).toBeInTheDocument();
     expect(screen.getAllByText(/Batch 2\/4 · refreshing prices/).length).toBeGreaterThan(0);
   });

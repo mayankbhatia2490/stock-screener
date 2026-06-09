@@ -159,6 +159,36 @@ def test_runtime_activity_status_marks_running_stage_without_real_percent_as_ind
     assert us_market["percent"] is None
 
 
+def test_runtime_activity_record_from_payload_preserves_explicit_contract_fields():
+    from app.services.runtime_activity_contract import RuntimeActivityRecord
+
+    record = RuntimeActivityRecord.from_payload(
+        {
+            "market": "jp",
+            "lifecycle": "bootstrap",
+            "stage_key": "prices",
+            "stage_label": "Live Price Backfill",
+            "status": "running",
+            "progress_mode": "indeterminate",
+            "percent": None,
+            "current": 25,
+            "total": 100,
+            "message": "Waiting on provider",
+            "task_name": "smart_refresh_cache",
+            "task_id": "task-jp",
+            "updated_at": "2026-06-09T01:02:03+00:00",
+        }
+    )
+
+    assert record.market == "JP"
+    assert record.stage_label == "Live Price Backfill"
+    assert record.progress_mode == "indeterminate"
+    assert record.percent is None
+    assert record.current == 25
+    assert record.total == 100
+    assert record.message == "Waiting on provider"
+
+
 def test_mark_market_activity_progress_updates_running_record_with_determinate_progress(
     db_session,
     monkeypatch,

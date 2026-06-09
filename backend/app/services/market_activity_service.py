@@ -67,8 +67,9 @@ def save_runtime_bootstrap_run(
     *,
     primary_market: str,
     enabled_markets: list[str],
-    primary_task_id: str,
-    market_task_ids: dict[str, str],
+    primary_task_id: str | None = None,
+    market_task_ids: dict[str, str | None] | None = None,
+    queue_state: str = "queued",
 ) -> dict[str, Any]:
     return BootstrapRunManifestRepository().save(
         db,
@@ -76,7 +77,8 @@ def save_runtime_bootstrap_run(
             primary_market=primary_market,
             enabled_markets=enabled_markets,
             primary_task_id=primary_task_id,
-            market_task_ids=market_task_ids,
+            market_task_ids=market_task_ids or {},
+            queue_state=queue_state,
             queued_at=_utcnow_iso(),
         ),
     )

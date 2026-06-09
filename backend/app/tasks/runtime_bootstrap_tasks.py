@@ -113,8 +113,9 @@ def record_runtime_bootstrap_run(
     *,
     primary_market: str,
     enabled_markets: Iterable[str],
-    primary_task_id: str,
-    market_task_ids: dict[str, str],
+    primary_task_id: str | None = None,
+    market_task_ids: dict[str, str | None] | None = None,
+    queue_state: str = "queued",
 ) -> dict:
     db = SessionLocal()
     try:
@@ -124,7 +125,8 @@ def record_runtime_bootstrap_run(
                 primary_market=primary_market,
                 enabled_markets=enabled_markets,
                 primary_task_id=primary_task_id,
-                market_task_ids=market_task_ids,
+                market_task_ids=market_task_ids or {},
+                queue_state=queue_state,
                 queued_at=datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -192,6 +194,15 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
     primary_plan = market_plans_by_code[primary]
     market_task_ids: dict[str, str] = {}
     primary_task_id: str | None = None
+
+    record_runtime_bootstrap_run(
+        primary_market=primary,
+        enabled_markets=enabled,
+        primary_task_id=None,
+        market_task_ids={},
+        queue_state="queueing",
+    )
+
     try:
         primary_task = _queue_market_bootstrap_workflow(
             primary_plan,
@@ -223,6 +234,7 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
                     enabled_markets=enabled,
                     primary_task_id=primary_task_id,
                     market_task_ids=market_task_ids,
+                    queue_state="partial",
                 )
             except Exception:
                 logger.warning(
@@ -242,9 +254,10 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
             enabled_markets=enabled,
             primary_task_id=primary_task_id,
             market_task_ids=market_task_ids,
+            queue_state="queued",
         )
     except Exception:
-        logger.error(
+        logger.warning(
             "Queued bootstrap tasks but failed to record task manifest",
             extra={
                 "primary_market": primary,
@@ -253,7 +266,6 @@ def queue_local_runtime_bootstrap(*, primary_market: str, enabled_markets: Itera
             },
             exc_info=True,
         )
-        raise
 
     logger.info(
         "Queued local runtime bootstrap",

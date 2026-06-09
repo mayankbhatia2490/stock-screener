@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -20,8 +20,9 @@ BOOTSTRAP_RUN_DESCRIPTION = "Latest local runtime bootstrap run task manifest."
 class BootstrapRunManifest:
     primary_market: str
     enabled_markets: tuple[str, ...]
-    primary_task_id: str
-    market_task_ids: Mapping[str, str]
+    primary_task_id: str | None = None
+    market_task_ids: Mapping[str, str | None] = field(default_factory=dict)
+    queue_state: str = "queued"
     queued_at: str | None = None
 
     def __post_init__(self) -> None:
@@ -35,18 +36,24 @@ class BootstrapRunManifest:
             self,
             "market_task_ids",
             {
-                str(market).upper(): task_id
+                str(market).upper(): str(task_id) if task_id is not None else None
                 for market, task_id in self.market_task_ids.items()
             },
         )
+        object.__setattr__(self, "queue_state", str(self.queue_state))
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "BootstrapRunManifest":
         return cls(
             primary_market=str(payload["primary_market"]),
             enabled_markets=tuple(payload.get("enabled_markets") or ()),
-            primary_task_id=str(payload["primary_task_id"]),
+            primary_task_id=(
+                str(payload["primary_task_id"])
+                if payload.get("primary_task_id") is not None
+                else None
+            ),
             market_task_ids=dict(payload.get("market_task_ids") or {}),
+            queue_state=str(payload.get("queue_state") or "queued"),
             queued_at=(
                 str(payload["queued_at"])
                 if payload.get("queued_at") is not None
@@ -60,15 +67,17 @@ class BootstrapRunManifest:
         *,
         primary_market: str,
         enabled_markets: Iterable[str],
-        primary_task_id: str,
-        market_task_ids: Mapping[str, str],
+        primary_task_id: str | None = None,
+        market_task_ids: Mapping[str, str | None] | None = None,
+        queue_state: str = "queued",
         queued_at: str | None = None,
     ) -> "BootstrapRunManifest":
         return cls(
             primary_market=primary_market,
             enabled_markets=tuple(enabled_markets),
             primary_task_id=primary_task_id,
-            market_task_ids=dict(market_task_ids),
+            market_task_ids=dict(market_task_ids or {}),
+            queue_state=queue_state,
             queued_at=queued_at,
         )
 
@@ -78,6 +87,7 @@ class BootstrapRunManifest:
             "enabled_markets": list(self.enabled_markets),
             "primary_task_id": self.primary_task_id,
             "market_task_ids": dict(self.market_task_ids),
+            "queue_state": self.queue_state,
         }
         if self.queued_at is not None:
             payload["queued_at"] = self.queued_at

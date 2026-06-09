@@ -48,10 +48,22 @@ class PriceRefreshExecutionSummary:
     refreshed_by_market: Counter[str] = field(default_factory=Counter)
     failed_by_market: Counter[str] = field(default_factory=Counter)
     processed: int = 0
+    total: int = 0
+
+    @classmethod
+    def empty(cls, *, total: int = 0) -> "PriceRefreshExecutionSummary":
+        return cls(
+            refreshed=0,
+            failed=0,
+            failed_symbols=[],
+            processed=0,
+            total=total,
+        )
 
 
 @dataclass
 class PriceRefreshExecutionAccumulator:
+    total: int = 0
     refreshed: int = 0
     failed: int = 0
     processed: int = 0
@@ -75,6 +87,7 @@ class PriceRefreshExecutionAccumulator:
             refreshed_by_market=Counter(self.refreshed_by_market),
             failed_by_market=Counter(self.failed_by_market),
             processed=self.processed,
+            total=self.total,
         )
 
 

@@ -20,6 +20,7 @@ from ..services.price_refresh_activity import (
 )
 from ..services.price_refresh_live_runner import (
     LivePriceRefreshRunner,
+    PriceRefreshExecutionError,
     PriceRefreshRetryScheduler,
 )
 from ..services.price_refresh_execution import PriceRefreshExecutionSummary
@@ -75,17 +76,10 @@ class PriceRefreshPreparation:
     live_refresh_jobs: list[PriceRefreshJob]
 
 
-@dataclass
-class PriceRefreshProgressState:
-    refreshed: int = 0
-    processed: int = 0
-    failed: int = 0
-    total: int = 0
-
-    def update_from_summary(self, summary: PriceRefreshExecutionSummary) -> None:
-        self.refreshed = summary.refreshed
-        self.processed = summary.processed
-        self.failed = summary.failed
+@dataclass(frozen=True)
+class PriceRefreshTerminalCompletion:
+    outcome: PriceRefreshOutcome
+    finalization: PriceRefreshFinalization
 
 
 class PriceRefreshWorkflow:
@@ -153,7 +147,6 @@ class PriceRefreshWorkflow:
 
         price_cache = self._deps.price_cache_factory()
         db = self._deps.session_factory()
-        progress = PriceRefreshProgressState()
 
         try:
             self._deps.activity_reporter.start_prices(
@@ -196,23 +189,51 @@ class PriceRefreshWorkflow:
                 effective_market=effective_market,
                 activity_lifecycle=activity_lifecycle,
                 preparation=preparation,
-                progress=progress,
             )
             return outcome.to_task_result()
 
-        except SoftTimeLimitExceeded:
-            logger.error("Soft time limit exceeded in smart_refresh_cache", exc_info=True)
+        except PriceRefreshExecutionError as exc:
+            cause = exc.cause
             self._deps.safe_rollback(db)
-            self._deps.activity_reporter.record_failure(
+            if isinstance(cause, SoftTimeLimitExceeded):
+                logger.error("Soft time limit exceeded in smart_refresh_cache", exc_info=True)
+                self._record_refresh_failure(
+                    db,
+                    price_cache,
+                    task=task,
+                    market=market,
+                    effective_market=effective_market,
+                    activity_lifecycle=activity_lifecycle,
+                    summary=exc.summary,
+                    message="Soft time limit exceeded",
+                )
+                raise cause
+
+            self._deps.raise_if_transient_database_error(cause)
+            logger.error("Error in smart_refresh_cache task: %s", cause, exc_info=True)
+            self._record_refresh_failure(
                 db,
                 price_cache,
                 task=task,
                 market=market,
                 effective_market=effective_market,
-                lifecycle=activity_lifecycle,
-                refreshed=progress.refreshed,
-                total=progress.total,
-                current=progress.processed,
+                activity_lifecycle=activity_lifecycle,
+                summary=exc.summary,
+                message=str(cause),
+            )
+            return self._failure_task_result(parsed_mode, exc.summary, str(cause))
+
+        except SoftTimeLimitExceeded:
+            logger.error("Soft time limit exceeded in smart_refresh_cache", exc_info=True)
+            self._deps.safe_rollback(db)
+            self._record_refresh_failure(
+                db,
+                price_cache,
+                task=task,
+                market=market,
+                effective_market=effective_market,
+                activity_lifecycle=activity_lifecycle,
+                summary=PriceRefreshExecutionSummary.empty(),
                 message="Soft time limit exceeded",
             )
             raise
@@ -220,28 +241,60 @@ class PriceRefreshWorkflow:
             self._deps.raise_if_transient_database_error(exc)
             logger.error("Error in smart_refresh_cache task: %s", exc, exc_info=True)
             self._deps.safe_rollback(db)
-            self._deps.activity_reporter.record_failure(
+            summary = PriceRefreshExecutionSummary.empty()
+            self._record_refresh_failure(
                 db,
                 price_cache,
                 task=task,
                 market=market,
                 effective_market=effective_market,
-                lifecycle=activity_lifecycle,
-                refreshed=progress.refreshed,
-                total=progress.total,
-                current=progress.processed,
+                activity_lifecycle=activity_lifecycle,
+                summary=summary,
                 message=str(exc),
             )
-            return {
-                "status": "failed",
-                "error": str(exc),
-                "refreshed": progress.refreshed,
-                "failed": progress.failed,
-                "mode": parsed_mode.value,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return self._failure_task_result(parsed_mode, summary, str(exc))
         finally:
             db.close()
+
+    def _record_refresh_failure(
+        self,
+        db,
+        price_cache,
+        *,
+        task: CeleryTaskLike,
+        market: str | None,
+        effective_market: str,
+        activity_lifecycle: str,
+        summary: PriceRefreshExecutionSummary,
+        message: str,
+    ) -> None:
+        self._deps.activity_reporter.record_failure(
+            db,
+            price_cache,
+            task=task,
+            market=market,
+            effective_market=effective_market,
+            lifecycle=activity_lifecycle,
+            refreshed=summary.refreshed,
+            total=summary.total,
+            current=summary.processed,
+            message=message,
+        )
+
+    def _failure_task_result(
+        self,
+        mode: PriceRefreshMode,
+        summary: PriceRefreshExecutionSummary,
+        error: str,
+    ) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "error": error,
+            "refreshed": summary.refreshed,
+            "failed": summary.failed,
+            "mode": mode.value,
+            "timestamp": datetime.now().isoformat(),
+        }
 
     def _prepare_refresh(
         self,
@@ -353,61 +406,13 @@ class PriceRefreshWorkflow:
         activity_lifecycle: str,
         preparation: PriceRefreshPreparation,
     ) -> dict[str, Any] | None:
-        if preparation.refresh_source is PriceRefreshSource.GITHUB and not preparation.symbols:
-            message = (
-                preparation.refresh_plan.completion_message
-                or "GitHub daily price bundle is current - no live fetch needed"
-            )
-            trading_day = self._completion_trading_day(
-                preparation.github_seed,
-                effective_market,
-            )
-            outcome = PriceRefreshOutcome(
-                status="completed",
-                source=PriceRefreshSource.GITHUB,
-                mode=mode,
-                message=message,
-                github_seed=preparation.github_seed,
-            )
-            finalization = PriceRefreshFinalization(
-                metadata_status="completed",
-                metadata_refreshed=len(preparation.all_symbols),
-                metadata_total=len(preparation.all_symbols),
-                activity_current=len(preparation.all_symbols) if preparation.all_symbols else 0,
-                activity_total=len(preparation.all_symbols) if preparation.all_symbols else 0,
-                message=message,
-                market_success_rates={effective_market: (trading_day, 1.0)},
-            )
-            self._deps.activity_reporter.finalize_success(
-                db,
-                price_cache,
-                task=task,
-                market=market,
-                effective_market=effective_market,
-                lifecycle=activity_lifecycle,
-                finalization=finalization,
-            )
-            return outcome.to_task_result()
-
         if preparation.symbols:
             return None
 
-        message = self._empty_refresh_message(preparation.refresh_plan, mode)
-        outcome = PriceRefreshOutcome(
-            status="completed",
-            source=preparation.refresh_source,
+        completion = self._terminal_completion(
             mode=mode,
-            message=message,
-            github_seed=preparation.github_seed,
-        )
-        finalization = PriceRefreshFinalization(
-            metadata_status="completed",
-            metadata_refreshed=0,
-            metadata_total=0,
-            activity_current=0,
-            activity_total=0,
-            message=message,
-            heartbeat_status=None,
+            effective_market=effective_market,
+            preparation=preparation,
         )
         self._deps.activity_reporter.finalize_success(
             db,
@@ -416,9 +421,58 @@ class PriceRefreshWorkflow:
             market=market,
             effective_market=effective_market,
             lifecycle=activity_lifecycle,
+            finalization=completion.finalization,
+        )
+        return completion.outcome.to_task_result()
+
+    def _terminal_completion(
+        self,
+        *,
+        mode: PriceRefreshMode,
+        effective_market: str,
+        preparation: PriceRefreshPreparation,
+    ) -> PriceRefreshTerminalCompletion:
+        if preparation.refresh_source is PriceRefreshSource.GITHUB:
+            message = (
+                preparation.refresh_plan.completion_message
+                or "GitHub daily price bundle is current - no live fetch needed"
+            )
+            symbol_count = len(preparation.all_symbols)
+            trading_day = self._completion_trading_day(
+                preparation.github_seed,
+                effective_market,
+            )
+            finalization = PriceRefreshFinalization(
+                metadata_status="completed",
+                metadata_refreshed=symbol_count,
+                metadata_total=symbol_count,
+                activity_current=symbol_count,
+                activity_total=symbol_count,
+                message=message,
+                market_success_rates={effective_market: (trading_day, 1.0)},
+            )
+        else:
+            message = self._empty_refresh_message(preparation.refresh_plan, mode)
+            finalization = PriceRefreshFinalization(
+                metadata_status="completed",
+                metadata_refreshed=0,
+                metadata_total=0,
+                activity_current=0,
+                activity_total=0,
+                message=message,
+                heartbeat_status=None,
+            )
+
+        return PriceRefreshTerminalCompletion(
+            outcome=PriceRefreshOutcome(
+                status="completed",
+                source=preparation.refresh_source,
+                mode=mode,
+                message=message,
+                github_seed=preparation.github_seed,
+            ),
             finalization=finalization,
         )
-        return outcome.to_task_result()
 
     def _execute_live_refresh(
         self,
@@ -431,10 +485,8 @@ class PriceRefreshWorkflow:
         effective_market: str,
         activity_lifecycle: str,
         preparation: PriceRefreshPreparation,
-        progress: PriceRefreshProgressState,
     ) -> PriceRefreshOutcome:
         total = len(preparation.symbols)
-        progress.total = total
         symbol_market_totals = Counter(
             preparation.symbol_markets.get(str(symbol).upper(), effective_market)
             for symbol in preparation.symbols
@@ -470,13 +522,9 @@ class PriceRefreshWorkflow:
             activity_lifecycle=activity_lifecycle,
             symbol_markets=preparation.symbol_markets,
             activity_reporter=self._deps.activity_reporter,
-            progress_recorder=progress.update_from_summary,
         )
-        progress.processed = execution_result.processed
-        progress.refreshed = execution_result.refreshed
-        progress.failed = execution_result.failed
 
-        success_rate = progress.refreshed / total if total > 0 else 0
+        success_rate = execution_result.refreshed / total if total > 0 else 0
         status = "completed" if success_rate >= 0.95 else "partial"
         market_success_rates = self._market_success_rates(
             symbol_market_totals=symbol_market_totals,
@@ -492,8 +540,8 @@ class PriceRefreshWorkflow:
 
         logger.info("=" * 80)
         logger.info("Smart refresh completed (%s mode):", mode.value)
-        logger.info("  Refreshed: %s", progress.refreshed)
-        logger.info("  Failed: %s", progress.failed)
+        logger.info("  Refreshed: %s", execution_result.refreshed)
+        logger.info("  Failed: %s", execution_result.failed)
         logger.info("  Total: %s", total)
         if execution_result.failed_symbols:
             logger.info("  Failed symbols: %s...", execution_result.failed_symbols[:10])
@@ -501,7 +549,7 @@ class PriceRefreshWorkflow:
 
         finalization = PriceRefreshFinalization(
             metadata_status=status,
-            metadata_refreshed=progress.refreshed,
+            metadata_refreshed=execution_result.refreshed,
             metadata_total=total,
             activity_current=total,
             activity_total=total,
@@ -526,8 +574,8 @@ class PriceRefreshWorkflow:
                 else PriceRefreshSource.LIVE
             ),
             mode=mode,
-            refreshed=progress.refreshed,
-            failed=progress.failed,
+            refreshed=execution_result.refreshed,
+            failed=execution_result.failed,
             total=total,
             failed_symbols=execution_result.failed_symbols,
             github_seed=preparation.github_seed,

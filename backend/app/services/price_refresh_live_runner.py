@@ -25,6 +25,20 @@ class LivePriceRefreshRunnerDependencies:
     raise_if_transient_database_error: Callable[[Exception], None]
 
 
+class PriceRefreshExecutionError(Exception):
+    def __init__(
+        self,
+        summary: PriceRefreshExecutionSummary,
+        cause: Exception,
+    ) -> None:
+        super().__init__(str(cause))
+        self.summary = summary
+        self.cause = cause
+
+    def __str__(self) -> str:
+        return str(self.cause)
+
+
 class LivePriceRefreshRunner:
     def __init__(self, dependencies: LivePriceRefreshRunnerDependencies) -> None:
         self._deps = dependencies
@@ -44,9 +58,8 @@ class LivePriceRefreshRunner:
         activity_lifecycle: str,
         symbol_markets: Mapping[str, str],
         activity_reporter: PriceRefreshActivityReporter,
-        progress_recorder: Callable[[PriceRefreshExecutionSummary], None] | None = None,
     ) -> PriceRefreshExecutionSummary:
-        accumulator = PriceRefreshExecutionAccumulator()
+        accumulator = PriceRefreshExecutionAccumulator(total=total)
 
         def market_for_symbol(symbol: str) -> str:
             return symbol_markets.get(str(symbol).upper(), effective_market)
@@ -59,49 +72,50 @@ class LivePriceRefreshRunner:
                 market=market,
             )
 
-        for batch in iter_price_refresh_batches(
-            jobs=jobs,
-            batch_size=batch_size,
-            market=market,
-            fetch_batch=fetch_batch,
-            market_for_symbol=market_for_symbol,
-            raise_if_transient_database_error=self._deps.raise_if_transient_database_error,
-        ):
-            if batch.price_data_by_symbol:
-                price_cache.store_batch_in_cache(
-                    dict(batch.price_data_by_symbol),
-                    also_store_db=True,
-                )
-            self._deps.track_symbol_failures(
-                price_cache,
-                list(batch.successes),
-                list(batch.failures),
-                db,
+        try:
+            for batch in iter_price_refresh_batches(
+                jobs=jobs,
+                batch_size=batch_size,
+                market=market,
+                fetch_batch=fetch_batch,
+                market_for_symbol=market_for_symbol,
+                raise_if_transient_database_error=self._deps.raise_if_transient_database_error,
+            ):
+                if batch.price_data_by_symbol:
+                    price_cache.store_batch_in_cache(
+                        dict(batch.price_data_by_symbol),
+                        also_store_db=True,
+                    )
+                self._deps.track_symbol_failures(
+                    price_cache,
+                    list(batch.successes),
+                    list(batch.failures),
+                    db,
                     failure_details=dict(batch.failure_details),
                 )
 
-            accumulator.add(batch)
-            summary = accumulator.summary()
-            if progress_recorder is not None:
-                progress_recorder(summary)
-            percent = (summary.processed / total) * 100 if total else 100.0
-            activity_reporter.publish_progress(
-                db,
-                price_cache,
-                task=task,
-                market=market,
-                effective_market=effective_market,
-                lifecycle=activity_lifecycle,
-                current=summary.processed,
-                total=total,
-                percent=percent,
-                message=f"Batch {batch.batch_number}/{batch.total_batches} · refreshing prices",
-                refreshed=summary.refreshed,
-                failed=summary.failed,
-            )
-            self._extend_lock(task, market=market)
-            if summary.processed < total:
-                self._wait_between_batches(market)
+                accumulator.add(batch)
+                summary = accumulator.summary()
+                percent = (summary.processed / total) * 100 if total else 100.0
+                activity_reporter.publish_progress(
+                    db,
+                    price_cache,
+                    task=task,
+                    market=market,
+                    effective_market=effective_market,
+                    lifecycle=activity_lifecycle,
+                    current=summary.processed,
+                    total=total,
+                    percent=percent,
+                    message=f"Batch {batch.batch_number}/{batch.total_batches} · refreshing prices",
+                    refreshed=summary.refreshed,
+                    failed=summary.failed,
+                )
+                self._extend_lock(task, market=market)
+                if summary.processed < total:
+                    self._wait_between_batches(market)
+        except Exception as exc:
+            raise PriceRefreshExecutionError(accumulator.summary(), exc) from exc
 
         return accumulator.summary()
 

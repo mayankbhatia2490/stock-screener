@@ -37,3 +37,37 @@ def test_bootstrap_run_manifest_repository_round_trips_market_task_ids():
     finally:
         db.close()
         engine.dispose()
+
+
+def test_bootstrap_run_manifest_repository_round_trips_queueing_manifest_without_task_ids():
+    from app.services.bootstrap_run_manifest import (
+        BootstrapRunManifest,
+        BootstrapRunManifestRepository,
+    )
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        repository = BootstrapRunManifestRepository()
+        manifest = BootstrapRunManifest(
+            primary_market="us",
+            enabled_markets=("us", "hk"),
+            primary_task_id=None,
+            market_task_ids={},
+            queue_state="queueing",
+        )
+
+        repository.save(db, manifest)
+        loaded = repository.load(db)
+
+        assert loaded == BootstrapRunManifest(
+            primary_market="US",
+            enabled_markets=("US", "HK"),
+            primary_task_id=None,
+            market_task_ids={},
+            queue_state="queueing",
+        )
+    finally:
+        db.close()
+        engine.dispose()
