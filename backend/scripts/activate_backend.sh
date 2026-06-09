@@ -10,6 +10,11 @@ unset REDIS_PORT
 unset CELERY_BROKER_URL
 unset CELERY_RESULT_BACKEND
 
+if [[ ! -f venv/bin/activate ]]; then
+  echo "Error: venv/bin/activate not found. Please run from backend/ directory after creating the virtual environment." >&2
+  return 1
+fi
+
 source venv/bin/activate
 
 echo "Backend local development environment activated."
