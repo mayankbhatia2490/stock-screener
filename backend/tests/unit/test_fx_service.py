@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -277,6 +278,42 @@ class TestLookupChain:
         assert quote is not None
         assert quote.rate == 0.0064
         assert calls == []
+
+    def test_stale_fetch_suppression_still_accepts_fresh_redis_quote(self, monkeypatch):
+        stale_quote = FXQuote(
+            from_currency="JPY",
+            to_currency="USD",
+            rate=0.0064,
+            as_of_date=date.today() - timedelta(days=1),
+            source="yfinance",
+        )
+        fresh_quote = FXQuote(
+            from_currency="JPY",
+            to_currency="USD",
+            rate=0.0065,
+            as_of_date=date.today(),
+            source="yfinance",
+        )
+        calls = []
+
+        def fetcher(currency):
+            calls.append(currency)
+            return None
+
+        svc = _make_service(rate_fetcher=fetcher)
+        svc._memo["JPY"] = stale_quote
+        svc._stale_fallback_retry_after["JPY"] = (
+            stale_quote,
+            time.monotonic() + 60,
+            svc._latest_trading_close(date.today()),
+        )
+        monkeypatch.setattr(svc, "_read_redis", lambda _currency: fresh_quote)
+
+        quote = svc.get_usd_rate("JPY")
+
+        assert quote is fresh_quote
+        assert calls == []
+        assert "JPY" not in svc._stale_fallback_retry_after
 
     def test_database_source_is_preserved_on_rehydrate(self):
         db_row = MagicMock()

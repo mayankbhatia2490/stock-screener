@@ -208,7 +208,19 @@ def _cancel_strategy_for(record: _JobRecord) -> str:
     return "unsupported"
 
 
-def _progress_mode(percent: float | None, current: int | None, total: int | None) -> str:
+def _progress_mode(
+    percent: float | None,
+    current: int | None,
+    total: int | None,
+    *,
+    state: str | None = None,
+) -> str:
+    resolved_percent = percent
+    if resolved_percent is None and current is not None and total not in (None, 0):
+        resolved_percent = (float(current) / float(total)) * 100.0
+    if state in {"queued", "running", "reserved", "waiting", "stale", "stuck"}:
+        if resolved_percent is not None and resolved_percent >= 100.0:
+            return "indeterminate"
     if percent is not None:
         return "determinate"
     if current is not None and total is not None:
@@ -501,7 +513,12 @@ class OperationsJobService:
             wait_reason=None,
             heartbeat_lag_seconds=heartbeat_lag,
             cancel_strategy="force_cancel_refresh" if state == "stuck" else "unsupported",
-            progress_mode=_progress_mode(current_task.get("progress"), current_task.get("current"), current_task.get("total")),
+            progress_mode=_progress_mode(
+                current_task.get("progress"),
+                current_task.get("current"),
+                current_task.get("total"),
+                state=state,
+            ),
             percent=current_task.get("progress"),
             current=current_task.get("current"),
             total=current_task.get("total"),
@@ -544,7 +561,12 @@ class OperationsJobService:
             wait_reason=None,
             heartbeat_lag_seconds=None,
             cancel_strategy="unsupported",
-            progress_mode=_progress_mode(runtime_record.get("percent"), runtime_record.get("current"), runtime_record.get("total")),
+            progress_mode=_progress_mode(
+                runtime_record.get("percent"),
+                runtime_record.get("current"),
+                runtime_record.get("total"),
+                state=state,
+            ),
             percent=runtime_record.get("percent"),
             current=runtime_record.get("current"),
             total=runtime_record.get("total"),
@@ -569,6 +591,7 @@ class OperationsJobService:
             record.percent,
             record.current,
             record.total,
+            state=record.state,
         )
 
     def _apply_job_backend_progress(self, record: _JobRecord) -> None:
@@ -589,7 +612,12 @@ class OperationsJobService:
             record.current = snapshot.current
         if record.total is None and getattr(snapshot, "total", None) is not None:
             record.total = snapshot.total
-        record.progress_mode = _progress_mode(record.percent, record.current, record.total)
+        record.progress_mode = _progress_mode(
+            record.percent,
+            record.current,
+            record.total,
+            state=record.state,
+        )
 
     def _apply_heartbeat_progress(self, record: _JobRecord) -> None:
         if _queue_family(record.queue) != "data_fetch" or record.market is None:
@@ -606,7 +634,12 @@ class OperationsJobService:
             record.current = current_task.get("current")
         if record.total is None and current_task.get("total") is not None:
             record.total = current_task.get("total")
-        record.progress_mode = _progress_mode(record.percent, record.current, record.total)
+        record.progress_mode = _progress_mode(
+            record.percent,
+            record.current,
+            record.total,
+            state=record.state,
+        )
 
     def _augment_with_runtime_activity(
         self,
@@ -681,7 +714,12 @@ class OperationsJobService:
                 wait_reason=None,
                 heartbeat_lag_seconds=None,
                 cancel_strategy="unsupported",
-                progress_mode=_progress_mode(runtime_record.get("percent"), runtime_record.get("current"), runtime_record.get("total")),
+                progress_mode=_progress_mode(
+                    runtime_record.get("percent"),
+                    runtime_record.get("current"),
+                    runtime_record.get("total"),
+                    state=state,
+                ),
                 percent=runtime_record.get("percent"),
                 current=runtime_record.get("current"),
                 total=runtime_record.get("total"),

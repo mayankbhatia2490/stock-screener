@@ -240,9 +240,6 @@ class FXService:
             return memoed
         if memoed is not None:
             stale_quote = memoed
-            suppressed_quote = self._retry_suppressed_stale_quote(currency, latest_close)
-            if suppressed_quote is not None:
-                return suppressed_quote
 
         # 2. Redis
         quote = self._read_redis(currency)
@@ -271,6 +268,11 @@ class FXService:
                 return quote
             if stale_quote is None or quote.as_of_date > stale_quote.as_of_date:
                 stale_quote = quote
+
+        if stale_quote is not None:
+            suppressed_quote = self._retry_suppressed_stale_quote(currency, latest_close)
+            if suppressed_quote is not None:
+                return suppressed_quote
 
         # 4. Upstream fetch
         fetched = self._rate_fetcher(currency)

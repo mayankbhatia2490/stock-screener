@@ -10,6 +10,10 @@ from typing import Any
 
 from celery.exceptions import SoftTimeLimitExceeded
 
+from .price_fetch_failures import (
+    classify_price_fetch_error,
+    normalize_price_fetch_failure_kind,
+)
 from .price_refresh_planning import PriceRefreshJob
 
 
@@ -28,6 +32,7 @@ class PriceRefreshBatchOutcome:
     successes: tuple[str, ...]
     failures: tuple[str, ...]
     failure_details: Mapping[str, str]
+    failure_kinds: Mapping[str, str] = field(default_factory=dict)
     refreshed_by_market: Counter[str] = field(default_factory=Counter)
     failed_by_market: Counter[str] = field(default_factory=Counter)
 
@@ -45,6 +50,7 @@ class PriceRefreshExecutionSummary:
     refreshed: int
     failed: int
     failed_symbols: list[str]
+    failure_kinds: Mapping[str, str] = field(default_factory=dict)
     refreshed_by_market: Counter[str] = field(default_factory=Counter)
     failed_by_market: Counter[str] = field(default_factory=Counter)
     processed: int = 0
@@ -56,6 +62,7 @@ class PriceRefreshExecutionSummary:
             refreshed=0,
             failed=0,
             failed_symbols=[],
+            failure_kinds={},
             processed=0,
             total=total,
         )
@@ -68,6 +75,7 @@ class PriceRefreshExecutionAccumulator:
     failed: int = 0
     processed: int = 0
     failed_symbols: list[str] = field(default_factory=list)
+    failure_kinds: dict[str, str] = field(default_factory=dict)
     refreshed_by_market: Counter[str] = field(default_factory=Counter)
     failed_by_market: Counter[str] = field(default_factory=Counter)
 
@@ -76,6 +84,7 @@ class PriceRefreshExecutionAccumulator:
         self.refreshed += batch.refreshed
         self.failed += batch.failed
         self.failed_symbols.extend(batch.failures)
+        self.failure_kinds.update(batch.failure_kinds)
         self.refreshed_by_market.update(batch.refreshed_by_market)
         self.failed_by_market.update(batch.failed_by_market)
 
@@ -84,6 +93,7 @@ class PriceRefreshExecutionAccumulator:
             refreshed=self.refreshed,
             failed=self.failed,
             failed_symbols=list(self.failed_symbols),
+            failure_kinds=dict(self.failure_kinds),
             refreshed_by_market=Counter(self.refreshed_by_market),
             failed_by_market=Counter(self.failed_by_market),
             processed=self.processed,
@@ -91,11 +101,23 @@ class PriceRefreshExecutionAccumulator:
         )
 
 
-def _total_batches(jobs: Sequence[PriceRefreshJob], batch_size: int) -> int:
-    return sum(
-        (len(job.symbols) + batch_size - 1) // batch_size
-        for job in jobs
-    )
+def _total_batches(jobs: Sequence[PriceRefreshJob], batch_size: int | None) -> int:
+    if batch_size is None:
+        return sum(1 for job in jobs if job.symbols)
+    return sum((len(job.symbols) + batch_size - 1) // batch_size for job in jobs)
+
+
+def _iter_job_symbol_batches(
+    symbols: tuple[str, ...],
+    batch_size: int | None,
+) -> Iterator[tuple[str, ...]]:
+    if not symbols:
+        return
+    if batch_size is None:
+        yield symbols
+        return
+    for batch_start in range(0, len(symbols), batch_size):
+        yield symbols[batch_start:batch_start + batch_size]
 
 
 def _result_for_symbol(
@@ -118,11 +140,18 @@ def _record_failure(
     failures: list[str],
     failed_by_market: Counter[str],
     failure_details: dict[str, str],
+    failure_kinds: dict[str, str],
     market_for_symbol: Callable[[str], str],
+    kind: str | None = None,
 ) -> None:
     failures.append(symbol)
     failed_by_market[market_for_symbol(symbol)] += 1
     failure_details[symbol] = reason
+    resolved_kind = normalize_price_fetch_failure_kind(kind)
+    if resolved_kind is None:
+        resolved_kind = classify_price_fetch_error(reason)
+    if resolved_kind is not None:
+        failure_kinds[symbol] = resolved_kind.value
 
 
 def _classify_batch_results(
@@ -135,6 +164,7 @@ def _classify_batch_results(
     tuple[str, ...],
     tuple[str, ...],
     dict[str, str],
+    dict[str, str],
     Counter[str],
     Counter[str],
 ]:
@@ -142,6 +172,7 @@ def _classify_batch_results(
     successes: list[str] = []
     failures: list[str] = []
     failure_details: dict[str, str] = {}
+    failure_kinds: dict[str, str] = {}
     refreshed_by_market: Counter[str] = Counter()
     failed_by_market: Counter[str] = Counter()
 
@@ -154,6 +185,7 @@ def _classify_batch_results(
                 failures=failures,
                 failed_by_market=failed_by_market,
                 failure_details=failure_details,
+                failure_kinds=failure_kinds,
                 market_for_symbol=market_for_symbol,
             )
             continue
@@ -170,6 +202,7 @@ def _classify_batch_results(
                 failures=failures,
                 failed_by_market=failed_by_market,
                 failure_details=failure_details,
+                failure_kinds=failure_kinds,
                 market_for_symbol=market_for_symbol,
             )
             continue
@@ -179,7 +212,9 @@ def _classify_batch_results(
             failures=failures,
             failed_by_market=failed_by_market,
             failure_details=failure_details,
+            failure_kinds=failure_kinds,
             market_for_symbol=market_for_symbol,
+            kind=data.get("error_kind"),
         )
 
     return (
@@ -187,6 +222,7 @@ def _classify_batch_results(
         tuple(successes),
         tuple(failures),
         failure_details,
+        failure_kinds,
         refreshed_by_market,
         failed_by_market,
     )
@@ -195,7 +231,7 @@ def _classify_batch_results(
 def iter_price_refresh_batches(
     *,
     jobs: Sequence[PriceRefreshJob],
-    batch_size: int,
+    batch_size: int | None,
     market: str | None,
     fetch_batch: Callable[..., MappingResult],
     market_for_symbol: Callable[[str], str],
@@ -205,8 +241,7 @@ def iter_price_refresh_batches(
     batch_number = 0
     for job in jobs:
         job_symbols = tuple(job.symbols)
-        for batch_start in range(0, len(job_symbols), batch_size):
-            batch_symbols = job_symbols[batch_start:batch_start + batch_size]
+        for batch_symbols in _iter_job_symbol_batches(job_symbols, batch_size):
             batch_number += 1
             logger.info(
                 "Batch %d/%d: Fetching %d symbols (%s, period=%s)",
@@ -228,6 +263,7 @@ def iter_price_refresh_batches(
                     successes,
                     failures,
                     failure_details,
+                    failure_kinds,
                     refreshed_by_market,
                     failed_by_market,
                 ) = _classify_batch_results(
@@ -244,6 +280,12 @@ def iter_price_refresh_batches(
                 successes = ()
                 failures = batch_symbols
                 failure_details = {symbol: str(exc) for symbol in batch_symbols}
+                resolved_kind = classify_price_fetch_error(str(exc))
+                failure_kinds = (
+                    {symbol: resolved_kind.value for symbol in batch_symbols}
+                    if resolved_kind is not None
+                    else {}
+                )
                 refreshed_by_market = Counter()
                 failed_by_market = Counter(
                     market_for_symbol(symbol) for symbol in batch_symbols
@@ -258,6 +300,7 @@ def iter_price_refresh_batches(
                 successes=successes,
                 failures=failures,
                 failure_details=failure_details,
+                failure_kinds=failure_kinds,
                 refreshed_by_market=refreshed_by_market,
                 failed_by_market=failed_by_market,
             )

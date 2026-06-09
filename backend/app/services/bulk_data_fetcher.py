@@ -20,6 +20,12 @@ import time
 
 from ..config import settings
 from .growth_cadence_service import compute_cadence_aware_growth
+from .price_fetch_failures import (
+    classify_price_fetch_error,
+    is_no_data_price_failure,
+    is_rate_limit_error,
+    normalize_price_fetch_failure_kind,
+)
 
 if TYPE_CHECKING:
     from .eps_rating_service import EPSRatingService
@@ -66,16 +72,6 @@ def _new_yf_tickers(symbols_str: str):
             # Older yfinance: no session kwarg on Tickers; fall through.
             pass
     return yf.Tickers(symbols_str)
-
-
-_NO_PRICE_DATA_ERROR_INDICATORS = (
-    "yfpricesmissingerror",
-    "possibly delisted",
-    "no price data",
-    "no data found, symbol may be delisted",
-    "symbol may be delisted",
-    "no data after filtering",
-)
 
 
 class BulkDataFetcher:
@@ -146,26 +142,16 @@ class BulkDataFetcher:
 
     @staticmethod
     def _is_rate_limit_error(error: str) -> bool:
-        lower = (error or "").lower()
-        return any(indicator in lower for indicator in ("rate", "429", "too many", "limit", "throttl"))
+        return is_rate_limit_error(error)
 
     @staticmethod
     def _is_permanent_missing_price_error(error: str) -> bool:
-        lower = (error or "").lower()
-        if BulkDataFetcher._is_rate_limit_error(lower):
-            return False
-        return any(indicator in lower for indicator in _NO_PRICE_DATA_ERROR_INDICATORS)
+        return is_no_data_price_failure(error)
 
     @staticmethod
     def _price_error_kind(error: str) -> Optional[str]:
-        lower = (error or "").lower()
-        if BulkDataFetcher._is_permanent_missing_price_error(lower):
-            return "no_price_data"
-        if BulkDataFetcher._is_rate_limit_error(lower):
-            return "rate_limit"
-        if "empty" in lower or "batch download error" in lower:
-            return "transient"
-        return None
+        kind = classify_price_fetch_error(error)
+        return kind.value if kind is not None else None
 
     @staticmethod
     def _yfinance_download_errors(symbols: List[str]) -> Dict[str, str]:
@@ -188,11 +174,13 @@ class BulkDataFetcher:
             if not data.get("has_error"):
                 continue
             error = data.get("error", "")
-            error_kind = data.get("error_kind")
-            if error_kind == "no_price_data" or self._is_permanent_missing_price_error(error):
+            error_kind = normalize_price_fetch_failure_kind(data.get("error_kind"))
+            if error_kind is not None and error_kind.value == "no_price_data":
+                continue
+            if error_kind is None and self._is_permanent_missing_price_error(error):
                 continue
             if (
-                error_kind in {"rate_limit", "transient"}
+                (error_kind is not None and error_kind.value in {"rate_limit", "transient"})
                 or self._is_rate_limit_error(error)
                 or "empty" in error.lower()
             ):

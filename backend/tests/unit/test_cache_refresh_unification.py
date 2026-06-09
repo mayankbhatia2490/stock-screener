@@ -363,6 +363,7 @@ def test_smart_refresh_cache_publishes_running_progress_per_batch(monkeypatch):
     fake_lock = MagicMock()
     bulk_fetcher = MagicMock()
     progress_updates: list[dict] = []
+    fetch_batches: list[tuple[str, ...]] = []
 
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
     monkeypatch.setattr(module, "warm_spy_cache", MagicMock(return_value={"status": "ok"}))
@@ -402,14 +403,11 @@ def test_smart_refresh_cache_publishes_running_progress_per_batch(monkeypatch):
         lambda: SimpleNamespace(wait_for_market=lambda *args, **kwargs: None, wait=lambda *args, **kwargs: None),
     )
     monkeypatch.setattr(module, "_track_symbol_failures", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        module,
-        "_fetch_with_backoff",
-        lambda _fetcher, batch_symbols, **kwargs: {
-            symbol: _success_result(symbol)
-            for symbol in batch_symbols
-        },
-    )
+    def _fetch_with_backoff(_fetcher, batch_symbols, **kwargs):
+        fetch_batches.append(tuple(batch_symbols))
+        return {symbol: _success_result(symbol) for symbol in batch_symbols}
+
+    monkeypatch.setattr(module, "_fetch_with_backoff", _fetch_with_backoff)
     monkeypatch.setattr(
         module,
         "mark_market_activity_progress",
@@ -425,14 +423,15 @@ def test_smart_refresh_cache_publishes_running_progress_per_batch(monkeypatch):
     assert progress_updates[0]["current"] == 0
     assert progress_updates[0]["total"] == 101
     assert progress_updates[0]["percent"] == 0
-    assert any(update["message"] == "Batch 1/2 · refreshing prices" for update in progress_updates)
-    assert any(update["message"] == "Batch 2/2 · refreshing prices" for update in progress_updates)
+    assert len(fetch_batches) == 1
+    assert len(fetch_batches[0]) == 101
+    assert any(update["message"] == "Batch 1/1 · refreshing prices" for update in progress_updates)
     assert progress_updates[-1]["current"] == 101
     assert progress_updates[-1]["total"] == 101
     assert progress_updates[-1]["percent"] == pytest.approx(100.0)
 
 
-def test_smart_refresh_cache_failure_records_latest_batch_progress(monkeypatch):
+def test_smart_refresh_cache_failure_records_delegated_batch_progress(monkeypatch):
     import app.tasks.cache_tasks as module
 
     fake_db = MagicMock()
@@ -482,9 +481,7 @@ def test_smart_refresh_cache_failure_records_latest_batch_progress(monkeypatch):
     def _fetch_with_backoff(_fetcher, batch_symbols, **kwargs):
         nonlocal fetch_calls
         fetch_calls += 1
-        if fetch_calls == 2:
-            raise SoftTimeLimitExceeded()
-        return {symbol: _success_result(symbol) for symbol in batch_symbols}
+        raise SoftTimeLimitExceeded()
 
     monkeypatch.setattr(module, "_fetch_with_backoff", _fetch_with_backoff)
     monkeypatch.setattr(
@@ -507,15 +504,16 @@ def test_smart_refresh_cache_failure_records_latest_batch_progress(monkeypatch):
             activity_lifecycle="bootstrap",
         )
 
-    assert any(update["current"] == 100 for update in progress_updates)
+    assert fetch_calls == 1
+    assert progress_updates[-1]["current"] == 0
     fake_price_cache.save_warmup_metadata.assert_called_once_with(
         "failed",
-        100,
+        0,
         101,
         "Soft time limit exceeded",
         market="US",
     )
-    assert failures[-1]["current"] == 100
+    assert failures[-1]["current"] == 0
     assert failures[-1]["total"] == 101
 
 
@@ -951,6 +949,49 @@ def test_failed_price_retry_preserves_bootstrap_retry_delay(monkeypatch):
     assert retry_calls == [
         {"symbols": ["AAPL"], "market": "US", "attempt": 3, "countdown": 30}
     ]
+
+
+def test_failed_price_retry_does_not_reschedule_permanent_no_data(monkeypatch):
+    import app.tasks.cache_tasks as module
+
+    fake_price_cache = MagicMock()
+    retry_calls = []
+
+    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: fake_price_cache)
+    monkeypatch.setattr("app.services.bulk_data_fetcher.BulkDataFetcher", lambda: MagicMock())
+    monkeypatch.setattr(module, "_track_symbol_failures", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "_fetch_with_backoff",
+        lambda _fetcher, batch_symbols, **kwargs: {
+            symbol: {
+                "has_error": True,
+                "error": "Provider returned no usable rows",
+                "error_kind": "no_price_data",
+                "price_data": None,
+            }
+            for symbol in batch_symbols
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_schedule_failed_symbol_retry",
+        lambda symbols, *, market, attempt, countdown=600: retry_calls.append(
+            {"symbols": symbols, "market": market, "attempt": attempt, "countdown": countdown}
+        ),
+    )
+
+    result = module.retry_failed_price_symbols.run.__wrapped__(
+        module.retry_failed_price_symbols,
+        symbols=["0143.T"],
+        market="JP",
+        attempt=1,
+        retry_countdown=30,
+    )
+
+    assert result["status"] == "partial"
+    assert result["failed_symbols"] == ["0143.T"]
+    assert retry_calls == []
 
 
 def test_smart_refresh_cache_rolls_back_before_failure_reporting(monkeypatch):

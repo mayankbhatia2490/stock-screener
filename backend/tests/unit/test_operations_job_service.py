@@ -8,7 +8,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.services.operations_job_service import OperationsJobService, _JobRecord
+from app.services.operations_job_service import OperationsJobService, _JobRecord, _progress_mode
 
 
 def _queued_message(*, task_id: str, task_name: str, args: list | None = None, kwargs: dict | None = None) -> bytes:
@@ -296,6 +296,12 @@ def test_list_jobs_surfaces_runtime_activity_progress_fields():
     assert job["current"] == 420
     assert job["total"] == 1000
     assert job["message"] == "Batch 5/12 · refreshing prices"
+
+
+def test_operations_progress_mode_keeps_active_100_percent_indeterminate():
+    assert _progress_mode(100.0, 3750, 3750, state="running") == "indeterminate"
+    assert _progress_mode(None, 3750, 3750, state="running") == "indeterminate"
+    assert _progress_mode(100.0, 3750, 3750, state="completed") == "determinate"
 
 
 def test_list_jobs_falls_back_to_job_backend_progress_for_active_worker_task():

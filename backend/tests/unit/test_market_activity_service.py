@@ -874,7 +874,7 @@ def test_runtime_activity_status_reports_active_background_bootstrap_progress_af
     assert hk_market["progress_mode"] == "determinate"
 
 
-def test_runtime_activity_status_stage_weights_completed_background_price_refresh(
+def test_runtime_activity_status_does_not_stage_weight_running_price_refresh_at_100(
     db_session,
     monkeypatch,
 ):
@@ -912,9 +912,13 @@ def test_runtime_activity_status_stage_weights_completed_background_price_refres
     assert payload["bootstrap"]["state"] == "ready"
     assert payload["bootstrap"]["app_ready"] is True
     assert payload["bootstrap"]["current_stage"] == "Price Refresh"
-    assert payload["bootstrap"]["percent"] == pytest.approx(33.33)
+    assert payload["bootstrap"]["progress_mode"] == "indeterminate"
+    assert payload["bootstrap"]["percent"] is None
     assert payload["bootstrap"]["current"] == 3750
     assert payload["bootstrap"]["total"] == 3750
+    jp_market = next(item for item in payload["markets"] if item["market"] == "JP")
+    assert jp_market["status"] == "running"
+    assert jp_market["progress_mode"] == "indeterminate"
 
 
 def test_runtime_activity_status_ignores_non_bootstrap_secondary_progress_after_primary_ready(

@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..config import settings
+from .price_fetch_failures import is_retryable_price_failure_kind
 from .price_refresh_activity import CeleryTaskLike, PriceRefreshActivityReporter, task_id
 from .price_refresh_execution import (
     PriceRefreshExecutionAccumulator,
@@ -20,7 +20,6 @@ from .price_refresh_planning import PriceRefreshJob
 class LivePriceRefreshRunnerDependencies:
     fetch_with_backoff: Callable[..., Mapping[str, Mapping[str, Any]]]
     track_symbol_failures: Callable[..., None]
-    rate_limiter_factory: Callable[[], Any]
     data_fetch_lock_factory: Callable[[], Any]
     raise_if_transient_database_error: Callable[[Exception], None]
 
@@ -52,7 +51,7 @@ class LivePriceRefreshRunner:
         db: Any,
         jobs: Sequence[PriceRefreshJob],
         total: int,
-        batch_size: int,
+        batch_size: int | None,
         market: str | None,
         effective_market: str,
         activity_lifecycle: str,
@@ -112,8 +111,6 @@ class LivePriceRefreshRunner:
                     failed=summary.failed,
                 )
                 self._extend_lock(task, market=market)
-                if summary.processed < total:
-                    self._wait_between_batches(market)
         except Exception as exc:
             raise PriceRefreshExecutionError(accumulator.summary(), exc) from exc
 
@@ -126,16 +123,6 @@ class LivePriceRefreshRunner:
             market=market,
         )
 
-    def _wait_between_batches(self, market: str | None) -> None:
-        rate_limiter = self._deps.rate_limiter_factory()
-        if market is not None:
-            rate_limiter.wait_for_market("yfinance:batch", market)
-            return
-        rate_limiter.wait(
-            "yfinance:batch",
-            min_interval_s=settings.yfinance_batch_rate_limit_interval,
-        )
-
 
 @dataclass(frozen=True)
 class PriceRefreshRetryScheduler:
@@ -145,14 +132,18 @@ class PriceRefreshRetryScheduler:
         self,
         failed_symbols: Sequence[str],
         *,
+        failure_kinds: Mapping[str, str] | None = None,
         effective_market: str,
         symbol_markets: Mapping[str, str],
         activity_lifecycle: str,
     ) -> None:
         if not failed_symbols:
             return
+        failure_kinds = failure_kinds or {}
         failed_symbols_by_market: dict[str, list[str]] = {}
         for symbol in failed_symbols:
+            if not is_retryable_price_failure_kind(failure_kinds.get(symbol)):
+                continue
             failed_symbols_by_market.setdefault(
                 symbol_markets.get(str(symbol).upper(), effective_market),
                 [],

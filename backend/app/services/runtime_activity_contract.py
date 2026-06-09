@@ -94,6 +94,12 @@ def progress_mode(
     total: int | None = None,
 ) -> str:
     resolved_percent = resolve_progress_percent(percent, current, total)
+    if (
+        status in ACTIVE_ACTIVITY_STATUSES
+        and resolved_percent is not None
+        and resolved_percent >= 100.0
+    ):
+        return "indeterminate"
     if resolved_percent is not None or status in {"completed", "idle"}:
         return "determinate"
     return "indeterminate"

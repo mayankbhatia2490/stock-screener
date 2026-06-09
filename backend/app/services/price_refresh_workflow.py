@@ -433,7 +433,7 @@ class PriceRefreshWorkflow:
             db=db,
             jobs=refresh_plan.live_refresh_jobs,
             total=total,
-            batch_size=100,
+            batch_size=None,
             market=market,
             effective_market=effective_market,
             activity_lifecycle=activity_lifecycle,
@@ -450,6 +450,7 @@ class PriceRefreshWorkflow:
 
         self._deps.retry_scheduler.schedule(
             execution_result.failed_symbols,
+            failure_kinds=execution_result.failure_kinds,
             effective_market=effective_market,
             symbol_markets=refresh_plan.symbol_markets,
             activity_lifecycle=activity_lifecycle,

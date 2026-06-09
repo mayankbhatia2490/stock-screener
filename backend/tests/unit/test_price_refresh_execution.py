@@ -96,6 +96,85 @@ def test_iter_price_refresh_batches_marks_unreturned_symbols_failed():
     assert summary.failed_by_market == Counter({"US": 1})
 
 
+def test_iter_price_refresh_batches_can_delegate_provider_batching():
+    from app.services.price_refresh_execution import iter_price_refresh_batches
+    from app.services.price_refresh_planning import PriceRefreshJob, PriceRefreshJobKind
+
+    fetch_calls = []
+
+    def fetch_batch(symbols, *, period, market):
+        fetch_calls.append((tuple(symbols), period, market))
+        return {
+            symbol: {
+                "has_error": False,
+                "price_data": SimpleNamespace(empty=False),
+            }
+            for symbol in symbols
+        }
+
+    list(iter_price_refresh_batches(
+        jobs=(PriceRefreshJob(
+            kind=PriceRefreshJobKind.NO_HISTORY,
+            symbols=("A", "B", "C", "D"),
+            period="2y",
+        ),),
+        batch_size=None,
+        market="JP",
+        fetch_batch=fetch_batch,
+        market_for_symbol=lambda _symbol: "JP",
+        raise_if_transient_database_error=lambda exc: None,
+    ))
+
+    assert fetch_calls == [(("A", "B", "C", "D"), "2y", "JP")]
+
+
+def test_iter_price_refresh_batches_carries_failure_kinds():
+    from app.services.price_refresh_execution import (
+        iter_price_refresh_batches,
+        summarize_price_refresh_batches,
+    )
+    from app.services.price_refresh_planning import PriceRefreshJob, PriceRefreshJobKind
+
+    def fetch_batch(symbols, *, period, market):
+        del symbols, period, market
+        return {
+            "0143.T": {
+                "has_error": True,
+                "price_data": None,
+                "error": "YFPricesMissingError('possibly delisted; no price data found')",
+                "error_kind": "no_price_data",
+            },
+            "7203.T": {
+                "has_error": True,
+                "price_data": None,
+                "error": "429 Too Many Requests",
+                "error_kind": "rate_limit",
+            },
+        }
+
+    batches = list(iter_price_refresh_batches(
+        jobs=(PriceRefreshJob(
+            kind=PriceRefreshJobKind.NO_HISTORY,
+            symbols=("0143.T", "7203.T"),
+            period="2y",
+        ),),
+        batch_size=None,
+        market="JP",
+        fetch_batch=fetch_batch,
+        market_for_symbol=lambda _symbol: "JP",
+        raise_if_transient_database_error=lambda exc: None,
+    ))
+
+    assert batches[0].failure_kinds == {
+        "0143.T": "no_price_data",
+        "7203.T": "rate_limit",
+    }
+    assert summarize_price_refresh_batches(batches).failure_kinds == {
+        "0143.T": "no_price_data",
+        "7203.T": "rate_limit",
+    }
+
+
 def test_price_refresh_execution_summary_accumulates_batches_incrementally():
     from app.services.price_refresh_execution import (
         PriceRefreshBatchOutcome,
@@ -150,5 +229,6 @@ def test_price_refresh_execution_summary_accumulates_batches_incrementally():
     assert summary.refreshed == 2
     assert summary.failed == 1
     assert summary.failed_symbols == ["B"]
+    assert summary.failure_kinds == {}
     assert summary.refreshed_by_market == Counter({"US": 1, "HK": 1})
     assert summary.failed_by_market == Counter({"US": 1})

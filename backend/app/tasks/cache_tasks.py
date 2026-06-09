@@ -27,6 +27,13 @@ from ..services.market_activity_service import (
     mark_market_activity_progress,
     mark_market_activity_started,
 )
+from ..services.price_fetch_failures import (
+    classify_price_fetch_error,
+    is_no_data_price_failure,
+    is_rate_limit_error as is_price_rate_limit_error,
+    is_retryable_price_failure,
+    normalize_price_fetch_failure_kind,
+)
 from ..services.price_refresh_plan_builder import build_market_price_refresh_plan
 from ..services.price_refresh_activity import (
     PriceRefreshActivityDependencies,
@@ -1020,8 +1027,7 @@ def prewarm_all_active_symbols(self):
 
 def _is_rate_limit_error(error_str: str) -> bool:
     """Check if an error string indicates a rate limit."""
-    lower = error_str.lower()
-    return any(indicator in lower for indicator in ("rate", "429", "too many", "limit", "throttl"))
+    return is_price_rate_limit_error(error_str)
 
 
 class RateLimitExhaustedError(RuntimeError):
@@ -1113,17 +1119,7 @@ def _fetch_with_backoff(
 
 def _classify_no_data_failure(error_message: str) -> bool:
     """Heuristic classifier for delisted/no-data provider failures."""
-    lower = (error_message or "").lower()
-    indicators = (
-        "no data",
-        "possibly delisted",
-        "delisted",
-        "missing from results",
-        "symbol not in download results",
-        "returned empty",
-        "empty data",
-    )
-    return any(indicator in lower for indicator in indicators)
+    return is_no_data_price_failure(error_message)
 
 
 def _track_symbol_failures(
@@ -1352,6 +1348,7 @@ def retry_failed_price_symbols(
     refreshed = 0
     failed_symbols: list[str] = []
     failure_details: dict[str, str] = {}
+    failure_kinds: dict[str, str] = {}
     try:
         batch_results = _fetch_with_backoff(
             bulk_fetcher,
@@ -1369,6 +1366,9 @@ def retry_failed_price_symbols(
                     continue
             failed_symbols.append(symbol)
             failure_details[symbol] = data.get("error", "Unknown error")
+            kind = normalize_price_fetch_failure_kind(data.get("error_kind"))
+            if kind is not None:
+                failure_kinds[symbol] = kind.value
         missing = sorted(set(deduped_symbols) - set(batch_results))
         failed_symbols.extend(missing)
         failure_details.update({symbol: "Missing from retry result" for symbol in missing})
@@ -1386,6 +1386,9 @@ def retry_failed_price_symbols(
         )
         failed_symbols = deduped_symbols
         failure_details = {symbol: str(exc) for symbol in deduped_symbols}
+        kind = classify_price_fetch_error(str(exc))
+        if kind is not None:
+            failure_kinds = {symbol: kind.value for symbol in deduped_symbols}
 
     successes = [symbol for symbol in deduped_symbols if symbol not in set(failed_symbols)]
     _track_symbol_failures(
@@ -1394,9 +1397,17 @@ def retry_failed_price_symbols(
         failed_symbols,
         failure_details=failure_details,
     )
-    if failed_symbols and attempt < 3:
+    retryable_failed_symbols = [
+        symbol
+        for symbol in failed_symbols
+        if is_retryable_price_failure(
+            kind=failure_kinds.get(symbol),
+            error=failure_details.get(symbol, ""),
+        )
+    ]
+    if retryable_failed_symbols and attempt < 3:
         _schedule_failed_symbol_retry(
-            failed_symbols,
+            retryable_failed_symbols,
             market=market,
             attempt=attempt + 1,
             countdown=retry_countdown,
@@ -1669,7 +1680,6 @@ def run_smart_price_refresh(
         LivePriceRefreshRunnerDependencies(
             fetch_with_backoff=_fetch_with_backoff,
             track_symbol_failures=_track_symbol_failures,
-            rate_limiter_factory=get_rate_limiter,
             data_fetch_lock_factory=get_data_fetch_lock,
             raise_if_transient_database_error=raise_if_transient_database_error,
         )

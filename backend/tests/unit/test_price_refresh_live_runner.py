@@ -45,7 +45,6 @@ def test_live_price_refresh_runner_raises_interruption_with_partial_summary():
         LivePriceRefreshRunnerDependencies(
             fetch_with_backoff=fetch_with_backoff,
             track_symbol_failures=lambda *_args, **_kwargs: None,
-            rate_limiter_factory=lambda: SimpleNamespace(wait_for_market=lambda *_args: None),
             data_fetch_lock_factory=lambda: _FakeLock(),
             raise_if_transient_database_error=lambda _exc: None,
         )
@@ -78,3 +77,32 @@ def test_live_price_refresh_runner_raises_interruption_with_partial_summary():
     assert raised.value.summary.processed == 1
     assert raised.value.summary.refreshed == 1
     assert raised.value.summary.failed == 0
+
+
+def test_retry_scheduler_skips_permanent_no_price_data_failures():
+    from app.services.price_refresh_live_runner import PriceRefreshRetryScheduler
+
+    calls = []
+    scheduler = PriceRefreshRetryScheduler(
+        schedule_failed_symbol_retry=lambda **kwargs: calls.append(kwargs)
+    )
+
+    scheduler.schedule(
+        ["0143.T", "7203.T"],
+        failure_kinds={
+            "0143.T": "no_price_data",
+            "7203.T": "rate_limit",
+        },
+        effective_market="JP",
+        symbol_markets={"0143.T": "JP", "7203.T": "JP"},
+        activity_lifecycle="bootstrap",
+    )
+
+    assert calls == [
+        {
+            "symbols": ["7203.T"],
+            "market": "JP",
+            "attempt": 1,
+            "countdown": 30,
+        }
+    ]
