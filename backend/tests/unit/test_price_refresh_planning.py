@@ -266,3 +266,45 @@ def test_build_market_price_refresh_plan_owns_universe_and_github_seed(universe_
     assert plan.symbol_markets == {"0700.HK": "HK", "0005.HK": "HK"}
     assert plan.source is PriceRefreshSource.GITHUB_AND_LIVE
     assert plan.symbols == ("0005.HK",)
+
+
+def test_split_supported_price_symbols_reuses_provider_no_data_policy():
+    from app.utils.symbol_support import split_supported_price_symbols
+
+    supported, unsupported = split_supported_price_symbols(
+        ["7203.T", "0123.T", "BAD-W", "AAPL"]
+    )
+
+    assert supported == ["7203.T", "AAPL"]
+    assert unsupported == ["0123.T", "BAD-W"]
+
+
+def test_bootstrap_price_readiness_uses_price_refresh_universe_and_support_policy(
+    universe_session,
+):
+    from app.models.stock_universe import StockUniverse
+    from app.services.bootstrap_price_readiness import evaluate_bootstrap_price_readiness
+
+    universe_session.add_all(
+        [
+            StockUniverse(symbol="7203.T", market="JP", market_cap=500),
+            StockUniverse(symbol="0123.T", market="JP", market_cap=400),
+            StockUniverse(symbol="JP-W", market="JP", market_cap=300),
+            StockUniverse(symbol="AAPL", market="US", market_cap=200),
+        ]
+    )
+    universe_session.add(StockPrice(symbol="7203.T", date=date(2026, 6, 8), close=100))
+    universe_session.commit()
+
+    report = evaluate_bootstrap_price_readiness(
+        universe_session,
+        market="jp",
+        as_of_date=date(2026, 6, 8),
+    )
+
+    assert report["market"] == "JP"
+    assert report["eligible"] is True
+    assert report["price_total_symbols"] == 1
+    assert report["price_covered_symbols"] == 1
+    assert report["unsupported_skipped_count"] == 2
+    assert report["unsupported_symbols_preview"] == ["0123.T", "JP-W"]

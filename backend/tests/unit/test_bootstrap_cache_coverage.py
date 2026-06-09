@@ -179,3 +179,19 @@ def test_bootstrap_price_cache_coverage_ignores_fundamentals_before_later_bootst
     assert report["price_covered_symbols"] == 19
     assert report["price_missing_symbols"] == 1
     assert report["price_missing_symbols_preview"] == ["SYM19"]
+
+
+def test_bootstrap_price_cache_coverage_rejects_empty_candidate_set():
+    db = _session()
+
+    report = evaluate_bootstrap_price_cache_coverage(
+        db,
+        market="US",
+        symbols=[],
+        as_of_date=date(2026, 4, 24),
+    )
+
+    assert report["eligible"] is False
+    assert report["mode"] == "waiting_for_prices"
+    assert report["price_total_symbols"] == 0
+    assert report["price_coverage_ratio"] == 0.0

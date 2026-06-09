@@ -17,7 +17,7 @@ from ..domain.bootstrap.plan import (
     MarketBootstrapPlan,
     build_bootstrap_plan,
 )
-from ..services.bootstrap_cache_coverage import evaluate_bootstrap_price_cache_coverage
+from ..services.bootstrap_price_readiness import evaluate_bootstrap_price_readiness
 from ..services.cache.price_cache_warmup import evaluate_warmup_metadata
 from ..services.market_activity_service import (
     mark_current_market_activity_failed,
@@ -171,20 +171,6 @@ def _queue_for_stage(stage) -> str:
     raise ValueError(f"Unsupported bootstrap queue kind: {stage.queue_kind}")
 
 
-def _active_supported_price_symbols_for_market(db, *, market: str) -> list[str]:
-    from app.models.stock_universe import StockUniverse
-    from app.utils.symbol_support import split_supported_price_symbols
-
-    rows = (
-        db.query(StockUniverse.symbol)
-        .filter(StockUniverse.market == market, StockUniverse.active_filter())
-        .all()
-    )
-    symbols = [row[0] for row in rows]
-    supported_symbols, _unsupported_symbols = split_supported_price_symbols(symbols)
-    return supported_symbols
-
-
 def _coverage_int(report: dict, key: str) -> int:
     value = report.get(key)
     try:
@@ -295,14 +281,9 @@ def wait_for_bootstrap_price_warmup(
             context="bootstrap price run",
         )
         as_of_date = get_market_calendar_service().last_completed_trading_day(market_code)
-        supported_symbols = _active_supported_price_symbols_for_market(
+        coverage_report = evaluate_bootstrap_price_readiness(
             db,
             market=market_code,
-        )
-        coverage_report = evaluate_bootstrap_price_cache_coverage(
-            db,
-            market=market_code,
-            symbols=supported_symbols,
             as_of_date=as_of_date,
         )
         if coverage_report.get("eligible"):

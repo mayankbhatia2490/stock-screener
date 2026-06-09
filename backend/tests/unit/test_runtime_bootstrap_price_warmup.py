@@ -29,7 +29,6 @@ def _patch_price_barrier_dependencies(
     session,
     warmup_metadata,
     coverage_report,
-    symbols=("AAPL", "MSFT"),
 ):
     class _FakePriceCache:
         def get_warmup_metadata(self, *, market=None):
@@ -43,14 +42,8 @@ def _patch_price_barrier_dependencies(
     )
     monkeypatch.setattr(
         module,
-        "_active_supported_price_symbols_for_market",
-        lambda _db, *, market: list(symbols),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        module,
-        "evaluate_bootstrap_price_cache_coverage",
-        lambda _db, *, market, symbols, as_of_date: coverage_report,
+        "evaluate_bootstrap_price_readiness",
+        lambda _db, *, market, as_of_date: coverage_report,
         raising=False,
     )
 

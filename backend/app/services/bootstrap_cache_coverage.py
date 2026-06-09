@@ -25,7 +25,7 @@ def _normalize_symbols(symbols: Sequence[str]) -> list[str]:
 
 
 def _ratio(covered: int, total: int) -> float:
-    return covered / total if total > 0 else 1.0
+    return covered / total if total > 0 else 0.0
 
 
 def _date_string(value: object | None) -> str | None:
