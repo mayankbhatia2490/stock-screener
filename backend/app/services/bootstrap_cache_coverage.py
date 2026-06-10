@@ -205,13 +205,27 @@ def bootstrap_coverage_policy_for_market(market: str | None) -> BootstrapCoverag
     )
 
 
-def _float_or_default(value: object, default: float) -> float:
+def _optional_float(value: object) -> float | None:
     if value is None:
-        return default
+        return None
     try:
         return float(value)
     except (TypeError, ValueError):
-        return default
+        return None
+
+
+def _report_meets_policy(
+    payload: Mapping[str, Any],
+    policy: BootstrapCoveragePolicy,
+) -> bool:
+    price_ratio = _optional_float(payload.get("price_coverage_ratio"))
+    fundamentals_ratio = _optional_float(payload.get("fundamentals_coverage_ratio"))
+    if price_ratio is None or fundamentals_ratio is None:
+        return False
+    return (
+        price_ratio >= policy.price_min_coverage
+        and fundamentals_ratio >= policy.fundamentals_min_coverage
+    )
 
 
 def normalize_bootstrap_gate_report(
@@ -222,20 +236,13 @@ def normalize_bootstrap_gate_report(
 ) -> dict[str, Any]:
     payload = dict(report or {})
     policy = bootstrap_coverage_policy_for_market(market)
-    eligible = bool(payload.get("eligible"))
-    price_threshold = _float_or_default(
-        payload.get("price_threshold", payload.get("threshold")),
-        policy.price_min_coverage,
-    )
-    fundamentals_threshold = _float_or_default(
-        payload.get("fundamentals_threshold"),
-        policy.fundamentals_min_coverage,
-    )
+    eligible = _report_meets_policy(payload, policy)
     payload.update(
         {
-            "threshold": price_threshold,
-            "price_threshold": price_threshold,
-            "fundamentals_threshold": fundamentals_threshold,
+            "eligible": eligible,
+            "threshold": policy.price_min_coverage,
+            "price_threshold": policy.price_min_coverage,
+            "fundamentals_threshold": policy.fundamentals_min_coverage,
             "mode": "cache_only" if eligible else "waiting_for_cache_coverage",
             "unsupported_skipped_count": len(unsupported_symbols) if eligible else 0,
             "unsupported_symbols_preview": (

@@ -273,9 +273,45 @@ def test_normalize_bootstrap_gate_report_owns_threshold_and_unsupported_metadata
 
     assert report["threshold"] == report["price_threshold"] == 0.50
     assert report["fundamentals_threshold"] == 0.95
+    assert report["eligible"] is True
     assert report["mode"] == "cache_only"
     assert report["unsupported_skipped_count"] == 2
     assert report["unsupported_symbols_preview"] == ["1234.BAD", "5678.BAD"]
+
+
+def test_normalize_bootstrap_gate_report_derives_eligibility_from_ratios_not_claim():
+    report = normalize_bootstrap_gate_report(
+        market="TW",
+        report={
+            "eligible": True,
+            "threshold": 0.10,
+            "price_threshold": 0.10,
+            "fundamentals_threshold": 0.10,
+            "price_coverage_ratio": 0.49,
+            "fundamentals_coverage_ratio": 1.0,
+        },
+        unsupported_symbols=["1234.BAD"],
+    )
+
+    assert report["threshold"] == report["price_threshold"] == 0.50
+    assert report["fundamentals_threshold"] == 0.95
+    assert report["eligible"] is False
+    assert report["mode"] == "waiting_for_cache_coverage"
+    assert report["unsupported_skipped_count"] == 0
+    assert report["unsupported_symbols_preview"] == []
+
+
+def test_normalize_bootstrap_gate_report_defaults_closed_when_ratios_are_missing():
+    report = normalize_bootstrap_gate_report(
+        market="TW",
+        report={"eligible": True},
+        unsupported_symbols=["1234.BAD"],
+    )
+
+    assert report["eligible"] is False
+    assert report["mode"] == "waiting_for_cache_coverage"
+    assert report["unsupported_skipped_count"] == 0
+    assert report["unsupported_symbols_preview"] == []
 
 
 def test_normalize_bootstrap_gate_report_hides_unsupported_symbols_until_gate_passes():
