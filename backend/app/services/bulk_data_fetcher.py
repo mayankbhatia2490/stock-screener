@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 from ..config import settings
+from ..domain.providers.price_symbol_support import yahoo_price_no_data_error_for_symbol
 from .growth_cadence_service import compute_cadence_aware_growth
 from .price_fetch_failures import (
     PriceFetchFailureKind,
@@ -28,7 +29,6 @@ from .price_fetch_failures import (
     is_retryable_price_failure,
     normalize_price_fetch_failure_kind,
 )
-from .price_symbol_validation import yahoo_price_no_data_error_for_symbol
 
 if TYPE_CHECKING:
     from .eps_rating_service import EPSRatingService

@@ -8,7 +8,7 @@ import json
 import re
 from typing import Any, Iterable, Mapping
 
-from .price_symbol_validation import is_zero_prefixed_jp_local_code
+from app.domain.providers.price_symbol_support import is_zero_prefixed_jp_local_code
 from .security_master_service import security_master_resolver
 
 _JP_EXCHANGE_ALIASES: dict[str, str] = {
