@@ -337,7 +337,10 @@ async def test_get_rrg_scopes_returns_bundle_with_available_scopes(monkeypatch, 
                 },
             }
 
-    monkeypatch.setattr("app.api.v1.groups.RRGService", _FakeRRGService)
+    monkeypatch.setattr(
+        "app.api.v1.groups._get_rrg_service",
+        lambda: _FakeRRGService(),
+    )
 
     response = await client.get("/api/v1/groups/rrg/scopes", params={"market": "HK"})
 
@@ -363,7 +366,10 @@ async def test_get_rrg_scopes_rejects_group_rank_market_without_rrg_capability(m
         def get_rrg_scopes(self, *args, **kwargs):  # noqa: ANN002, ANN003
             return {"groups": {"groups": []}, "sectors": {"groups": []}}
 
-    monkeypatch.setattr("app.api.v1.groups.RRGService", _FakeRRGService)
+    monkeypatch.setattr(
+        "app.api.v1.groups._get_rrg_service",
+        lambda: _FakeRRGService(),
+    )
 
     response = await client.get("/api/v1/groups/rrg/scopes", params={"market": "KR"})
 

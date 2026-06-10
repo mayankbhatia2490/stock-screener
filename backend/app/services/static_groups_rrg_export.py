@@ -7,7 +7,6 @@ from datetime import date
 from typing import Any
 
 from sqlalchemy import inspect
-from sqlalchemy.exc import SQLAlchemyError
 
 from app.domain.markets.catalog import get_market_catalog
 from app.infra.db.models.feature_store import FeatureRun, StockFeatureDaily
@@ -66,19 +65,11 @@ class StaticGroupsRRGPayloadBuilder:
         normalized_market = str(market or "US").strip().upper()
         self._preflight_tables(db, normalized_market)
 
-        try:
-            scopes = self.rrg_service.get_rrg_scopes(
-                db,
-                market=normalized_market,
-                scopes=("groups", "sectors"),
-            )
-        except SQLAlchemyError as exc:
-            if not _is_missing_table_sql_error(exc):
-                raise
-            raise StaticGroupsRRGUnavailableError(
-                section=f"{normalized_market} rrg",
-                reason="RRG source tables are unavailable for this export database.",
-            ) from exc
+        scopes = self.rrg_service.get_rrg_scopes(
+            db,
+            market=normalized_market,
+            scopes=("groups", "sectors"),
+        )
 
         groups_rrg = scopes["groups"]
         sectors_rrg = scopes["sectors"]
@@ -153,23 +144,6 @@ def _missing_required_tables(db: Any, table_names: tuple[str, ...]) -> list[str]
         table_name for table_name in table_names
         if not inspector.has_table(table_name)
     ]
-
-
-def _is_missing_table_sql_error(exc: SQLAlchemyError) -> bool:
-    parts = [str(exc)]
-    orig = getattr(exc, "orig", None)
-    if orig is not None:
-        parts.append(str(orig))
-    message = " ".join(parts).lower()
-    return any(
-        marker in message
-        for marker in (
-            "no such table",
-            "does not exist",
-            "undefined table",
-            "unknown table",
-        )
-    )
 
 
 __all__ = [

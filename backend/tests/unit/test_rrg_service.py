@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -251,6 +252,21 @@ def test_get_rrg_uses_injected_history_provider_for_all_markets():
 
     assert calls == [("HK", 123)]
     assert [group["industry_group"] for group in payload["groups"]] == ["Internet Services"]
+
+
+def test_get_rrg_rejects_unknown_scope_at_service_boundary():
+    session = _session()
+
+    class _FakeHistoryProvider:
+        def get_all_groups_history(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("unknown scopes should fail before loading history")
+
+    with pytest.raises(ValueError, match="Unsupported RRG scope"):
+        RRGService(history_provider=_FakeHistoryProvider()).get_rrg(
+            session,
+            market="US",
+            scope="bogus",
+        )
 
 
 def test_get_rrg_disabled_non_us_market_returns_empty_without_history_lookup():

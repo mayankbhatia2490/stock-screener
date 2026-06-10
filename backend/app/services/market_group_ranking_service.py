@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, TypeAlias
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.common.query import FilterSpec, SortOrder, SortSpec
@@ -20,9 +21,58 @@ GROUP_CHANGE_OFFSETS = {
     "6m": 126,
 }
 
+GroupRankingHistoryResult: TypeAlias = tuple[
+    str | None,
+    dict[str, dict[str, Any]],
+    dict[str, list[tuple[date, float, int]]],
+]
+
 
 class MarketGroupRankingService:
     """Read-only group ranking service for non-US markets."""
+
+    def __init__(self, *, rrg_history_cache_entries: int = 32) -> None:
+        self._rrg_history_cache_entries = rrg_history_cache_entries
+        self._rrg_history_cache: OrderedDict[
+            tuple[int, str, int, int],
+            GroupRankingHistoryResult,
+        ] = OrderedDict()
+
+    def get_rrg_history(
+        self,
+        db: Session,
+        *,
+        market: str,
+        days: int,
+    ) -> GroupRankingHistoryResult:
+        """Return RRG-ready group-rank history from published feature runs."""
+        normalized_market = str(market or "").strip().upper()
+        latest_run = self._get_latest_published_run(db, market=normalized_market)
+        if latest_run is None:
+            return None, {}, {}
+
+        cache_key = (
+            self._db_bind_identity(db),
+            normalized_market,
+            int(days),
+            int(latest_run.id),
+        )
+        cached = self._rrg_history_cache.get(cache_key)
+        if cached is not None:
+            self._rrg_history_cache.move_to_end(cache_key)
+            return cached
+
+        result = self._build_rrg_history_result(
+            db,
+            market=normalized_market,
+            days=days,
+            latest_run=latest_run,
+        )
+        self._rrg_history_cache[cache_key] = result
+        self._rrg_history_cache.move_to_end(cache_key)
+        while len(self._rrg_history_cache) > self._rrg_history_cache_entries:
+            self._rrg_history_cache.popitem(last=False)
+        return result
 
     def get_current_rankings(
         self,
@@ -220,6 +270,55 @@ class MarketGroupRankingService:
             "history": history,
             "stocks": stocks,
         }
+
+    def _build_rrg_history_result(
+        self,
+        db: Session,
+        *,
+        market: str,
+        days: int,
+        latest_run: FeatureRun,
+    ) -> GroupRankingHistoryResult:
+        cutoff_date = latest_run.as_of_date - timedelta(days=days)
+        market_runs = self._get_market_run_series(
+            db,
+            market=market,
+            latest_run=latest_run,
+            cutoff_date=cutoff_date,
+            min_runs=0,
+        )
+
+        rankings_by_run: dict[int, list[dict[str, Any]]] = {}
+        for run in market_runs:
+            rows = self._load_run_rows(
+                db,
+                run.id,
+                include_sparklines=False,
+            )
+            rankings_by_run[run.id] = self.compute_group_rankings_from_rows(
+                rows,
+                ranking_date=run.as_of_date,
+            )
+
+        latest_rankings = rankings_by_run.get(latest_run.id, [])
+        meta = self._group_rank_map(latest_rankings)
+
+        series: dict[str, list[tuple[date, float, int]]] = defaultdict(list)
+        for run in reversed(market_runs):
+            for ranking in rankings_by_run.get(run.id, []):
+                group = ranking.get("industry_group")
+                avg_rs = ranking.get("avg_rs_rating")
+                if not group or avg_rs is None:
+                    continue
+                series[str(group)].append(
+                    (
+                        run.as_of_date,
+                        float(avg_rs),
+                        int(ranking.get("num_stocks") or 0),
+                    )
+                )
+
+        return latest_run.as_of_date.isoformat(), meta, dict(series)
 
     @staticmethod
     def extract_group_row_payload(row: Any) -> dict[str, Any]:
@@ -441,6 +540,16 @@ class MarketGroupRankingService:
     def _group_rank_map(rankings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return {str(row["industry_group"]): row for row in rankings if row.get("industry_group")}
 
+    @staticmethod
+    def _db_bind_identity(db: Session) -> int:
+        get_bind = getattr(db, "get_bind", None)
+        if callable(get_bind):
+            try:
+                return id(get_bind())
+            except SQLAlchemyError:
+                return id(db)
+        return id(db)
+
 
 _market_group_ranking_service: MarketGroupRankingService | None = None
 
@@ -454,6 +563,7 @@ def get_market_group_ranking_service() -> MarketGroupRankingService:
 
 __all__ = [
     "GROUP_CHANGE_OFFSETS",
+    "GroupRankingHistoryResult",
     "MarketGroupRankingService",
     "get_market_group_ranking_service",
 ]

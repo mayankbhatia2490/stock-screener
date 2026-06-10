@@ -192,3 +192,21 @@ def test_cached_rrg_history_provider_loads_each_run_once_and_returns_ascending_s
         series,
     )
     assert load_calls == [3, 2, 1]
+
+
+def test_cached_rrg_history_provider_delegates_to_public_history_source():
+    calls: list[tuple[str, int]] = []
+
+    class _HistorySource:
+        def get_rrg_history(self, db, *, market, days):  # noqa: ANN001
+            calls.append((market, days))
+            return "2026-04-03", {}, {}
+
+    provider = CachedFeatureRunRRGHistoryProvider(_HistorySource())
+
+    assert provider.get_all_groups_history(Session(), market="HK", days=400) == (
+        "2026-04-03",
+        {},
+        {},
+    )
+    assert calls == [("HK", 400)]

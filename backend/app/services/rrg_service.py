@@ -27,9 +27,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from app.domain.markets.catalog import get_market_catalog
+from app.domain.markets.catalog import (
+    MarketCatalog,
+    RRG_SCOPE_ORDER,
+    get_market_catalog,
+)
+from app.services.rrg_history_provider import RRGHistoryProvider
 
 # ---------------------------------------------------------------------------
 # Tunable constants (module-level so they can be adjusted without touching the
@@ -55,6 +60,11 @@ DEFAULT_TAIL_WEEKS = 8
 DEFAULT_LOOKBACK_DAYS = 400  # enough daily rows to build Z_WINDOW + tail weeks
 
 
+def _unsupported_rrg_scope_message(scope: str) -> str:
+    supported = ", ".join(RRG_SCOPE_ORDER)
+    return f"Unsupported RRG scope {scope!r}. Supported: {supported}."
+
+
 @dataclass(frozen=True)
 class RRGParams:
     """Parameters controlling the RRG transform."""
@@ -63,6 +73,13 @@ class RRGParams:
     smooth_ratio_span: int = SMOOTH_RATIO_SPAN
     z_window: int = Z_WINDOW
     mom_window: int = MOM_WINDOW
+
+
+class RRGTaxonomyService(Protocol):
+    """Taxonomy dependency needed for curated non-US sector roll-ups."""
+
+    def sector_map_for_market(self, market: str) -> dict[str, str]:
+        """Return industry group -> sector mappings for one market."""
 
 
 def _week_start(d: date) -> date:
@@ -240,9 +257,9 @@ class RRGService:
     def __init__(
         self,
         *,
-        history_provider: Any,
-        taxonomy_service: Any | None = None,
-        market_catalog: Any | None = None,
+        history_provider: RRGHistoryProvider,
+        taxonomy_service: RRGTaxonomyService | None = None,
+        market_catalog: MarketCatalog | None = None,
     ) -> None:
         self._history_provider = history_provider
         self._taxonomy_service = taxonomy_service
@@ -298,13 +315,14 @@ class RRGService:
         lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     ) -> Dict[str, Any]:
         """Assemble the RRG payload for one market + scope (``groups``/``sectors``)."""
+        normalized_scope = self._normalize_requested_scopes((scope,))[0]
         return self.get_rrg_scopes(
             db,
             market=market,
-            scopes=(scope,),
+            scopes=(normalized_scope,),
             tail_weeks=tail_weeks,
             lookback_days=lookback_days,
-        )[scope]
+        )[normalized_scope]
 
     def get_rrg_scopes(
         self,
@@ -322,7 +340,7 @@ class RRGService:
         sectors without re-querying. ``get_rrg`` is the single-scope shorthand.
         """
         market = (market or "US").upper()
-        requested_scopes = tuple(dict.fromkeys(scopes))
+        requested_scopes = self._normalize_requested_scopes(scopes)
         available_scopes = set(self.available_scopes_for_market(market))
         if not any(scope in available_scopes for scope in requested_scopes):
             return self._empty_scopes(market, requested_scopes)
@@ -389,12 +407,14 @@ class RRGService:
     ) -> Dict[str, Any]:
         if scope == "sectors":
             series, scope_meta = self._aggregate_sectors(db, market, group_series)
-        else:
+        elif scope == "groups":
             series = {
                 g: [(d, rs) for (d, rs, _ns) in pts]
                 for g, pts in group_series.items()
             }
             scope_meta = meta
+        else:
+            raise ValueError(_unsupported_rrg_scope_message(scope))
 
         groups_out: List[Dict[str, Any]] = []
         for name, daily in series.items():
@@ -423,6 +443,20 @@ class RRGService:
             "scope": scope,
             "groups": groups_out,
         }
+
+    @staticmethod
+    def _normalize_requested_scopes(scopes: Sequence[str]) -> tuple[str, ...]:
+        requested_scopes = tuple(
+            dict.fromkeys(str(scope or "").strip().lower() for scope in scopes)
+        )
+        unsupported_scopes = [
+            scope
+            for scope in requested_scopes
+            if scope not in RRG_SCOPE_ORDER
+        ]
+        if unsupported_scopes:
+            raise ValueError(_unsupported_rrg_scope_message(unsupported_scopes[0]))
+        return requested_scopes
 
     def _aggregate_sectors(
         self,

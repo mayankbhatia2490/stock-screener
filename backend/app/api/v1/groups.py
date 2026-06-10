@@ -31,11 +31,12 @@ from ...schemas.ui_view_snapshot import UISnapshotEnvelope
 from ...domain.analytics.scope import market_scope_tag
 from ...domain.markets.catalog import get_market_catalog
 from ...services.market_group_ranking_service import get_market_group_ranking_service
-from ...services.market_taxonomy_service import get_market_taxonomy_service
-from ...services.rrg_history_provider import build_rrg_history_provider
-from ...services.rrg_service import RRGService
 from ...services.ui_snapshot_service import GroupsBootstrapUnavailableError
-from ...wiring.bootstrap import get_group_rank_service, get_ui_snapshot_service
+from ...wiring.bootstrap import (
+    get_group_rank_service,
+    get_rrg_service as get_runtime_rrg_service,
+    get_ui_snapshot_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +58,7 @@ def _get_market_group_service():
 
 
 def _get_rrg_service():
-    return RRGService(
-        history_provider=build_rrg_history_provider(
-            group_rank_service=_get_group_rank_service(),
-            market_group_ranking_service=_get_market_group_service(),
-        ),
-        taxonomy_service=get_market_taxonomy_service(),
-    )
+    return get_runtime_rrg_service()
 
 
 def _normalize_market_param(market: str | None) -> str:

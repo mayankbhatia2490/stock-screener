@@ -1765,6 +1765,35 @@ def test_build_groups_rrg_payload_emits_available_scopes(service_and_session_fac
     assert payload["payload"]["groups"]["groups"][0]["industry_group"] == "Internet Services"
 
 
+def test_static_groups_rrg_builder_propagates_sql_errors_after_preflight(
+    service_and_session_factory,
+    monkeypatch,
+):
+    _service, session_factory = service_and_session_factory
+
+    class _FakeRRGService:
+        def get_rrg_scopes(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise SQLAlchemyError("no such table: feature_runs")
+
+    monkeypatch.setattr(
+        StaticGroupsRRGPayloadBuilder,
+        "_preflight_tables",
+        lambda self, db, market: None,  # noqa: ARG005
+    )
+    builder = StaticGroupsRRGPayloadBuilder(
+        schema_version=STATIC_SITE_SCHEMA_VERSION,
+        rrg_service=_FakeRRGService(),
+    )
+
+    with session_factory() as db, pytest.raises(SQLAlchemyError, match="feature_runs"):
+        builder.build(
+            db=db,
+            generated_at="2026-04-18T22:00:00Z",
+            expected_as_of_date=date(2026, 4, 18),
+            market="HK",
+        )
+
+
 def test_build_groups_rrg_payload_propagates_non_missing_table_sql_errors(
     service_and_session_factory,
     monkeypatch,
