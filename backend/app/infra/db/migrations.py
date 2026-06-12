@@ -7,7 +7,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from .legacy_runtime_migrations import reconcile_legacy_runtime_schema
@@ -18,6 +18,9 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[3]
 _ALEMBIC_INI = _BACKEND_ROOT / "alembic.ini"
 _ALEMBIC_SCRIPT_LOCATION = _BACKEND_ROOT / "alembic"
 _BASELINE_REVISION = "20260408_0001"
+
+# Serializes startup migrations across uvicorn workers booting concurrently.
+_MIGRATION_ADVISORY_LOCK_KEY = 0x5343414E  # "SCAN"
 
 
 def _alembic_config(database_url: str) -> Config:
@@ -47,7 +50,29 @@ def _has_alembic_version_table(engine: Engine) -> bool:
 
 
 def migrate_database_to_head(engine: Engine, revision: str = "head") -> str:
-    """Upgrade new databases and reconcile pre-Alembic schemas before upgrade."""
+    """Upgrade new databases and reconcile pre-Alembic schemas before upgrade.
+
+    Holds a Postgres advisory lock for the duration so concurrent uvicorn
+    workers (or replicas sharing one database) cannot run DDL simultaneously;
+    late arrivals block on the lock and then no-op against the migrated schema.
+    """
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as lock_conn:
+            lock_conn.execute(
+                text("SELECT pg_advisory_lock(:key)"),
+                {"key": _MIGRATION_ADVISORY_LOCK_KEY},
+            )
+            try:
+                return _migrate_database_to_head_unlocked(engine, revision)
+            finally:
+                lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": _MIGRATION_ADVISORY_LOCK_KEY},
+                )
+    return _migrate_database_to_head_unlocked(engine, revision)
+
+
+def _migrate_database_to_head_unlocked(engine: Engine, revision: str) -> str:
     config = _alembic_config(_engine_database_url(engine))
     has_version_table = _has_alembic_version_table(engine)
     has_user_tables = _has_user_tables(engine)
