@@ -2466,19 +2466,26 @@ def test_export_chart_bundle_expands_coverage_for_top_groups_constituents(
     assert manifest["symbols_total"] == 3
 
 
-def test_build_key_markets_skips_change_when_latest_close_is_null(service_and_session_factory):
-    service, session_factory = service_and_session_factory
+def test_build_key_market_entries_skips_change_when_latest_close_is_null(service_and_session_factory):
+    # Shared DB-backed builder used by the live Daily Snapshot endpoint;
+    # must mirror the exporter's null-close semantics.
+    from app.services.key_market_history import build_key_market_entries
+
+    from datetime import timedelta
+
+    _service, session_factory = service_and_session_factory
 
     with session_factory() as db:
         db.add_all(
             [
-                StockPrice(symbol="SPY", date=date(2026, 3, 30), close=500.0),
-                StockPrice(symbol="SPY", date=date(2026, 3, 31), close=None),
+                # Within the builder's calendar window (it looks back ~60 days).
+                StockPrice(symbol="SPY", date=date.today() - timedelta(days=2), close=500.0),
+                StockPrice(symbol="SPY", date=date.today() - timedelta(days=1), close=None),
             ]
         )
         db.commit()
 
-        markets = service._build_key_markets(db)  # noqa: SLF001 - intentional unit test coverage
+        markets = build_key_market_entries(db, "US")
 
     spy = next(item for item in markets if item["symbol"] == "SPY")
     assert spy["latest_close"] is None

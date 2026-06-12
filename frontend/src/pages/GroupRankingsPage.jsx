@@ -56,28 +56,11 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { useRuntime } from '../contexts/RuntimeContext';
+import { useMarketForCapability } from '../contexts/MarketContext';
 import PriceSparkline from '../components/Scan/PriceSparkline';
 import RSSparkline from '../components/Scan/RSSparkline';
 import GroupChartsGrid from '../components/Charts/GroupChartsGrid';
-import {
-  marketOptionsForCapability,
-  normalizeMarketCode,
-} from '../utils/marketCapabilities';
 import { rrgScopesForMarket } from '../utils/rrgScopes';
-
-const MARKET_LABELS = {
-  US: 'US',
-  HK: 'HK',
-  IN: 'IN',
-  JP: 'JP',
-  KR: 'KR',
-  TW: 'TW',
-  CN: 'CN',
-  CA: 'CA',
-  SG: 'SG',
-  AU: 'AU',
-  MY: 'MY',
-};
 
 const GROUP_RANKING_MARKET_FALLBACKS = ['US', 'HK', 'IN', 'JP', 'KR', 'TW', 'CN', 'CA'];
 
@@ -509,26 +492,14 @@ function GroupRankingsPage() {
     features,
     runtimeReady,
     uiSnapshots,
-    primaryMarket,
-    enabledMarkets,
-    supportedMarkets,
     marketCatalog,
   } = useRuntime();
   const queryClient = useQueryClient();
   const [selectedPeriod, setSelectedPeriod] = useState('1w');
-  const availableMarkets = useMemo(() => marketOptionsForCapability({
-    marketCatalog,
-    capability: 'group_rankings',
-    fallbackCodes: GROUP_RANKING_MARKET_FALLBACKS,
-    enabledMarkets,
-    supportedMarkets,
-  }), [enabledMarkets, marketCatalog, supportedMarkets]);
-  const [selectedMarket, setSelectedMarket] = useState(() => {
-    const preferredMarket = normalizeMarketCode(primaryMarket || 'US');
-    return availableMarkets.includes(preferredMarket)
-      ? preferredMarket
-      : (availableMarkets[0] || 'US');
-  });
+  const { market: selectedMarket } = useMarketForCapability(
+    'group_rankings',
+    GROUP_RANKING_MARKET_FALLBACKS,
+  );
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [view, setView] = useState('table'); // 'table' | 'rrg'
   const [rrgScope, setRrgScope] = useState('groups'); // 'groups' | 'sectors'
@@ -538,63 +509,37 @@ function GroupRankingsPage() {
   const [calculationTaskId, setCalculationTaskId] = useState(null);
   const [calculationError, setCalculationError] = useState(null);
   const [showHistoricalRanks, setShowHistoricalRanks] = useState(false); // Toggle between change vs actual rank
-  const [bootstrapSettled, setBootstrapSettled] = useState(false);
   const snapshotEnabled = runtimeReady && Boolean(uiSnapshots?.groups);
-  const liveQueriesEnabled = runtimeReady && (!snapshotEnabled || bootstrapSettled);
-
-  useEffect(() => {
-    const preferredMarket = normalizeMarketCode(primaryMarket || 'US');
-    if (availableMarkets.includes(selectedMarket)) {
-      return;
-    }
-    if (availableMarkets.includes(preferredMarket)) {
-      setSelectedMarket(preferredMarket);
-      return;
-    }
-    setSelectedMarket(availableMarkets[0] || 'US');
-  }, [availableMarkets, primaryMarket, selectedMarket]);
 
   useEffect(() => {
     setSelectedGroup(null);
-    setBootstrapSettled(false);
   }, [selectedMarket]);
 
+  // The snapshot fast-path: the bootstrap queryFn seeds the live query
+  // caches synchronously for this exact market — key and payload come from
+  // the same fetch closure, so cross-market mixups are structurally
+  // impossible (no seeding effect, no settled flag).
   const groupsBootstrapQuery = useQuery({
     queryKey: ['groupsBootstrap', selectedMarket],
-    queryFn: () => getGroupsBootstrap(selectedMarket),
-    enabled: snapshotEnabled && !bootstrapSettled,
+    queryFn: async () => {
+      const snapshot = await getGroupsBootstrap(selectedMarket);
+      if (snapshot && !snapshot.is_stale) {
+        const payload = snapshot.payload ?? {};
+        queryClient.setQueryData(['groupRankings', selectedMarket], payload.rankings ?? null);
+        queryClient.setQueryData(['groupMovers', '1w', selectedMarket], payload.movers ?? null);
+      }
+      return snapshot;
+    },
+    enabled: snapshotEnabled,
     retry: false,
     staleTime: 60_000,
   });
-
-  useEffect(() => {
-    if (!snapshotEnabled) {
-      return;
-    }
-    if (groupsBootstrapQuery.isError) {
-      setBootstrapSettled(true);
-      return;
-    }
-    if (!groupsBootstrapQuery.isSuccess) {
-      return;
-    }
-    if (groupsBootstrapQuery.data?.is_stale) {
-      setBootstrapSettled(true);
-      return;
-    }
-
-    const payload = groupsBootstrapQuery.data?.payload ?? {};
-    queryClient.setQueryData(['groupRankings', selectedMarket], payload.rankings ?? null);
-    queryClient.setQueryData(['groupMovers', '1w', selectedMarket], payload.movers ?? null);
-    setBootstrapSettled(true);
-  }, [
-    groupsBootstrapQuery.data,
-    groupsBootstrapQuery.isError,
-    groupsBootstrapQuery.isSuccess,
-    queryClient,
-    selectedMarket,
-    snapshotEnabled,
-  ]);
+  // Live queries wait for the bootstrap to resolve either way: on success
+  // their caches are freshly seeded (no fetch); on error or a stale
+  // snapshot they fetch live data.
+  const liveQueriesEnabled = runtimeReady && (
+    !snapshotEnabled || groupsBootstrapQuery.isSuccess || groupsBootstrapQuery.isError
+  );
 
   // The RRG view has its own query (and the static-friendly RRGChart); the
   // table-only rankings/movers fetches are skipped while it's active so a
@@ -745,25 +690,6 @@ function GroupRankingsPage() {
       })
     : [];
 
-  const marketFilter = (
-    <ToggleButtonGroup
-      value={selectedMarket}
-      exclusive
-      onChange={(_event, nextMarket) => {
-        if (nextMarket) {
-          setSelectedMarket(nextMarket);
-        }
-      }}
-      size="small"
-    >
-      {availableMarkets.map((market) => (
-        <ToggleButton key={market} value={market}>
-          {MARKET_LABELS[market] || market}
-        </ToggleButton>
-      ))}
-    </ToggleButtonGroup>
-  );
-
   if (!runtimeReady) {
     return (
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
@@ -785,9 +711,8 @@ function GroupRankingsPage() {
   if (errorRankings && !isRrgView) {
     return (
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        <Box sx={{ mb: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-          {marketFilter}
-          {features.tasks && selectedMarket === 'US' && (
+        {features.tasks && selectedMarket === 'US' && (
+          <Box sx={{ mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
             <Button
               variant="contained"
               startIcon={<RefreshIcon />}
@@ -796,8 +721,8 @@ function GroupRankingsPage() {
             >
               {isCalculating ? 'Calculating...' : 'Calculate Rankings'}
             </Button>
-          )}
-        </Box>
+          </Box>
+        )}
         <Alert severity="error">
           Error loading rankings: {errorRankings.message}
         </Alert>
@@ -808,9 +733,6 @@ function GroupRankingsPage() {
 
   return (
     <Container maxWidth="xl" sx={{ mt: 2, mb: 2 }}>
-      <Box sx={{ mb: 1.5, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-        {marketFilter}
-
       {features.tasks && selectedMarket === 'US' && (
         <Box sx={{ mb: 1.5, display: 'flex', justifyContent: 'flex-end' }}>
           <Button
@@ -824,7 +746,6 @@ function GroupRankingsPage() {
           </Button>
         </Box>
       )}
-      </Box>
 
       {renderCalculationErrorAlert({ mb: 1.5 })}
 

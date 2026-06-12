@@ -21,9 +21,13 @@ from app.analysis.patterns.rs_line import blue_dot_series, compute_rs_line
 from app.domain.common.query import FilterSpec, SortOrder, SortSpec
 from app.domain.markets.catalog import get_market_catalog
 from app.domain.markets.key_markets import key_market_instruments
+from app.domain.scanning.default_filters import (
+    DEFAULT_SCAN_FILTERS_BY_MARKET,
+    DEFAULT_SCAN_FILTERS_FALLBACK,
+    resolve_default_scan_filters,
+)
 from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
-from app.models.stock import StockPrice
 from app.schemas.groups import (
     ConstituentStock,
     GroupDetailResponse,
@@ -62,27 +66,10 @@ STATIC_CHART_LIMIT = 200
 STATIC_CHART_PERIOD = "6mo"
 STATIC_CHART_PERIOD_DAYS = 180
 STATIC_CHART_LOOKUP_BATCH_SIZE = 250
-# Default minVolume thresholds are expressed in local-currency daily dollar
-# volume (avg_volume × current_price), not share count — the ``volume`` field
-# on each scan row is sourced from ``avg_dollar_volume`` in the local listing
-# currency. The US value preserves the historical USD 100M floor; non-US
-# values are sized to roughly USD 1M-equivalent so the full local universe is
-# visible by default, with users free to tighten via the filter panel.
-STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET: dict[str, dict[str, int | None]] = {
-    "US": {"minVolume": 100_000_000},      # USD 100M
-    "HK": {"minVolume":   8_000_000},      # ~USD 1M @ HKD 7.8
-    "IN": {"minVolume":  80_000_000},      # ~USD 1M @ INR 83
-    "JP": {"minVolume": 150_000_000},      # ~USD 1M @ JPY 150
-    "KR": {"minVolume": 1_000_000_000},    # ~USD 750k @ KRW 1380
-    "TW": {"minVolume":  30_000_000},      # ~USD 1M @ TWD 32
-    "CN": {"minVolume":   7_000_000},      # ~USD 1M @ CNY 7.2
-    "CA": {"minVolume":   1_400_000},      # ~USD 1M @ CAD 1.36
-    "DE": {"minVolume":     900_000},      # ~USD 1M @ EUR 0.92
-    "SG": {"minVolume":   1_300_000},      # ~USD 1M @ SGD 1.35
-    "AU": {"minVolume":   1_500_000},      # ~USD 1M @ AUD 1.5
-    "MY": {"minVolume":   4_500_000},      # ~USD 1M @ MYR 4.5
-}
-STATIC_DEFAULT_SCAN_FILTERS_FALLBACK: dict[str, int | None] = {"minVolume": None}
+# Canonical per-market defaults live in the domain layer (shared with the
+# Daily Snapshot service); these aliases preserve this module's public names.
+STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET = DEFAULT_SCAN_FILTERS_BY_MARKET
+STATIC_DEFAULT_SCAN_FILTERS_FALLBACK = DEFAULT_SCAN_FILTERS_FALLBACK
 
 
 STATIC_CHART_PRESET_TOP_N = 200
@@ -1280,44 +1267,9 @@ class StaticSiteExportService:
             "top_groups": top_groups,
         }
 
-    def _build_key_markets(self, market: str | Session = STATIC_DEFAULT_MARKET) -> list[dict[str, Any]]:
-        if isinstance(market, Session):
-            db = market
-            entries: list[dict[str, Any]] = []
-            for instrument in key_market_instruments(STATIC_DEFAULT_MARKET):
-                rows = (
-                    db.query(StockPrice)
-                    .filter(StockPrice.symbol == instrument.data_symbol)
-                    .order_by(StockPrice.date.desc())
-                    .limit(30)
-                    .all()
-                )
-                ordered = list(reversed(rows))
-                latest = ordered[-1] if ordered else None
-                previous = ordered[-2] if len(ordered) > 1 else None
-                change_1d = None
-                if (
-                    latest is not None
-                    and previous is not None
-                    and latest.close is not None
-                    and previous.close not in (None, 0)
-                ):
-                    change_1d = round(((latest.close - previous.close) / previous.close) * 100, 2)
-                entries.append(
-                    {
-                        "symbol": instrument.display_symbol,
-                        "display_name": instrument.display_name,
-                        "latest_close": latest.close if latest is not None else None,
-                        "latest_date": latest.date.isoformat() if latest is not None else None,
-                        "change_1d": change_1d,
-                        "history": [
-                            {"date": row.date.isoformat(), "close": row.close}
-                            for row in ordered
-                        ],
-                    }
-                )
-            return entries
-
+    def _build_key_markets(self, market: str = STATIC_DEFAULT_MARKET) -> list[dict[str, Any]]:
+        # Reads the warmed price cache; the DB-backed equivalent used by the
+        # live Daily Snapshot endpoint is key_market_history.build_key_market_entries.
         entries: list[dict[str, Any]] = []
         for instrument in key_market_instruments(market):
             history = self._get_symbol_price_history(instrument.data_symbol, period="6mo")
@@ -1907,12 +1859,7 @@ class StaticSiteExportService:
     ) -> dict[str, int | None]:
         """Return the per-market default scan filters, or the no-op fallback."""
 
-        code = (market or "").upper()
-        return dict(
-            STATIC_DEFAULT_SCAN_FILTERS_BY_MARKET.get(
-                code, STATIC_DEFAULT_SCAN_FILTERS_FALLBACK
-            )
-        )
+        return resolve_default_scan_filters(market)
 
     @staticmethod
     def _apply_static_default_filters(
