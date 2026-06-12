@@ -14,7 +14,7 @@ import {
   refreshScanCache,
 } from '../../../api/scans';
 import FilterPanel from '../components/FilterPanelContainer';
-import ChartViewerModal from '../../../components/Scan/ChartViewerModal';
+import ChartViewerModal from '../../../components/Scan/ChartViewerModalLazy';
 import { buildFilterParams, getStableFilterKey } from '../../../utils/filterUtils';
 import {
   fetchPriceHistory,

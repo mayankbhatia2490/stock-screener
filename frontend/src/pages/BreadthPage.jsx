@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Container,
@@ -9,12 +9,8 @@ import {
   Paper,
   Grid,
   Chip,
-  FormControl,
   Tab,
   Tabs,
-  InputLabel,
-  MenuItem,
-  Select,
   Table,
   TableBody,
   TableCell,
@@ -34,6 +30,7 @@ import { getPriceHistory } from '../api/stocks';
 import BreadthChart from '../components/Charts/BreadthChart';
 import { format } from 'date-fns';
 import { useRuntime } from '../contexts/RuntimeContext';
+import { useMarket } from '../contexts/MarketContext';
 import {
   marketOptionsForCapability,
   normalizeMarketCode,
@@ -145,47 +142,14 @@ function BreadthPage() {
   const [selectedTab, setSelectedTab] = useState(0);
   const [chartTimeRange, setChartTimeRange] = useState('1M');
   const [bootstrapSettled, setBootstrapSettled] = useState(false);
-  const [selectedMarket, setSelectedMarket] = useState(() => {
-    const normalizedPrimary = normalizeMarket(primaryMarket);
-    return marketOptions.includes(normalizedPrimary)
-      ? normalizedPrimary
+  const { selectedMarket: globalMarket } = useMarket();
+  // Clamp the global header selection to markets with breadth coverage.
+  const selectedMarket = useMemo(() => {
+    const preferred = normalizeMarket(globalMarket || primaryMarket);
+    return marketOptions.includes(preferred)
+      ? preferred
       : (marketOptions[0] || 'US');
-  });
-  const userSelectedMarketRef = useRef(false);
-  const previousPrimaryMarketRef = useRef(normalizeMarket(primaryMarket));
-  useEffect(() => {
-    if (marketOptions.length === 0) {
-      return;
-    }
-    const normalizedPrimary = normalizeMarket(primaryMarket);
-    const fallbackMarket = marketOptions.includes(normalizedPrimary)
-      ? normalizedPrimary
-      : marketOptions[0];
-    const primaryChanged = previousPrimaryMarketRef.current !== normalizedPrimary;
-
-    setSelectedMarket((currentMarket) => {
-      if (!marketOptions.includes(currentMarket)) {
-        userSelectedMarketRef.current = false;
-        return fallbackMarket;
-      }
-      if (
-        !userSelectedMarketRef.current
-        && marketOptions.includes(normalizedPrimary)
-        && currentMarket !== normalizedPrimary
-      ) {
-        return normalizedPrimary;
-      }
-      if (
-        primaryChanged
-        && !userSelectedMarketRef.current
-        && currentMarket !== fallbackMarket
-      ) {
-        return fallbackMarket;
-      }
-      return currentMarket;
-    });
-    previousPrimaryMarketRef.current = normalizedPrimary;
-  }, [marketOptions, primaryMarket]);
+  }, [globalMarket, marketOptions, primaryMarket]);
   useEffect(() => {
     setBootstrapSettled(false);
   }, [selectedMarket]);
@@ -313,28 +277,8 @@ function BreadthPage() {
     setSelectedTab(newValue);
   };
 
-  const marketSelector = (
-    <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-      <FormControl size="small" sx={{ minWidth: 180 }}>
-        <InputLabel id="breadth-market-label">Market</InputLabel>
-        <Select
-          labelId="breadth-market-label"
-          value={selectedMarket}
-          label="Market"
-          onChange={(event) => {
-            userSelectedMarketRef.current = true;
-            setSelectedMarket(event.target.value);
-          }}
-        >
-          {marketOptions.map((market) => (
-            <MenuItem key={market} value={market}>
-              {MARKET_LABELS[market] || market}
-            </MenuItem>
-          ))}
-        </Select>
-      </FormControl>
-    </Box>
-  );
+  // Market selection moved to the global header selector (MarketSelector).
+  const marketSelector = null;
 
   if (!runtimeReady) {
     return (

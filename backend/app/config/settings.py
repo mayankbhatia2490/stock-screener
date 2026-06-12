@@ -401,6 +401,15 @@ class Settings(BaseSettings):
     fundamental_cache_ttl: int = 604800  # 7 days for fundamentals (changes weekly)
     quarterly_cache_ttl: int = 2592000  # 30 days for quarterly data (changes quarterly)
 
+    # Scheduled static-site data export. When enabled, Celery Beat rebuilds
+    # the per-market JSON bundles (same format as the GitHub Pages export)
+    # into static_export_output_dir, which nginx serves at /static-data/.
+    static_export_enabled: bool = False
+    static_export_output_dir: str = "/app/data/static-site"
+    # Runs after the Asia-close (05:30 ET) and US-close (19:30 ET) pipelines.
+    static_export_hours: str = "5,19"
+    static_export_minute: int = 30
+
     # Cache Warming Schedule (Celery Beat)
     cache_warm_after_close: bool = True  # Warm cache after market close
     cache_warm_hour: int = 17  # 5 PM ET (after market close) — US default, also legacy fallback

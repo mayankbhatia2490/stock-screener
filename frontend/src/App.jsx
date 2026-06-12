@@ -9,17 +9,18 @@ import StaticAppShell from './static/StaticAppShell';
 // Eagerly loaded pages (most frequently used)
 import ScanPage from './pages/ScanPage';
 import MarketScanPage from './pages/MarketScanPage';
-import StockDetails from './components/Stock/StockDetails';
 import Layout from './components/Layout/Layout';
 import BootstrapSetupScreen from './components/App/BootstrapSetupScreen';
 import ServerLoginScreen from './components/App/ServerLoginScreen';
 import { AssistantChatProvider } from './contexts/AssistantChatContext';
 import { PipelineProvider } from './contexts/PipelineContext';
+import { MarketProvider } from './contexts/MarketContext';
 import { RuntimeProvider, useRuntime } from './contexts/RuntimeContext';
 import { StrategyProfileProvider } from './contexts/StrategyProfileContext';
 import { ColorModeContext } from './contexts/ColorModeContext';
 
 // Lazy loaded pages (secondary pages)
+const StockDetails = lazy(() => import('./components/Stock/StockDetails'));
 const BreadthPage = lazy(() => import('./pages/BreadthPage'));
 const GroupRankingsPage = lazy(() => import('./pages/GroupRankingsPage'));
 const ValidationPage = lazy(() => import('./pages/ValidationPage'));
@@ -46,7 +47,16 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: 1,
+      // Retry transient (network / 5xx) failures once; 4xx responses are
+      // deterministic, so retrying them only doubles the failed requests.
+      retry: (failureCount, error) => {
+        const status = error?.response?.status;
+        if (status != null && status >= 400 && status < 500) {
+          return false;
+        }
+        return failureCount < 1;
+      },
+      refetchIntervalInBackground: false,
       staleTime: 5 * 60 * 1000, // 5 minutes - data considered fresh
       gcTime: 30 * 60 * 1000, // 30 minutes - keep in cache (was cacheTime in v4)
       placeholderData: (previousData) => previousData, // Use previous data while loading
@@ -297,22 +307,24 @@ function AppShell() {
 
   const appRoutes = (
     <Router>
-      <Layout>
-        <Suspense fallback={<PageLoadingFallback />}>
-          <Routes>
-            <Route path="/" element={<MarketScanPage />} />
-            <Route path="/scan" element={<ScanPage />} />
-            <Route path="/breadth" element={<BreadthPage />} />
-            <Route path="/groups" element={<GroupRankingsPage />} />
-            <Route path="/validation" element={<ValidationPage />} />
-            {features.themes && <Route path="/themes" element={<ThemesPage />} />}
-            {features.chatbot && <Route path="/chatbot" element={assistantChatbotRoute} />}
-            <Route path="/stocks/:ticker" element={<StockDetails />} />
-            <Route path="/operations" element={<OperationsPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
-      </Layout>
+      <MarketProvider>
+        <Layout>
+          <Suspense fallback={<PageLoadingFallback />}>
+            <Routes>
+              <Route path="/" element={<MarketScanPage />} />
+              <Route path="/scan" element={<ScanPage />} />
+              <Route path="/breadth" element={<BreadthPage />} />
+              <Route path="/groups" element={<GroupRankingsPage />} />
+              <Route path="/validation" element={<ValidationPage />} />
+              {features.themes && <Route path="/themes" element={<ThemesPage />} />}
+              {features.chatbot && <Route path="/chatbot" element={assistantChatbotRoute} />}
+              <Route path="/stocks/:ticker" element={<StockDetails />} />
+              <Route path="/operations" element={<OperationsPage />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </Layout>
+      </MarketProvider>
     </Router>
   );
 

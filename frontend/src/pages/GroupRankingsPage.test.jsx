@@ -1,9 +1,30 @@
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 
 import { renderWithProviders } from '../test/renderWithProviders';
+import MarketSelector from '../components/Layout/MarketSelector';
+import { MarketProvider } from '../contexts/MarketContext';
 import GroupRankingsPage from './GroupRankingsPage';
+
+// Render the page alongside the global header market selector, mirroring the
+// app layout (the per-page market toggle was replaced by MarketSelector).
+function renderGroupRankingsPage() {
+  return renderWithProviders(
+    <MemoryRouter>
+      <MarketProvider>
+        <MarketSelector />
+        <GroupRankingsPage />
+      </MarketProvider>
+    </MemoryRouter>
+  );
+}
+
+async function selectGlobalMarket(user, optionName) {
+  fireEvent.mouseDown(screen.getByRole('combobox', { name: /market selector/i }));
+  await user.click(await screen.findByRole('option', { name: optionName }));
+}
 
 const getGroupsBootstrap = vi.fn();
 const getCurrentRankings = vi.fn();
@@ -87,6 +108,7 @@ const rankingRowFor = (market) => ({
 
 describe('GroupRankingsPage', () => {
   beforeEach(() => {
+    window.localStorage.clear();
     runtimeState.features = { tasks: false };
     runtimeState.runtimeReady = true;
     runtimeState.uiSnapshots = { groups: false };
@@ -162,7 +184,7 @@ describe('GroupRankingsPage', () => {
   });
 
   it('defaults to the runtime primary market and refetches when the market filter changes', async () => {
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     await waitFor(() => {
       expect(getCurrentRankings).toHaveBeenCalledWith(197, 'HK');
@@ -172,7 +194,7 @@ describe('GroupRankingsPage', () => {
     expect(screen.getByText('HK | 1 groups | 2026-04-18')).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'US' }));
+    await selectGlobalMarket(user, /United States/i);
 
     await waitFor(() => {
       expect(getCurrentRankings).toHaveBeenCalledWith(197, 'US');
@@ -196,15 +218,15 @@ describe('GroupRankingsPage', () => {
       };
     });
 
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     expect(await screen.findByText('Error loading rankings: HK rankings unavailable')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'HK' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'US' })).toBeInTheDocument();
+    // The global market selector stays usable from the error state.
+    expect(screen.getByRole('combobox', { name: /market selector/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Calculate Rankings' })).not.toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'US' }));
+    await selectGlobalMarket(user, /United States/i);
 
     await waitFor(() => {
       expect(getCurrentRankings).toHaveBeenCalledWith(197, 'US');
@@ -216,18 +238,18 @@ describe('GroupRankingsPage', () => {
     runtimeState.primaryMarket = 'AU';
     runtimeState.enabledMarkets = ['AU', 'US'];
 
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     await waitFor(() => {
       expect(getCurrentRankings).toHaveBeenCalledWith(197, 'US');
     });
+    // The header shows the global selection (AU); the page clamps its data
+    // requests to a group-rankings-capable market.
     expect(getCurrentRankings).not.toHaveBeenCalledWith(197, 'AU');
-    expect(screen.getByRole('button', { name: 'US' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'AU' })).not.toBeInTheDocument();
   });
 
   it('loads bundled RRG scopes and hides unavailable scope controls', async () => {
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     expect(await screen.findByText('HK Internet Services')).toBeInTheDocument();
 
@@ -245,7 +267,7 @@ describe('GroupRankingsPage', () => {
     runtimeState.primaryMarket = 'KR';
     runtimeState.enabledMarkets = ['KR'];
 
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     expect(await screen.findByText('KR Internet Services')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'RRG' })).not.toBeInTheDocument();
@@ -271,7 +293,7 @@ describe('GroupRankingsPage', () => {
       missing: [],
     });
 
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     const user = userEvent.setup();
     await user.click(await screen.findByText('HK Internet Services'));
@@ -299,7 +321,7 @@ describe('GroupRankingsPage', () => {
     });
     fetchPriceHistoryBatch.mockRejectedValueOnce(new Error('batch failed'));
 
-    renderWithProviders(<GroupRankingsPage />);
+    renderGroupRankingsPage();
 
     const user = userEvent.setup();
     await user.click(await screen.findByText('HK Internet Services'));

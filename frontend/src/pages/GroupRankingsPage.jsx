@@ -56,6 +56,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { useRuntime } from '../contexts/RuntimeContext';
+import { useMarket } from '../contexts/MarketContext';
 import PriceSparkline from '../components/Scan/PriceSparkline';
 import RSSparkline from '../components/Scan/RSSparkline';
 import GroupChartsGrid from '../components/Charts/GroupChartsGrid';
@@ -64,20 +65,6 @@ import {
   normalizeMarketCode,
 } from '../utils/marketCapabilities';
 import { rrgScopesForMarket } from '../utils/rrgScopes';
-
-const MARKET_LABELS = {
-  US: 'US',
-  HK: 'HK',
-  IN: 'IN',
-  JP: 'JP',
-  KR: 'KR',
-  TW: 'TW',
-  CN: 'CN',
-  CA: 'CA',
-  SG: 'SG',
-  AU: 'AU',
-  MY: 'MY',
-};
 
 const GROUP_RANKING_MARKET_FALLBACKS = ['US', 'HK', 'IN', 'JP', 'KR', 'TW', 'CN', 'CA'];
 
@@ -523,12 +510,14 @@ function GroupRankingsPage() {
     enabledMarkets,
     supportedMarkets,
   }), [enabledMarkets, marketCatalog, supportedMarkets]);
-  const [selectedMarket, setSelectedMarket] = useState(() => {
-    const preferredMarket = normalizeMarketCode(primaryMarket || 'US');
-    return availableMarkets.includes(preferredMarket)
-      ? preferredMarket
+  const { selectedMarket: globalMarket } = useMarket();
+  // Clamp the global header selection to markets with group rankings.
+  const selectedMarket = useMemo(() => {
+    const preferred = normalizeMarketCode(globalMarket || primaryMarket || 'US');
+    return availableMarkets.includes(preferred)
+      ? preferred
       : (availableMarkets[0] || 'US');
-  });
+  }, [availableMarkets, globalMarket, primaryMarket]);
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [view, setView] = useState('table'); // 'table' | 'rrg'
   const [rrgScope, setRrgScope] = useState('groups'); // 'groups' | 'sectors'
@@ -541,18 +530,6 @@ function GroupRankingsPage() {
   const [bootstrapSettled, setBootstrapSettled] = useState(false);
   const snapshotEnabled = runtimeReady && Boolean(uiSnapshots?.groups);
   const liveQueriesEnabled = runtimeReady && (!snapshotEnabled || bootstrapSettled);
-
-  useEffect(() => {
-    const preferredMarket = normalizeMarketCode(primaryMarket || 'US');
-    if (availableMarkets.includes(selectedMarket)) {
-      return;
-    }
-    if (availableMarkets.includes(preferredMarket)) {
-      setSelectedMarket(preferredMarket);
-      return;
-    }
-    setSelectedMarket(availableMarkets[0] || 'US');
-  }, [availableMarkets, primaryMarket, selectedMarket]);
 
   useEffect(() => {
     setSelectedGroup(null);
@@ -745,24 +722,8 @@ function GroupRankingsPage() {
       })
     : [];
 
-  const marketFilter = (
-    <ToggleButtonGroup
-      value={selectedMarket}
-      exclusive
-      onChange={(_event, nextMarket) => {
-        if (nextMarket) {
-          setSelectedMarket(nextMarket);
-        }
-      }}
-      size="small"
-    >
-      {availableMarkets.map((market) => (
-        <ToggleButton key={market} value={market}>
-          {MARKET_LABELS[market] || market}
-        </ToggleButton>
-      ))}
-    </ToggleButtonGroup>
-  );
+  // Market selection moved to the global header selector (MarketSelector).
+  const marketFilter = null;
 
   if (!runtimeReady) {
     return (
