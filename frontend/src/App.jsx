@@ -1,14 +1,23 @@
 import { useState, useMemo, lazy, Suspense } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
+import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persister';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { CssBaseline, ThemeProvider, createTheme, CircularProgress, Box } from '@mui/material';
+import {
+  AppBar,
+  Box,
+  CircularProgress,
+  CssBaseline,
+  ThemeProvider,
+  Toolbar,
+  Typography,
+  createTheme,
+} from '@mui/material';
+import ShowChartIcon from '@mui/icons-material/ShowChart';
 
 import { STATIC_SITE_MODE } from './config/runtimeMode';
 import StaticAppShell from './static/StaticAppShell';
 
-// Eagerly loaded pages (most frequently used)
-import ScanPage from './pages/ScanPage';
-import MarketScanPage from './pages/MarketScanPage';
 import Layout from './components/Layout/Layout';
 import BootstrapSetupScreen from './components/App/BootstrapSetupScreen';
 import ServerLoginScreen from './components/App/ServerLoginScreen';
@@ -19,7 +28,10 @@ import { RuntimeProvider, useRuntime } from './contexts/RuntimeContext';
 import { StrategyProfileProvider } from './contexts/StrategyProfileContext';
 import { ColorModeContext } from './contexts/ColorModeContext';
 
-// Lazy loaded pages (secondary pages)
+// All pages are lazy-loaded so the initial bundle stays free of heavy
+// page-specific chunks (MarketScanPage alone pulls in recharts, ~400KB).
+const MarketScanPage = lazy(() => import('./pages/MarketScanPage'));
+const ScanPage = lazy(() => import('./pages/ScanPage'));
 const StockDetails = lazy(() => import('./components/Stock/StockDetails'));
 const BreadthPage = lazy(() => import('./pages/BreadthPage'));
 const GroupRankingsPage = lazy(() => import('./pages/GroupRankingsPage'));
@@ -28,7 +40,8 @@ const ThemesPage = lazy(() => import('./pages/ThemesPage'));
 const ChatbotPage = lazy(() => import('./pages/ChatbotPage'));
 const OperationsPage = lazy(() => import('./pages/OperationsPage'));
 
-// Loading fallback component
+// In-app fallback for lazy page transitions (Layout chrome is already mounted,
+// so a spinner in the content area is the right scope).
 const PageLoadingFallback = () => (
   <Box
     sx={{
@@ -39,6 +52,29 @@ const PageLoadingFallback = () => (
     }}
   >
     <CircularProgress />
+  </Box>
+);
+
+// Cold-start fallback shown while appCapabilities is first loading and we don't
+// yet know whether to render the app, the login screen, or the bootstrap setup.
+// Renders only static header chrome — no nav links, no providers, no data
+// queries — so it's safe to show before auth state is known, while still giving
+// the user immediate visual structure instead of a bare spinner. On refresh,
+// persisted capabilities make runtimeReady true synchronously, so this is only
+// seen on a genuinely cold first load.
+const AppLoadingScreen = () => (
+  <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+    <AppBar position="static" sx={{ minHeight: 48 }}>
+      <Toolbar variant="dense" sx={{ minHeight: 48 }}>
+        <ShowChartIcon sx={{ mr: 1, fontSize: 20 }} />
+        <Typography variant="subtitle1" component="div" sx={{ fontWeight: 600 }}>
+          STOCK SCANNER
+        </Typography>
+      </Toolbar>
+    </AppBar>
+    <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', flex: 1 }}>
+      <CircularProgress />
+    </Box>
   </Box>
 );
 
@@ -67,6 +103,39 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// Persist the query cache to localStorage so a page refresh paints last-known
+// data immediately instead of an empty shell. Restored entries are real data
+// (not placeholderData), which also satisfies the runtimeReady gate on
+// refresh — first-time visitors still wait for live capabilities before the
+// app renders. Stale restored data refetches in the background per staleTime.
+const queryCachePersister = createSyncStoragePersister({
+  storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+  key: 'stockscanner-query-cache',
+  throttleTime: 1000,
+});
+
+// High-churn or bulky query families that are cheap to refetch are excluded:
+// persisting them would re-serialize the whole cache on every poll/prefetch
+// and risk blowing the localStorage quota.
+const NON_PERSISTED_QUERY_ROOTS = new Set([
+  'priceHistory',
+  'runtimeActivity',
+  'allFilteredSymbols',
+  'calculationStatus',
+  'setupDetails',
+]);
+
+const persistOptions = {
+  persister: queryCachePersister,
+  maxAge: 24 * 60 * 60 * 1000,
+  buster: 'v1',
+  dehydrateOptions: {
+    shouldDehydrateQuery: (query) =>
+      query.state.status === 'success'
+      && !NON_PERSISTED_QUERY_ROOTS.has(query.queryKey[0]),
+  },
+};
 
 // Function to create theme based on mode
 const getDesignTokens = (mode) => ({
@@ -242,15 +311,26 @@ function App() {
     </RuntimeProvider>
   );
 
+  const themedApp = (
+    <ColorModeContext.Provider value={colorMode}>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        {appShell}
+      </ThemeProvider>
+    </ColorModeContext.Provider>
+  );
+
+  // Static mode serves pre-baked JSON bundles that resolve synchronously —
+  // persistence would only pause those queries during cache restore. Only
+  // the live app persists its cache across reloads.
+  if (STATIC_SITE_MODE) {
+    return <QueryClientProvider client={queryClient}>{themedApp}</QueryClientProvider>;
+  }
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <ColorModeContext.Provider value={colorMode}>
-        <ThemeProvider theme={theme}>
-          <CssBaseline />
-          {appShell}
-        </ThemeProvider>
-      </ColorModeContext.Provider>
-    </QueryClientProvider>
+    <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+      {themedApp}
+    </PersistQueryClientProvider>
   );
 }
 
@@ -274,7 +354,7 @@ function AppShell() {
   } = useRuntime();
 
   if (!runtimeReady) {
-    return <PageLoadingFallback />;
+    return <AppLoadingScreen />;
   }
 
   if (auth?.required && !auth?.authenticated) {
