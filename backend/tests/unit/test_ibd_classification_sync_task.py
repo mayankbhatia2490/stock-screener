@@ -32,9 +32,11 @@ def test_sync_returns_non_fatal_for_live_only():
     assert out == {"market": "SG", "status": "live_only", "imported": None, "reason": None}
 
 
-def test_sync_imports_bundle_on_success(monkeypatch):
+def test_sync_imports_bundle_on_success(tmp_path, monkeypatch):
     """On success the bundle is read and imported, and stats are returned."""
-    fake = _FakeSyncService({"status": "success", "bundle_path": "/tmp/bundle.json.gz"})
+    bundle_file = tmp_path / "bundle.json.gz"
+    bundle_file.write_bytes(b"gz")
+    fake = _FakeSyncService({"status": "success", "bundle_path": str(bundle_file)})
     monkeypatch.setattr(bundle, "read_bundle", lambda _path: {"classifications": []})
     monkeypatch.setattr(
         bundle, "import_classifications", lambda _db, _payload: {"inserted": 3, "updated": 1}
@@ -48,9 +50,11 @@ def test_sync_imports_bundle_on_success(monkeypatch):
     assert out["imported"] == {"inserted": 3, "updated": 1}
 
 
-def test_sync_rejects_market_mismatch(monkeypatch):
+def test_sync_rejects_market_mismatch(tmp_path, monkeypatch):
     """A mispublished bundle (wrong market) is rejected before import."""
-    fake = _FakeSyncService({"status": "success", "bundle_path": "/tmp/bundle.json.gz"})
+    bundle_file = tmp_path / "bundle.json.gz"
+    bundle_file.write_bytes(b"gz")
+    fake = _FakeSyncService({"status": "success", "bundle_path": str(bundle_file)})
     monkeypatch.setattr(bundle, "read_bundle", lambda _path: {"market": "HK", "classifications": []})
 
     def _must_not_import(*_args, **_kwargs):
