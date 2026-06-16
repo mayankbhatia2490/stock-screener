@@ -1,6 +1,6 @@
 # Static site — mobile responsiveness fixes
 
-> When implementation starts, also copy this doc to `/Users/admin/StockScreenClaude/.plans/static-site-mobile-responsiveness.md` (project convention: plans are version-controlled & PR-reviewable).
+> Plan doc lives in `.plans/static-site-mobile-responsiveness.md` (version-controlled & PR-reviewable).
 
 ## Context
 

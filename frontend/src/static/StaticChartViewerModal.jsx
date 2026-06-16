@@ -332,7 +332,12 @@ function StaticChartViewerModal({
               overflowX: 'hidden',
             }}
           >
-            <StockMetricsSidebar stockData={stockData} fundamentals={fundamentals} />
+            <StockMetricsSidebar
+              stockData={stockData}
+              fundamentals={fundamentals}
+              width={{ xs: '100%', md: 450 }}
+              height={{ xs: 'auto', md: '100%' }}
+            />
 
             <Box sx={{ flex: { xs: 'none', md: 1 }, overflow: 'hidden', bgcolor: 'background.paper' }}>
               {isError ? (
