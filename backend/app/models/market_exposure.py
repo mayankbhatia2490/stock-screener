@@ -25,9 +25,12 @@ from ..database import Base
 class MarketExposure(Base):
     __tablename__ = "market_exposure"
 
-    id = Column(Integer, primary_key=True, index=True)
-    market = Column(String(8), nullable=False, default="US", index=True)
-    date = Column(Date, nullable=False, index=True)
+    # Indexes are declared once in __table_args__ to match the migration exactly
+    # (no per-column index=True, which would create extra ix_* indexes the
+    # migration doesn't and that the composite/PK/unique already cover).
+    id = Column(Integer, primary_key=True)
+    market = Column(String(8), nullable=False, default="US")
+    date = Column(Date, nullable=False)
 
     # Headline
     exposure_score = Column(Float, nullable=False)  # 0-100
