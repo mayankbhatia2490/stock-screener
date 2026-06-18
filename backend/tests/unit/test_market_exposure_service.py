@@ -6,7 +6,7 @@ import pandas as pd
 import app.services.market_exposure_service as svc
 from app.services.market_exposure_service import (
     CAP_BELOW_200DMA,
-    CAP_DISTRIBUTION_5PLUS,
+    CAP_HEAVY_DISTRIBUTION,
     build_exposure_payload,
     compute_and_store,
     count_distribution_days,
@@ -14,6 +14,10 @@ from app.services.market_exposure_service import (
     _score,
     _stance,
 )
+
+# Trend dicts at the extremes (price relative to 50/200-DMA).
+_STRONG_UPTREND = {"price": 120.0, "ma50": 110.0, "ma200": 100.0}  # well above rising MAs
+_DEEP_DOWNTREND = {"price": 85.0, "ma50": 95.0, "ma200": 110.0}    # below falling MAs
 
 
 def _df(closes, volumes):
@@ -44,19 +48,31 @@ def test_compute_trend_downtrend_is_bearish():
     assert trend["price"] < trend["ma50"] < trend["ma200"]
 
 
-def test_score_below_200dma_caps_low():
-    score, components = _score(
-        {"price": 90, "ma50": 100, "ma200": 110}, dist_count=0, ftd=False, vix=None, net_4pct=None
-    )
-    assert score <= CAP_BELOW_200DMA
-    assert "below_200dma_cap" in components
+def test_score_tracks_trend():
+    # Defining property: above rising MAs -> high; below falling MAs -> low,
+    # with a wide spread (not pinned to a couple of values).
+    up, _ = _score(_STRONG_UPTREND, dist_count=0, ftd=False, vix=None, net_4pct=None)
+    down, comps = _score(_DEEP_DOWNTREND, dist_count=0, ftd=False, vix=None, net_4pct=None)
+    assert up >= 85                       # Power Trend
+    assert down <= CAP_BELOW_200DMA       # below the 200-DMA -> capped low
+    assert "below_200dma_cap" in comps
+    assert up - down >= 40
 
 
-def test_score_five_distribution_days_hard_caps():
-    score, _ = _score(
-        {"price": 120, "ma50": 110, "ma200": 100}, dist_count=5, ftd=False, vix=None, net_4pct=None
-    )
-    assert score <= CAP_DISTRIBUTION_5PLUS
+def test_distribution_is_a_drag_not_a_gate():
+    # Distribution days lower the score within the regime, but a strong uptrend
+    # with baseline-ish distribution still scores well — not pinned to 40.
+    clean, _ = _score(_STRONG_UPTREND, dist_count=0, ftd=False, vix=None, net_4pct=None)
+    pressured, _ = _score(_STRONG_UPTREND, dist_count=6, ftd=False, vix=None, net_4pct=None)
+    assert pressured < clean
+    assert pressured >= 65
+
+
+def test_heavy_distribution_caps():
+    # >=8 distribution days is a genuine risk overlay even in an uptrend.
+    score, comps = _score(_STRONG_UPTREND, dist_count=8, ftd=False, vix=None, net_4pct=None)
+    assert score <= CAP_HEAVY_DISTRIBUTION
+    assert "heavy_distribution_cap" in comps
 
 
 def test_stance_bands():
