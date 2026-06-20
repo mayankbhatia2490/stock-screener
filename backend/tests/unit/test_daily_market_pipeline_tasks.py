@@ -165,3 +165,16 @@ def test_guard_group_result_accepts_no_taxonomy_market_skip():
         "market": "JP",
         "stage": "groups",
     }
+
+
+def test_guard_exposure_result_skips_without_aborting_pipeline():
+    # Exposure is a non-critical leaf: a failed/missing exposure result must NOT
+    # raise (which would abort groups + snapshot); it returns a skipped status.
+    from app.tasks import daily_market_pipeline_tasks as module
+
+    result = {"error": "benchmark_not_current", "market": "US", "date": "2026-06-19"}
+    assert module.guard_exposure_result.run(result, market="US") == {
+        "status": "skipped",
+        "market": "US",
+        "stage": "exposure",
+    }

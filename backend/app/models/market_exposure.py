@@ -14,12 +14,13 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
-    JSON,
     String,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.sql import func
 from ..database import Base
+from .types import JsonColumn
 
 
 class MarketExposure(Base):
@@ -29,7 +30,7 @@ class MarketExposure(Base):
     # (no per-column index=True, which would create extra ix_* indexes the
     # migration doesn't and that the composite/PK/unique already cover).
     id = Column(Integer, primary_key=True)
-    market = Column(String(8), nullable=False, default="US")
+    market = Column(String(8), nullable=False, default="US", server_default="US")
     date = Column(Date, nullable=False)
 
     # Headline
@@ -44,16 +45,17 @@ class MarketExposure(Base):
     trend = Column(String(20), nullable=True)  # bullish | neutral | bearish
 
     # Distribution / follow-through
-    distribution_day_count = Column(Integer, nullable=False, default=0)
-    follow_through_day = Column(Boolean, nullable=False, default=False)
+    distribution_day_count = Column(Integer, nullable=False, default=0, server_default="0")
+    follow_through_day = Column(Boolean, nullable=False, default=False, server_default=false())
     follow_through_date = Column(Date, nullable=True)
 
     # Volatility + breadth inputs (transparency)
     vix = Column(Float, nullable=True)  # None for non-US / when unavailable
     net_4pct = Column(Integer, nullable=True)  # stocks_up_4pct - stocks_down_4pct
 
-    # Per-component score contributions for the UI "why" ({label: delta})
-    components = Column(JSON, nullable=True)
+    # Per-component score contributions for the UI "why" ({label: delta}).
+    # JsonColumn = JSON on SQLite (tests), JSONB on Postgres — matches the migration.
+    components = Column(JsonColumn, nullable=True)
     benchmark_symbol = Column(String(16), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

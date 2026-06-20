@@ -248,21 +248,30 @@ def _stance(score: float) -> str:
     return STANCE_BANDS[-1][1]
 
 
-def _latest_vix(db: Session, as_of_date: date) -> Optional[float]:
+def _vix_on_date(db: Session, as_of_date: date) -> Optional[float]:
+    """VIX close for exactly ``as_of_date`` (None if no ^VIX bar that day).
+
+    Exact-date only: a stale ^VIX close must not drive the VIX penalties for a
+    different, later session.
+    """
     row = (
         db.query(StockPrice)
-        .filter(StockPrice.symbol == "^VIX", StockPrice.date <= as_of_date)
-        .order_by(StockPrice.date.desc())
+        .filter(StockPrice.symbol == "^VIX", StockPrice.date == as_of_date)
         .first()
     )
     return _f(row.close) if row is not None else None
 
 
-def _latest_net_4pct(db: Session, market: str, as_of_date: date) -> Optional[int]:
+def _net_4pct_on_date(db: Session, market: str, as_of_date: date) -> Optional[int]:
+    """Net 4% movers for exactly ``as_of_date`` (None if no breadth row that day).
+
+    Exact-date only: the breadth penalty must reflect ``as_of_date``, not an
+    earlier breadth regime — otherwise an exposure backfill run without a
+    matching breadth backfill stamps every historical row with today's breadth.
+    """
     row = (
         db.query(MarketBreadth)
-        .filter(MarketBreadth.market == market, MarketBreadth.date <= as_of_date)
-        .order_by(MarketBreadth.date.desc())
+        .filter(MarketBreadth.market == market, MarketBreadth.date == as_of_date)
         .first()
     )
     if row is None:
@@ -290,12 +299,17 @@ def compute_exposure(market: str, as_of_date: date, db: Session) -> dict:
     df = bundle.data[bundle.data.index.date <= as_of_date]
     if df.empty:
         return {"error": "no_benchmark_data", "market": market, "date": as_of_date.isoformat()}
+    # The most recent bar must BE as_of_date. Otherwise we'd write a row dated
+    # as_of_date scored from a prior session's close/volume — a fresh date backed
+    # by stale index inputs (happens when the benchmark refresh lags the date).
+    if df.index[-1].date() != as_of_date:
+        return {"error": "benchmark_not_current", "market": market, "date": as_of_date.isoformat()}
 
     trend = compute_trend(df)
     dist = count_distribution_days(df)
     ftd, ftd_date = detect_follow_through_day(df)
-    vix = _latest_vix(db, as_of_date) if market == "US" else None
-    net_4pct = _latest_net_4pct(db, market, as_of_date)
+    vix = _vix_on_date(db, as_of_date) if market == "US" else None
+    net_4pct = _net_4pct_on_date(db, market, as_of_date)
 
     score, components = _score(trend, dist, ftd, vix, net_4pct)
 
@@ -343,27 +357,38 @@ def compute_and_store(market: str, as_of_date: date, db: Session) -> dict:
     return result
 
 
-def build_exposure_payload(db: Session, market: str, history_days: int = 180) -> Optional[dict]:
+def build_exposure_payload(
+    db: Session,
+    market: str,
+    history_days: int = 180,
+    as_of_date: Optional[date] = None,
+) -> Optional[dict]:
     """Shared reader for the Daily Snapshot payloads (live + static).
 
     Returns the latest stored row's headline + a ``history`` list of
     {date, exposure_score, stance} over the trailing ``history_days``. None when
     no rows exist yet (the UI renders a muted placeholder).
+
+    ``as_of_date`` pins the payload to a date: the live snapshot omits it (uses
+    the absolute latest row), while the static export passes the published run's
+    date so the exposure section stays coherent with the rest of ``home.json``.
     """
     market = (market or "US").upper()
-    latest = (
-        db.query(MarketExposure)
-        .filter(MarketExposure.market == market)
-        .order_by(MarketExposure.date.desc())
-        .first()
-    )
+    latest_q = db.query(MarketExposure).filter(MarketExposure.market == market)
+    if as_of_date is not None:
+        latest_q = latest_q.filter(MarketExposure.date <= as_of_date)
+    latest = latest_q.order_by(MarketExposure.date.desc()).first()
     if latest is None:
         return None
 
     start = latest.date - timedelta(days=history_days)
     rows = (
         db.query(MarketExposure)
-        .filter(MarketExposure.market == market, MarketExposure.date >= start)
+        .filter(
+            MarketExposure.market == market,
+            MarketExposure.date >= start,
+            MarketExposure.date <= latest.date,
+        )
         .order_by(MarketExposure.date.asc())
         .all()
     )

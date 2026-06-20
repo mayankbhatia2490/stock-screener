@@ -105,8 +105,11 @@ def guard_breadth_result(result: dict | None = None, *, market: str) -> dict:
     queue="celery",
 )
 def guard_exposure_result(result: dict | None = None, *, market: str) -> dict:
+    # Exposure is a non-critical leaf — groups/snapshot do NOT depend on it — so
+    # a missing/lagging benchmark must not abort the pipeline. Log and continue.
     if _result_failed(result):
-        raise RuntimeError(f"Daily market exposure failed for {market}: {result}")
+        logger.warning("Daily market exposure not stored for %s (continuing): %s", market, result)
+        return {"status": "skipped", "market": market, "stage": "exposure"}
     return {"status": "ok", "market": market, "stage": "exposure"}
 
 

@@ -20,9 +20,16 @@ _STRONG_UPTREND = {"price": 120.0, "ma50": 110.0, "ma200": 100.0}  # well above 
 _DEEP_DOWNTREND = {"price": 85.0, "ma50": 95.0, "ma200": 110.0}    # below falling MAs
 
 
-def _df(closes, volumes):
-    """Build a minimal OHLCV DataFrame with a DatetimeIndex."""
-    idx = pd.date_range("2024-01-01", periods=len(closes), freq="D")
+def _df(closes, volumes, end=None):
+    """Build a minimal OHLCV DataFrame with a DatetimeIndex.
+
+    ``end`` pins the last bar's date (so a backfill's trading days fall inside
+    the frame); otherwise the frame starts at a fixed 2024 date.
+    """
+    if end is not None:
+        idx = pd.date_range(end=end, periods=len(closes), freq="D")
+    else:
+        idx = pd.date_range("2024-01-01", periods=len(closes), freq="D")
     return pd.DataFrame(
         {"Open": closes, "High": closes, "Low": closes, "Close": closes, "Volume": volumes},
         index=idx,
@@ -133,9 +140,14 @@ def test_compute_and_store_round_trip_validates_against_schema(monkeypatch):
 def test_ensure_exposure_history_seeds_then_skips(monkeypatch):
     from app.database import SessionLocal
     from app.models.market_exposure import MarketExposure
+    from app.services.market_calendar_service import MarketCalendarService
     from app.services.market_exposure_service import ensure_exposure_history
 
-    df = _df(list(range(100, 350)), [1000] * 250)
+    # The benchmark frame must contain a bar on each backfilled trading day
+    # (compute_exposure now requires the latest bar to equal the date), so end
+    # the frame at the market's last completed trading day.
+    end = MarketCalendarService().last_completed_trading_day("US")
+    df = _df(list(range(100, 350)), [1000] * 250, end=pd.Timestamp(end))
     monkeypatch.setattr(
         "app.services.benchmark_cache_service.BenchmarkCacheService",
         _fake_benchmark_factory(df),
@@ -182,6 +194,26 @@ def test_build_exposure_payload_marks_follow_through_event_day():
         assert flags[d1.isoformat()] is True
         assert flags[d2.isoformat()] is False
         assert flags[d3.isoformat()] is False
+    finally:
+        db.close()
+
+
+def test_build_exposure_payload_pins_to_as_of_date():
+    from app.database import SessionLocal
+    from app.models.market_exposure import MarketExposure
+
+    d1, d2, d3 = date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)
+    db = SessionLocal()
+    try:
+        for d, score in [(d1, 60.0), (d2, 70.0), (d3, 80.0)]:
+            db.add(MarketExposure(market="US", date=d, exposure_score=score, stance="Confirmed Uptrend"))
+        db.commit()
+
+        assert build_exposure_payload(db, "US")["date"] == d3.isoformat()  # absolute latest
+
+        pinned = build_exposure_payload(db, "US", as_of_date=d2)
+        assert pinned["date"] == d2.isoformat()
+        assert all(p["date"] <= d2.isoformat() for p in pinned["history"])  # excludes newer d3
     finally:
         db.close()
 

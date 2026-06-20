@@ -1261,7 +1261,9 @@ class StaticSiteExportService:
                 "groups_latest_date": (((groups_payload.get("payload") or {}).get("rankings") or {}).get("date")),
             },
             "key_markets": key_markets,
-            "market_health_exposure": build_exposure_payload(db, market),
+            # Pin exposure to the published run's date so the section stays
+            # coherent with the rest of home.json (breadth/groups/scan).
+            "market_health_exposure": build_exposure_payload(db, market, as_of_date=latest_run.as_of_date),
             "scan_summary": {
                 "run_id": latest_run.id,
                 "rows_total": scan_manifest.get("rows_total", 0),
