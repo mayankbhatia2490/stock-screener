@@ -237,6 +237,28 @@ def test_bootstrap_universe_name_uses_uppercase_market_code():
     assert module._bootstrap_universe_name("us") == "market:US"
 
 
+def test_bootstrap_includes_every_daily_pipeline_compute_step():
+    # Regression guard: the scheduled daily pipeline and the first-run bootstrap
+    # are two separate chains that both encode the market-compute sequence
+    # (breadth -> exposure -> groups -> snapshot). Exposure once shipped missing
+    # from the bootstrap. Assert every compute step in the daily pipeline is also
+    # in the bootstrap plan, so a new step can't be half-wired again.
+    from datetime import date
+
+    from app.domain.bootstrap.plan import build_bootstrap_plan
+    from app.tasks.daily_market_pipeline_tasks import _build_daily_market_pipeline_signatures
+    from app.tasks.runtime_bootstrap_tasks import _build_market_bootstrap_signatures
+
+    daily = {s.task for s in _build_daily_market_pipeline_signatures("US", date(2026, 6, 1))}
+    daily_compute = {t for t in daily if "guard" not in t and "smart_refresh" not in t}
+
+    plan = build_bootstrap_plan(primary_market="US", enabled_markets=["US"]).market_plans[0]
+    bootstrap = {s.task for s in _build_market_bootstrap_signatures(plan)}
+
+    missing = daily_compute - bootstrap
+    assert not missing, f"daily-pipeline compute steps missing from bootstrap: {missing}"
+
+
 def test_queue_local_runtime_bootstrap_splits_primary_and_background_market_chains(monkeypatch):
     from app.tasks import runtime_bootstrap_tasks as module
 

@@ -16,7 +16,6 @@ daily; the Daily Snapshot payloads (live + static) call ``build_exposure_payload
 """
 from __future__ import annotations
 
-import logging
 from datetime import date, timedelta
 from typing import Optional
 
@@ -26,8 +25,6 @@ from sqlalchemy.orm import Session
 from ..models.market_breadth import MarketBreadth
 from ..models.market_exposure import MarketExposure
 from ..models.stock import StockPrice
-
-logger = logging.getLogger(__name__)
 
 # --- Distribution day detection -------------------------------------------
 DISTRIBUTION_LOOKBACK = 25       # rolling sessions
