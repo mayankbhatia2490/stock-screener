@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" role="img" aria-labelledby="title desc">
+  <title id="title">Social Signal Queue mockup</title>
+  <desc id="desc">A stock screener dashboard mockup ranking social list signals against technical confirmation.</desc>
+  <rect width="1280" height="820" fill="#f6f7f9"/>
+  <rect x="0" y="0" width="1280" height="64" fill="#111827"/>
+  <text x="28" y="40" fill="#ffffff" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="700">Stock Screener</text>
+  <text x="1130" y="39" fill="#cbd5e1" font-family="Inter, Arial, sans-serif" font-size="13">US | Minervini list</text>
+
+  <rect x="28" y="92" width="1224" height="86" rx="8" fill="#ffffff" stroke="#d9dee7"/>
+  <text x="52" y="126" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="700">Social Signal Queue</text>
+  <text x="52" y="152" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="14">X list signals ranked only when price, volume, theme, and setup confirmation agree.</text>
+
+  <rect x="870" y="108" width="112" height="36" rx="6" fill="#e8f2ff" stroke="#90caf9"/>
+  <text x="897" y="131" fill="#0b5cad" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Scan</text>
+  <rect x="994" y="108" width="112" height="36" rx="6" fill="#ebf8ef" stroke="#81c784"/>
+  <text x="1017" y="131" fill="#1b5e20" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Watchlist</text>
+  <rect x="1118" y="108" width="104" height="36" rx="6" fill="#fff7e6" stroke="#ffcc80"/>
+  <text x="1144" y="131" fill="#8a4b08" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Digest</text>
+
+  <rect x="28" y="202" width="280" height="574" rx="8" fill="#ffffff" stroke="#d9dee7"/>
+  <text x="52" y="234" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Filters</text>
+  <text x="52" y="272" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">Source</text>
+  <rect x="52" y="284" width="230" height="36" rx="6" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="68" y="307" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="13">Minervini X list</text>
+  <text x="52" y="348" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">Confirmation</text>
+  <rect x="52" y="362" width="102" height="28" rx="14" fill="#e8f5e9" stroke="#81c784"/>
+  <text x="73" y="381" fill="#1b5e20" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">RS 80+</text>
+  <rect x="164" y="362" width="118" height="28" rx="14" fill="#e8f2ff" stroke="#90caf9"/>
+  <text x="184" y="381" fill="#0b5cad" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">$100M ADV</text>
+  <rect x="52" y="402" width="108" height="28" rx="14" fill="#fff7e6" stroke="#ffcc80"/>
+  <text x="72" y="421" fill="#8a4b08" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">SE Ready</text>
+  <rect x="170" y="402" width="112" height="28" rx="14" fill="#f3e8ff" stroke="#c084fc"/>
+  <text x="188" y="421" fill="#6b21a8" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700">Theme hot</text>
+
+  <text x="52" y="466" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">Market gate</text>
+  <rect x="52" y="482" width="230" height="88" rx="8" fill="#f8fafc" stroke="#d9dee7"/>
+  <circle cx="96" cy="526" r="28" fill="#e8f5e9" stroke="#4caf50" stroke-width="6"/>
+  <text x="84" y="532" fill="#1b5e20" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="800">73</text>
+  <text x="138" y="514" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700">Confirmed uptrend</text>
+  <text x="138" y="536" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">New buys allowed</text>
+
+  <text x="52" y="618" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">Sort</text>
+  <rect x="52" y="632" width="230" height="36" rx="6" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="68" y="655" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="13">Social x technical score</text>
+
+  <rect x="332" y="202" width="920" height="574" rx="8" fill="#ffffff" stroke="#d9dee7"/>
+  <text x="356" y="234" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Ranked Candidates</text>
+  <text x="1128" y="234" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="12">Last 30 days</text>
+
+  <rect x="356" y="258" width="872" height="38" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="372" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">SYM</text>
+  <text x="470" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">THEME</text>
+  <text x="660" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">SOCIAL</text>
+  <text x="750" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">RS</text>
+  <text x="820" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">SETUP</text>
+  <text x="930" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">EVIDENCE</text>
+  <text x="1140" y="282" fill="#64748b" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700">ACTION</text>
+
+  <g font-family="Inter, Arial, sans-serif">
+    <rect x="356" y="296" width="872" height="72" fill="#ffffff" stroke="#eef2f7"/>
+    <text x="372" y="326" fill="#111827" font-size="18" font-weight="800">MU</text>
+    <text x="372" y="350" fill="#64748b" font-size="12">Memory leader</text>
+    <rect x="470" y="316" width="138" height="24" rx="12" fill="#e8f2ff"/>
+    <text x="488" y="332" fill="#0b5cad" font-size="12" font-weight="700">AI infrastructure</text>
+    <text x="670" y="326" fill="#111827" font-size="15" font-weight="800">96</text>
+    <text x="670" y="348" fill="#64748b" font-size="11">33 mentions</text>
+    <text x="750" y="326" fill="#1b5e20" font-size="15" font-weight="800">94</text>
+    <rect x="820" y="312" width="82" height="28" rx="14" fill="#e8f5e9"/>
+    <text x="840" y="331" fill="#1b5e20" font-size="12" font-weight="700">Ready</text>
+    <text x="930" y="320" fill="#111827" font-size="12">Options chatter + 52w high + group strength</text>
+    <text x="930" y="344" fill="#64748b" font-size="11">Open evidence drawer for source links</text>
+    <rect x="1138" y="314" width="70" height="28" rx="6" fill="#111827"/>
+    <text x="1155" y="332" fill="#ffffff" font-size="12" font-weight="700">Open</text>
+
+    <rect x="356" y="368" width="872" height="72" fill="#fbfdff" stroke="#eef2f7"/>
+    <text x="372" y="398" fill="#111827" font-size="18" font-weight="800">SNDK</text>
+    <text x="372" y="422" fill="#64748b" font-size="12">Storage / memory</text>
+    <rect x="470" y="388" width="104" height="24" rx="12" fill="#e8f2ff"/>
+    <text x="489" y="404" fill="#0b5cad" font-size="12" font-weight="700">Memory</text>
+    <text x="670" y="398" fill="#111827" font-size="15" font-weight="800">91</text>
+    <text x="670" y="420" fill="#64748b" font-size="11">32 mentions</text>
+    <text x="750" y="398" fill="#1b5e20" font-size="15" font-weight="800">97</text>
+    <rect x="820" y="384" width="82" height="28" rx="14" fill="#fff7e6"/>
+    <text x="844" y="403" fill="#8a4b08" font-size="12" font-weight="700">Late</text>
+    <text x="930" y="392" fill="#111827" font-size="12">High engagement, extended from trend</text>
+    <text x="930" y="416" fill="#64748b" font-size="11">Watch runner guardrails</text>
+    <rect x="1138" y="386" width="70" height="28" rx="6" fill="#111827"/>
+    <text x="1155" y="404" fill="#ffffff" font-size="12" font-weight="700">Open</text>
+
+    <rect x="356" y="440" width="872" height="72" fill="#ffffff" stroke="#eef2f7"/>
+    <text x="372" y="470" fill="#111827" font-size="18" font-weight="800">PENG</text>
+    <text x="372" y="494" fill="#64748b" font-size="12">AI data / chips</text>
+    <rect x="470" y="460" width="120" height="24" rx="12" fill="#f3e8ff"/>
+    <text x="488" y="476" fill="#6b21a8" font-size="12" font-weight="700">HTF setup</text>
+    <text x="670" y="470" fill="#111827" font-size="15" font-weight="800">84</text>
+    <text x="670" y="492" fill="#64748b" font-size="11">4 mentions</text>
+    <text x="750" y="470" fill="#1b5e20" font-size="15" font-weight="800">88</text>
+    <rect x="820" y="456" width="82" height="28" rx="14" fill="#e8f5e9"/>
+    <text x="840" y="475" fill="#1b5e20" font-size="12" font-weight="700">Ready</text>
+    <text x="930" y="464" fill="#111827" font-size="12">High-tight-flag mention aligns with setup engine</text>
+    <text x="930" y="488" fill="#64748b" font-size="11">Distance to pivot: 2.4%</text>
+    <rect x="1138" y="458" width="70" height="28" rx="6" fill="#111827"/>
+    <text x="1155" y="476" fill="#ffffff" font-size="12" font-weight="700">Open</text>
+
+    <rect x="356" y="512" width="872" height="72" fill="#fbfdff" stroke="#eef2f7"/>
+    <text x="372" y="542" fill="#111827" font-size="18" font-weight="800">HOOD</text>
+    <text x="372" y="566" fill="#64748b" font-size="12">Capital markets</text>
+    <rect x="470" y="532" width="124" height="24" rx="12" fill="#e8f5e9"/>
+    <text x="488" y="548" fill="#1b5e20" font-size="12" font-weight="700">Consumer finance</text>
+    <text x="670" y="542" fill="#111827" font-size="15" font-weight="800">77</text>
+    <text x="670" y="564" fill="#64748b" font-size="11">9 mentions</text>
+    <text x="750" y="542" fill="#1b5e20" font-size="15" font-weight="800">86</text>
+    <rect x="820" y="528" width="82" height="28" rx="14" fill="#e8f5e9"/>
+    <text x="840" y="547" fill="#1b5e20" font-size="12" font-weight="700">Ready</text>
+    <text x="930" y="536" fill="#111827" font-size="12">Portfolio and adoption thesis mentions</text>
+    <text x="930" y="560" fill="#64748b" font-size="11">Add to capital markets basket</text>
+    <rect x="1138" y="530" width="70" height="28" rx="6" fill="#111827"/>
+    <text x="1155" y="548" fill="#ffffff" font-size="12" font-weight="700">Open</text>
+  </g>
+
+  <rect x="356" y="622" width="872" height="122" rx="8" fill="#f8fafc" stroke="#d9dee7"/>
+  <text x="380" y="654" fill="#111827" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700">Evidence Drawer Preview</text>
+  <text x="380" y="684" fill="#334155" font-family="Inter, Arial, sans-serif" font-size="13">MU surfaced because memory mentions accelerated, the AI infrastructure theme is hot, RS is above threshold, and Setup Engine is ready.</text>
+  <rect x="380" y="706" width="150" height="24" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="398" y="722" fill="#334155" font-family="Inter, Arial, sans-serif" font-size="12">Top posts: 5</text>
+  <rect x="542" y="706" width="170" height="24" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="560" y="722" fill="#334155" font-family="Inter, Arial, sans-serif" font-size="12">Theme rank: 3</text>
+  <rect x="724" y="706" width="190" height="24" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="742" y="722" fill="#334155" font-family="Inter, Arial, sans-serif" font-size="12">Pivot distance: 1.8%</text>
+  <rect x="926" y="706" width="170" height="24" rx="12" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="944" y="722" fill="#334155" font-family="Inter, Arial, sans-serif" font-size="12">Watchlist: AI infra</text>
+</svg>

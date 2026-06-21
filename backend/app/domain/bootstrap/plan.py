@@ -23,6 +23,7 @@ class BootstrapOperation(str, Enum):
     WAIT_FOR_BOOTSTRAP_PRICE_WARMUP = "wait_for_bootstrap_price_warmup"
     REFRESH_ALL_FUNDAMENTALS = "refresh_all_fundamentals"
     CALCULATE_DAILY_BREADTH_WITH_GAPFILL = "calculate_daily_breadth_with_gapfill"
+    CALCULATE_MARKET_EXPOSURE = "calculate_market_exposure"
     CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL = "calculate_daily_group_rankings_with_gapfill"
     BUILD_DAILY_SNAPSHOT = "build_daily_snapshot"
 
@@ -126,6 +127,12 @@ def _build_market_plan(market: str) -> MarketBootstrapPlan:
             _stage(
                 key="breadth",
                 operation=BootstrapOperation.CALCULATE_DAILY_BREADTH_WITH_GAPFILL,
+                queue_kind=BootstrapQueueKind.MARKET_JOBS,
+                market=market,
+            ),
+            _stage(
+                key="exposure",
+                operation=BootstrapOperation.CALCULATE_MARKET_EXPOSURE,
                 queue_kind=BootstrapQueueKind.MARKET_JOBS,
                 market=market,
             ),

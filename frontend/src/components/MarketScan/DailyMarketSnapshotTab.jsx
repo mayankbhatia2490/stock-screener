@@ -22,6 +22,7 @@ import TrendingDownIcon from '@mui/icons-material/TrendingDown';
 import { getDailySnapshot } from '../../api/marketScan';
 import { getScanResults } from '../../api/scans';
 import PriceSparkline from '../Scan/PriceSparkline';
+import MarketHealthExposure from './MarketHealthExposure';
 import ChartViewerModal from '../Scan/ChartViewerModalLazy';
 import DailyScanRowsTable from '../shared/DailyScanRowsTable';
 import RankChangeCell from '../shared/RankChangeCell';
@@ -197,6 +198,8 @@ function DailyMarketSnapshotTab() {
           );
         })}
       </Grid>
+
+      <MarketHealthExposure exposure={snapshot?.market_health_exposure} />
 
       <DailyScanRowsTable
         title="Top Scan Candidates"

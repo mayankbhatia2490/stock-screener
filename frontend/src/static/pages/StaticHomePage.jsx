@@ -31,6 +31,7 @@ import { MARKET_CAP_OPTIONS } from '../../features/scan/components/filterPanel/c
 import { applyScanFilterDefaults } from '../../features/scan/defaultFilters';
 import { filterStaticScanRows, sortStaticScanRows } from '../scanClient';
 import DailyScanRowsTable from '../../components/shared/DailyScanRowsTable';
+import MarketHealthExposure from '../../components/MarketScan/MarketHealthExposure';
 import { buildFiltersFromPreset } from '../hooks/usePresetScreens';
 
 const EMPTY_RESULTS = [];
@@ -265,6 +266,8 @@ function StaticHomePage() {
           );
         })}
       </Grid>
+
+      <MarketHealthExposure exposure={home?.market_health_exposure} />
 
       <DailyScanRowsTable
         testId="top-scan-candidates-section"

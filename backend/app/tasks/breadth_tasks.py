@@ -349,6 +349,117 @@ def calculate_daily_breadth(
         db.close()
 
 
+@celery_app.task(
+    bind=True,
+    name='app.tasks.breadth_tasks.calculate_market_exposure',
+)
+@serialized_market_workload('calculate_market_exposure')
+def calculate_market_exposure(self, market: str | None = None, calculation_date: str | None = None,
+                              activity_lifecycle: str | None = None):
+    """Compute + store one MarketExposure row for the market.
+
+    Defaults to the market's last completed trading day (or ``calculation_date``).
+    Reads the index OHLCV + breadth the upstream pipeline steps already produced
+    and blends them into the recommended-exposure score. Mirrors
+    ``calculate_daily_breadth``'s session/commit/publish shape. Must be called
+    with ``market=`` keyword (the workload decorator reads kwargs).
+
+    ``activity_lifecycle`` is accepted because the bootstrap orchestrator injects
+    it into every stage's kwargs uniformly; exposure does not emit activity
+    events, so it is unused here.
+    """
+    from ..services.market_exposure_service import compute_and_store, ensure_exposure_history
+
+    effective_market = (market or "US").upper()
+    calendar_service = get_market_calendar_service()
+    if calculation_date:
+        try:
+            calc_date = datetime.strptime(calculation_date, '%Y-%m-%d').date()
+        except ValueError:
+            logger.error("Invalid date format: %s. Use YYYY-MM-DD", calculation_date)
+            return {'error': 'Invalid date format', 'timestamp': datetime.now().isoformat()}
+    else:
+        calc_date = calendar_service.last_completed_trading_day(effective_market)
+
+    logger.info("TASK: Calculate Market Exposure (%s) for %s", effective_market, calc_date)
+
+    db = SessionLocal()
+    try:
+        result = compute_and_store(effective_market, calc_date, db)
+        if result.get('error'):
+            logger.error("✗ Market exposure not stored for %s: %s", effective_market, result['error'])
+            return result
+
+        # Seed history once so the timeline isn't empty on launch; no-ops after
+        # the first run (idempotent). Avoids a manual post-deploy backfill.
+        try:
+            seed = ensure_exposure_history(db, effective_market)
+            if seed.get('seeded'):
+                logger.info("Seeded %d historical exposure rows for %s", seed['seeded'], effective_market)
+        except Exception as seed_error:
+            logger.warning("Exposure history seed skipped for %s: %s", effective_market, seed_error)
+
+        try:
+            from ..services.ui_snapshot_service import safe_publish_breadth_bootstrap
+
+            safe_publish_breadth_bootstrap(effective_market)
+        except Exception as snapshot_error:
+            logger.warning("Exposure snapshot publish failed: %s", snapshot_error)
+
+        logger.info(
+            "✓ Exposure stored for %s %s: score=%s stance=%s",
+            effective_market, calc_date, result['exposure_score'], result['stance'],
+        )
+        return {
+            'market': effective_market,
+            'date': calc_date.isoformat(),
+            'exposure_score': result['exposure_score'],
+            'stance': result['stance'],
+            'distribution_day_count': result['distribution_day_count'],
+            'timestamp': datetime.now().isoformat(),
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error("✗ Error in calculate_market_exposure task: %s", e, exc_info=True)
+        return {'error': str(e), 'date': calc_date.isoformat(), 'timestamp': datetime.now().isoformat()}
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name='app.tasks.breadth_tasks.backfill_market_exposure')
+@serialized_market_workload('backfill_market_exposure')
+def backfill_market_exposure(self, start_date: str, end_date: str, market: str = "US"):
+    """Backfill MarketExposure rows over an explicit date range (manual gap-fill).
+
+    Thin wrapper around the service's backfill_exposure, which is also used by
+    the daily self-heal — one backfill implementation, two callers.
+    """
+    from ..services.market_exposure_service import backfill_exposure
+
+    effective_market = (market or "US").upper()
+    try:
+        start = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end = datetime.strptime(end_date, '%Y-%m-%d').date()
+    except ValueError as e:
+        return {'error': f'Invalid date format. Use YYYY-MM-DD: {e}', 'timestamp': datetime.now().isoformat()}
+    if start > end:
+        return {'error': 'Invalid date range: start_date > end_date', 'timestamp': datetime.now().isoformat()}
+
+    logger.info("TASK: Backfill Market Exposure (%s): %s -> %s", effective_market, start, end)
+    db = SessionLocal()
+    try:
+        result = backfill_exposure(db, effective_market, start, end)
+        return {
+            'market': effective_market,
+            'start_date': start_date,
+            'end_date': end_date,
+            **result,
+            'timestamp': datetime.now().isoformat(),
+        }
+    finally:
+        db.close()
+
+
 def _calculate_daily_breadth_in_process(*, market: str | None = None):
     """Run breadth logic without reacquiring the market workload lease."""
     from .workload_coordination import disable_serialized_market_workload

@@ -39,6 +39,10 @@ def test_daily_market_pipeline_orders_refresh_compute_and_scan(monkeypatch):
         _FakeTask("app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill"),
     )
     monkeypatch.setattr(
+        "app.tasks.breadth_tasks.calculate_market_exposure",
+        _FakeTask("app.tasks.breadth_tasks.calculate_market_exposure"),
+    )
+    monkeypatch.setattr(
         "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
         _FakeTask("app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill"),
     )
@@ -54,6 +58,8 @@ def test_daily_market_pipeline_orders_refresh_compute_and_scan(monkeypatch):
         "app.tasks.daily_market_pipeline_tasks.guard_price_refresh",
         "app.tasks.breadth_tasks.calculate_daily_breadth_with_gapfill",
         "app.tasks.daily_market_pipeline_tasks.guard_breadth_result",
+        "app.tasks.breadth_tasks.calculate_market_exposure",
+        "app.tasks.daily_market_pipeline_tasks.guard_exposure_result",
         "app.tasks.group_rank_tasks.calculate_daily_group_rankings_with_gapfill",
         "app.tasks.daily_market_pipeline_tasks.guard_group_result",
         "app.interfaces.tasks.feature_store_tasks.build_daily_snapshot",
@@ -158,4 +164,17 @@ def test_guard_group_result_accepts_no_taxonomy_market_skip():
         "status": "ok",
         "market": "JP",
         "stage": "groups",
+    }
+
+
+def test_guard_exposure_result_skips_without_aborting_pipeline():
+    # Exposure is a non-critical leaf: a failed/missing exposure result must NOT
+    # raise (which would abort groups + snapshot); it returns a skipped status.
+    from app.tasks import daily_market_pipeline_tasks as module
+
+    result = {"error": "benchmark_not_current", "market": "US", "date": "2026-06-19"}
+    assert module.guard_exposure_result.run(result, market="US") == {
+        "status": "skipped",
+        "market": "US",
+        "stage": "exposure",
     }

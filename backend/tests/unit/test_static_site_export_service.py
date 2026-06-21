@@ -16,6 +16,7 @@ import app.services.static_site_export_service as export_module
 import app.services.static_groups_rrg_export as rrg_export_module
 from app.database import Base
 from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
+from app.models.market_exposure import MarketExposure
 from app.models.stock import StockPrice
 from app.services.static_groups_rrg_export import StaticGroupsRRGPayloadBuilder
 from app.services.static_site_export_service import (
@@ -34,7 +35,12 @@ def service_and_session_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(
         engine,
-        tables=[FeatureRun.__table__, FeatureRunPointer.__table__, StockPrice.__table__],
+        tables=[
+            FeatureRun.__table__,
+            FeatureRunPointer.__table__,
+            StockPrice.__table__,
+            MarketExposure.__table__,
+        ],
     )
     session_factory = sessionmaker(
         bind=engine,

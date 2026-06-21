@@ -1,6 +1,6 @@
 """Market Scan schemas"""
 from pydantic import BaseModel, ConfigDict
-from typing import Optional, List
+from typing import Dict, Optional, List
 from datetime import datetime
 
 from .scanning import ScanResultItem
@@ -112,6 +112,32 @@ class DailySnapshotTopGroup(BaseModel):
     top_rs_rating: Optional[float] = None
 
 
+class MarketHealthExposureHistoryPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    date: str
+    exposure_score: float
+    stance: str
+    follow_through: bool = False
+
+
+class MarketHealthExposure(BaseModel):
+    """0-100 recommended-exposure score + the inputs that justify it."""
+    model_config = ConfigDict(extra="forbid")
+
+    market: str
+    date: str
+    exposure_score: float
+    stance: str
+    distribution_day_count: int
+    follow_through_day: bool
+    trend: Optional[str] = None
+    vix: Optional[float] = None
+    benchmark_symbol: Optional[str] = None
+    components: Optional[Dict[str, float]] = None
+    history: List[MarketHealthExposureHistoryPoint]
+
+
 class DailySnapshotResponse(BaseModel):
     """Aggregated Daily Snapshot payload (one market, one request).
 
@@ -129,6 +155,7 @@ class DailySnapshotResponse(BaseModel):
     scan_id: Optional[str] = None
     freshness: DailySnapshotFreshness
     key_markets: List[KeyMarketEntry]
+    market_health_exposure: Optional[MarketHealthExposure] = None
     top_candidates: DailySnapshotTopCandidates
     leaders: DailySnapshotLeaders
     top_groups: List[DailySnapshotTopGroup]

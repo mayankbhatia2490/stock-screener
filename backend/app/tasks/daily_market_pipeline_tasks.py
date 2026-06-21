@@ -101,6 +101,19 @@ def guard_breadth_result(result: dict | None = None, *, market: str) -> dict:
 
 
 @celery_app.task(
+    name="app.tasks.daily_market_pipeline_tasks.guard_exposure_result",
+    queue="celery",
+)
+def guard_exposure_result(result: dict | None = None, *, market: str) -> dict:
+    # Exposure is a non-critical leaf — groups/snapshot do NOT depend on it — so
+    # a missing/lagging benchmark must not abort the pipeline. Log and continue.
+    if _result_failed(result):
+        logger.warning("Daily market exposure not stored for %s (continuing): %s", market, result)
+        return {"status": "skipped", "market": market, "stage": "exposure"}
+    return {"status": "ok", "market": market, "stage": "exposure"}
+
+
+@celery_app.task(
     name="app.tasks.daily_market_pipeline_tasks.guard_group_result",
     queue="celery",
 )
@@ -127,7 +140,10 @@ def guard_snapshot_result(result: dict | None = None, *, market: str) -> dict:
 
 def _build_daily_market_pipeline_signatures(market: str, trading_date: date) -> list:
     from app.interfaces.tasks.feature_store_tasks import build_daily_snapshot
-    from app.tasks.breadth_tasks import calculate_daily_breadth_with_gapfill
+    from app.tasks.breadth_tasks import (
+        calculate_daily_breadth_with_gapfill,
+        calculate_market_exposure,
+    )
     from app.tasks.cache_tasks import smart_refresh_cache
     from app.tasks.group_rank_tasks import calculate_daily_group_rankings_with_gapfill
 
@@ -144,6 +160,14 @@ def _build_daily_market_pipeline_signatures(market: str, trading_date: date) -> 
             queue=market_jobs_queue_for_market(market_code)
         ),
         guard_breadth_result.s(market=market_code).set(
+            queue=market_jobs_queue_for_market(market_code)
+        ),
+        # Exposure blends breadth + index OHLCV; runs after the breadth guard.
+        # .si() — it re-reads breadth from the DB, ignoring the guard's result.
+        calculate_market_exposure.si(market=market_code, calculation_date=as_of_date).set(
+            queue=market_jobs_queue_for_market(market_code)
+        ),
+        guard_exposure_result.s(market=market_code).set(
             queue=market_jobs_queue_for_market(market_code)
         ),
         calculate_daily_group_rankings_with_gapfill.si(market=market_code).set(

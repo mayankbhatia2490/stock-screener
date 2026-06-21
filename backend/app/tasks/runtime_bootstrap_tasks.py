@@ -174,7 +174,10 @@ def _queue_for_stage(stage) -> str:
 
 def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list:
     from app.interfaces.tasks.feature_store_tasks import build_daily_snapshot
-    from app.tasks.breadth_tasks import calculate_daily_breadth_with_gapfill
+    from app.tasks.breadth_tasks import (
+        calculate_daily_breadth_with_gapfill,
+        calculate_market_exposure,
+    )
     from app.tasks.cache_tasks import smart_refresh_cache
     from app.tasks.fundamentals_tasks import refresh_all_fundamentals
     from app.tasks.group_rank_tasks import calculate_daily_group_rankings_with_gapfill
@@ -194,6 +197,7 @@ def _build_market_bootstrap_signatures(market_plan: MarketBootstrapPlan) -> list
         BootstrapOperation.CALCULATE_DAILY_BREADTH_WITH_GAPFILL: (
             calculate_daily_breadth_with_gapfill
         ),
+        BootstrapOperation.CALCULATE_MARKET_EXPOSURE: calculate_market_exposure,
         BootstrapOperation.CALCULATE_DAILY_GROUP_RANKINGS_WITH_GAPFILL: (
             calculate_daily_group_rankings_with_gapfill
         ),

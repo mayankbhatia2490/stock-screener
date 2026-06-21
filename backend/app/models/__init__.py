@@ -4,6 +4,7 @@ from .scan_result import Scan, ScanResult
 from .watchlist import Watchlist
 from .market import MarketStatus
 from .market_breadth import MarketBreadth
+from .market_exposure import MarketExposure
 from .industry import Industry, IndustryPerformance, SectorRotation, IBDIndustryGroup, IBDGroupPeerCache, IBDGroupRank
 from .stock_universe import (
     StockUniverse,
@@ -55,6 +56,7 @@ __all__ = [
     "Watchlist",
     "MarketStatus",
     "MarketBreadth",
+    "MarketExposure",
     "Industry",
     "IndustryPerformance",
     "SectorRotation",

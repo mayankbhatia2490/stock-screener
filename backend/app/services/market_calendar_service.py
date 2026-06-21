@@ -181,6 +181,29 @@ class MarketCalendarService:
                 return self._is_weekday(candidate_day)
             raise
 
+    def trading_days(
+        self,
+        market: str,
+        start: date,
+        end: date,
+        *,
+        mic: str | None = None,
+    ) -> list[date]:
+        """Trading days in ``[start, end]`` (inclusive), chronological order.
+
+        The canonical way to enumerate sessions in a range, so callers don't
+        reimplement a day-by-day loop. Preserves the per-market fallbacks in
+        ``is_trading_day``.
+        """
+        normalized = self.normalize_market(market)
+        days: list[date] = []
+        day = start
+        while day <= end:
+            if self.is_trading_day(normalized, day, mic=mic):
+                days.append(day)
+            day += timedelta(days=1)
+        return days
+
     def is_market_open(
         self,
         market: str,

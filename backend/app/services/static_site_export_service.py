@@ -38,6 +38,7 @@ from app.schemas.groups import (
 )
 from app.schemas.scanning import FilterOptionsResponse, ScanResultItem
 from app.services.breadth_attribution_service import BreadthAttributionService
+from app.services.market_exposure_service import build_exposure_payload
 from app.services.preset_screens import (
     PRESET_SCREENS,
     get_preset_chart_symbols,
@@ -338,6 +339,7 @@ class StaticSiteExportService:
             ),
         )
         home_payload = self._build_home_payload(
+            db=db,
             generated_at=generated_at,
             latest_run=latest_run,
             market=market,
@@ -1230,6 +1232,7 @@ class StaticSiteExportService:
     def _build_home_payload(
         self,
         *,
+        db: Session,
         generated_at: str,
         latest_run: FeatureRun,
         market: str,
@@ -1258,6 +1261,9 @@ class StaticSiteExportService:
                 "groups_latest_date": (((groups_payload.get("payload") or {}).get("rankings") or {}).get("date")),
             },
             "key_markets": key_markets,
+            # Pin exposure to the published run's date so the section stays
+            # coherent with the rest of home.json (breadth/groups/scan).
+            "market_health_exposure": build_exposure_payload(db, market, as_of_date=latest_run.as_of_date),
             "scan_summary": {
                 "run_id": latest_run.id,
                 "rows_total": scan_manifest.get("rows_total", 0),

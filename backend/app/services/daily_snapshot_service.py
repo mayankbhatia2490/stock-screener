@@ -23,6 +23,7 @@ from app.models.market_breadth import MarketBreadth
 from app.models.scan_result import Scan
 from app.schemas.scanning import ScanResultItem
 from app.services.key_market_history import build_key_market_entries
+from app.services.market_exposure_service import build_exposure_payload
 from app.services.redis_pool import get_redis_client
 from app.use_cases.scanning.get_scan_results import GetScanResultsQuery
 
@@ -330,6 +331,7 @@ def build_daily_snapshot_payload(
         "scan_id": freshness["scan_id"],
         "freshness": freshness,
         "key_markets": build_key_market_entries(db, normalized),
+        "market_health_exposure": build_exposure_payload(db, normalized),
         "top_candidates": {
             "min_dollar_volume": min_volume,
             "rows": top_candidates,
