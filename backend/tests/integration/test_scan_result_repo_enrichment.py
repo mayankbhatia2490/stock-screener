@@ -16,6 +16,7 @@ from app.models.scan_result import Scan, ScanResult
 from app.models.stock import StockFundamental, StockIndustry
 from app.models.stock_universe import StockUniverse
 from app.schemas.scanning import ScanResultItem
+from app.services.market_group_ranking_service import GroupRankSnapshot
 from app.services.market_taxonomy_service import MarketTaxonomyEntry
 
 
@@ -158,9 +159,13 @@ def test_persist_orchestrator_results_enriches_non_us_market_taxonomy(session: S
             return None
 
     class _FakeMarketGroupRankingService:
-        def get_current_rank_map(self, db, *, market, calculation_date=None):  # noqa: ARG002
+        def get_current_rank_snapshot(self, db, *, market, calculation_date=None):  # noqa: ARG002
             assert market == "HK"
-            return {"Internet Services": 4}
+            assert calculation_date is None
+            return GroupRankSnapshot(
+                date="2026-06-14",
+                ranks_by_group={"Internet Services": 4},
+            )
 
     repo = SqlScanResultRepository(
         session,
@@ -177,6 +182,7 @@ def test_persist_orchestrator_results_enriches_non_us_market_taxonomy(session: S
 
     assert row.ibd_industry_group == "Internet Services"
     assert row.ibd_group_rank == 4
+    assert row.details["ibd_group_rank_date"] == "2026-06-14"
     assert row.details["market_themes"] == ["AI Infrastructure", "Cloud"]
 
 
@@ -205,10 +211,13 @@ def test_non_us_rank_enrichment_honors_explicit_ranking_date(session: Session):
             return None
 
     class _FakeMarketGroupRankingService:
-        def get_current_rank_map(self, db, *, market, calculation_date=None):  # noqa: ARG002
+        def get_current_rank_snapshot(self, db, *, market, calculation_date=None):  # noqa: ARG002
             assert market == "HK"
             seen_dates.append(calculation_date)
-            return {"Internet Services": 7}
+            return GroupRankSnapshot(
+                date=calculation_date.isoformat() if calculation_date else None,
+                ranks_by_group={"Internet Services": 7},
+            )
 
     repo = SqlScanResultRepository(
         session,
@@ -280,9 +289,12 @@ def test_persist_orchestrator_results_overrides_non_us_sector_and_industry_with_
             return None
 
     class _FakeMarketGroupRankingService:
-        def get_current_rank_map(self, db, *, market, calculation_date=None):  # noqa: ARG002
+        def get_current_rank_snapshot(self, db, *, market, calculation_date=None):  # noqa: ARG002
             assert market == "JP"
-            return {"Transportation Equipment": 3}
+            return GroupRankSnapshot(
+                date=calculation_date.isoformat() if calculation_date else "2026-06-14",
+                ranks_by_group={"Transportation Equipment": 3},
+            )
 
     repo = SqlScanResultRepository(
         session,
@@ -397,9 +409,12 @@ def test_persist_orchestrator_results_strips_market_before_rank_map_lookup(sessi
             return None
 
     class _FakeMarketGroupRankingService:
-        def get_current_rank_map(self, db, *, market, calculation_date=None):  # noqa: ARG002
+        def get_current_rank_snapshot(self, db, *, market, calculation_date=None):  # noqa: ARG002
             assert market == "HK"
-            return {"Internet Services": 4}
+            return GroupRankSnapshot(
+                date=calculation_date.isoformat() if calculation_date else "2026-06-14",
+                ranks_by_group={"Internet Services": 4},
+            )
 
     repo = SqlScanResultRepository(
         session,

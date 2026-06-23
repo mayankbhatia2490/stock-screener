@@ -395,8 +395,8 @@ class SqlScanResultRepository(ScanResultRepository):
             for d in enrichment.values()
             if str(d.get("market") or "").strip().upper() not in {"", "US"}
         }
-        non_us_rank_maps = {
-            market: self._market_group_ranking_service.get_current_rank_map(
+        non_us_rank_snapshots = {
+            market: self._market_group_ranking_service.get_current_rank_snapshot(
                 self._session,
                 market=market,
                 calculation_date=ranking_date,
@@ -419,12 +419,17 @@ class SqlScanResultRepository(ScanResultRepository):
                 continue
 
             if entry.industry_group:
-                group_rank = non_us_rank_maps.get(market, {}).get(entry.industry_group)
+                rank_snapshot = non_us_rank_snapshots.get(market)
+                group_rank = (
+                    rank_snapshot.ranks_by_group.get(entry.industry_group)
+                    if rank_snapshot is not None
+                    else None
+                )
                 d["ibd_industry_group"] = entry.industry_group
                 d["ibd_group_rank"] = group_rank
                 d["ibd_group_rank_date"] = (
-                    ranking_date.isoformat()
-                    if group_rank is not None and ranking_date is not None
+                    rank_snapshot.date
+                    if group_rank is not None and rank_snapshot is not None
                     else None
                 )
             if entry.sector:

@@ -139,6 +139,43 @@ def test_get_current_rank_map_skips_historical_rank_change_work(monkeypatch):
     assert rank_map == {"Internet Services": 4, "Software": 7}
 
 
+def test_get_current_rank_snapshot_returns_rank_date_and_map(monkeypatch):
+    service = MarketGroupRankingService()
+    latest_run = SimpleNamespace(id=42, as_of_date=date(2026, 4, 4))
+
+    monkeypatch.setattr(
+        service,
+        "_get_latest_published_run",
+        lambda db, *, market, calculation_date=None: latest_run,  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_run_rows",
+        lambda db, run_id: ["placeholder"],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        service,
+        "compute_group_rankings_from_rows",
+        lambda rows, *, ranking_date: [  # noqa: ARG005
+            {
+                "industry_group": "Internet Services",
+                "date": ranking_date.isoformat(),
+                "rank": 4,
+            },
+            {
+                "industry_group": "Software",
+                "date": ranking_date.isoformat(),
+                "rank": 7,
+            },
+        ],
+    )
+
+    snapshot = service.get_current_rank_snapshot(Session(), market="HK")
+
+    assert snapshot.date == "2026-04-04"
+    assert snapshot.ranks_by_group == {"Internet Services": 4, "Software": 7}
+
+
 def test_market_group_ranking_service_loads_rrg_runs_once_and_returns_ascending_series(monkeypatch):
     fake_redis = _FakeRedis()
     service = MarketGroupRankingService(redis_client=fake_redis)
