@@ -9,11 +9,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.domain.scanning.filter_spec import QuerySpec
 from app.infra.db.repositories.scan_result_repo import SqlScanResultRepository
 from app.models.industry import IBDGroupRank, IBDIndustryGroup
 from app.models.scan_result import Scan, ScanResult
 from app.models.stock import StockFundamental, StockIndustry
 from app.models.stock_universe import StockUniverse
+from app.schemas.scanning import ScanResultItem
 from app.services.market_taxonomy_service import MarketTaxonomyEntry
 
 
@@ -96,6 +98,11 @@ def test_persist_orchestrator_results_enriches_reference_fields(session: Session
     assert row.gics_industry == "Consumer Electronics"
     assert row.ibd_industry_group == "Computer-Hardware/Peripherals"
     assert row.ibd_group_rank == 5
+    assert row.details["ibd_group_rank_date"] == "2026-02-19"
+
+    page = repo.query("scan-1", QuerySpec())
+    assert page.items[0].extended_fields["ibd_group_rank_date"] == "2026-02-19"
+    assert ScanResultItem.from_domain(page.items[0]).ibd_group_rank_date == "2026-02-19"
 
 
 def test_persist_orchestrator_results_uses_ipo_screener_date_fallback(session: Session):
@@ -237,6 +244,7 @@ def test_non_us_rank_enrichment_honors_explicit_ranking_date(session: Session):
 
     assert stats["updated_rows"] == 1
     assert row.ibd_group_rank == 7
+    assert row.details["ibd_group_rank_date"] == "2026-02-19"
     assert seen_dates == [date(2026, 2, 19)]
 
 

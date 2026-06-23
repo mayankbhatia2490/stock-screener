@@ -374,6 +374,7 @@ def _enrich_feature_run_with_ibd_metadata(
                 details = dict(row.details_json or {})
                 industry_group = industries_by_symbol.get(row.symbol)
                 group_rank = ranks_by_group.get(industry_group) if industry_group else None
+                group_rank_date = ranking_date.isoformat() if group_rank is not None else None
                 market_themes = [] if market == "US" else list(market_themes_by_symbol.get(row.symbol) or [])
                 sector = sector_by_symbol.get(row.symbol)
                 industry = industry_by_symbol.get(row.symbol)
@@ -395,12 +396,14 @@ def _enrich_feature_run_with_ibd_metadata(
                 if (
                     details.get("ibd_industry_group") != industry_group
                     or details.get("ibd_group_rank") != group_rank
+                    or details.get("ibd_group_rank_date") != group_rank_date
                     or list(details.get("market_themes") or []) != market_themes
                     or sector_changed
                     or industry_changed
                 ):
                     details["ibd_industry_group"] = industry_group
                     details["ibd_group_rank"] = group_rank
+                    details["ibd_group_rank_date"] = group_rank_date
                     details["market_themes"] = market_themes
                     if sector_changed:
                         details["gics_sector"] = sector
