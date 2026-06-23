@@ -75,6 +75,9 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _build_precomputed_scan_context(
+    stock_data: StockData,
+) -> PrecomputedScanContext | None:
     """Build shared derived scan metrics once per symbol."""
     price_data = stock_data.price_data
     if price_data is None or price_data.empty or "Close" not in price_data.columns:
