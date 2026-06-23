@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 import json
 import logging
@@ -38,6 +39,12 @@ GroupRankingHistoryResult: TypeAlias = tuple[
 RRG_HISTORY_CACHE_TTL_SECONDS = 604800
 RRG_HISTORY_CACHE_SCHEMA_VERSION = 1
 _REDIS_CLIENT_UNSET = object()
+
+
+@dataclass(frozen=True)
+class GroupRankSnapshot:
+    date: str | None
+    ranks_by_group: dict[str, int]
 
 
 class MarketGroupRankingService:
@@ -212,6 +219,19 @@ class MarketGroupRankingService:
         market: str,
         calculation_date: date | None = None,
     ) -> dict[str, int]:
+        return self.get_current_rank_snapshot(
+            db,
+            market=market,
+            calculation_date=calculation_date,
+        ).ranks_by_group
+
+    def get_current_rank_snapshot(
+        self,
+        db: Session,
+        *,
+        market: str,
+        calculation_date: date | None = None,
+    ) -> GroupRankSnapshot:
         rankings = self.get_current_rankings(
             db,
             market=market,
@@ -219,11 +239,18 @@ class MarketGroupRankingService:
             calculation_date=calculation_date,
             include_rank_changes=False,
         )
-        return {
-            str(row["industry_group"]): int(row["rank"])
-            for row in rankings
-            if row.get("industry_group") and row.get("rank") is not None
-        }
+        ranking_date = next(
+            (str(row["date"]) for row in rankings if row.get("date")),
+            None,
+        )
+        return GroupRankSnapshot(
+            date=ranking_date,
+            ranks_by_group={
+                str(row["industry_group"]): int(row["rank"])
+                for row in rankings
+                if row.get("industry_group") and row.get("rank") is not None
+            },
+        )
 
     def get_rank_movers(
         self,

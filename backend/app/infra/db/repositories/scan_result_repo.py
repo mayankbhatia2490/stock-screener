@@ -382,15 +382,21 @@ class SqlScanResultRepository(ScanResultRepository):
         for symbol, d in enrichment.items():
             group_name = d.get("ibd_industry_group")
             if group_name:
-                d["ibd_group_rank"] = rank_by_group.get(group_name)
+                group_rank = rank_by_group.get(group_name)
+                d["ibd_group_rank"] = group_rank
+                d["ibd_group_rank_date"] = (
+                    latest_rank_date.isoformat()
+                    if group_rank is not None and latest_rank_date is not None
+                    else None
+                )
 
         requested_markets = {
             str(d.get("market") or "").strip().upper()
             for d in enrichment.values()
             if str(d.get("market") or "").strip().upper() not in {"", "US"}
         }
-        non_us_rank_maps = {
-            market: self._market_group_ranking_service.get_current_rank_map(
+        non_us_rank_snapshots = {
+            market: self._market_group_ranking_service.get_current_rank_snapshot(
                 self._session,
                 market=market,
                 calculation_date=ranking_date,
@@ -413,8 +419,19 @@ class SqlScanResultRepository(ScanResultRepository):
                 continue
 
             if entry.industry_group:
+                rank_snapshot = non_us_rank_snapshots.get(market)
+                group_rank = (
+                    rank_snapshot.ranks_by_group.get(entry.industry_group)
+                    if rank_snapshot is not None
+                    else None
+                )
                 d["ibd_industry_group"] = entry.industry_group
-                d["ibd_group_rank"] = non_us_rank_maps.get(market, {}).get(entry.industry_group)
+                d["ibd_group_rank"] = group_rank
+                d["ibd_group_rank_date"] = (
+                    rank_snapshot.date
+                    if group_rank is not None and rank_snapshot is not None
+                    else None
+                )
             if entry.sector:
                 d["sector"] = entry.sector
             if entry.industry:
@@ -457,17 +474,23 @@ class SqlScanResultRepository(ScanResultRepository):
             meta = enrichment.get(row.symbol, {})
             industry_group = meta.get("ibd_industry_group")
             group_rank = meta.get("ibd_group_rank")
+            group_rank_date = meta.get("ibd_group_rank_date")
             if industry_group is None:
                 missing_industry_rows += 1
             elif group_rank is None:
                 missing_rank_rows += 1
 
-            if row.ibd_industry_group != industry_group or row.ibd_group_rank != group_rank:
+            details = dict(row.details or {})
+            if (
+                row.ibd_industry_group != industry_group
+                or row.ibd_group_rank != group_rank
+                or details.get("ibd_group_rank_date") != group_rank_date
+            ):
                 row.ibd_industry_group = industry_group
                 row.ibd_group_rank = group_rank
-                details = dict(row.details or {})
                 details["ibd_industry_group"] = industry_group
                 details["ibd_group_rank"] = group_rank
+                details["ibd_group_rank_date"] = group_rank_date
                 row.details = details
                 updated_rows += 1
 
@@ -543,6 +566,13 @@ class SqlScanResultRepository(ScanResultRepository):
             and meta.get("ibd_group_rank") is not None
         ):
             enriched["ibd_group_rank"] = meta["ibd_group_rank"]
+        if (
+            enriched.get("ibd_group_rank") is not None
+            and enriched.get("ibd_group_rank") == meta.get("ibd_group_rank")
+            and not enriched.get("ibd_group_rank_date")
+            and meta.get("ibd_group_rank_date")
+        ):
+            enriched["ibd_group_rank_date"] = meta["ibd_group_rank_date"]
         if "market_themes" not in enriched:
             enriched["market_themes"] = normalize_string_list(meta.get("market_themes"))
 
@@ -805,6 +835,7 @@ def _map_row_to_domain(
         "eps_rating": result.eps_rating,
         "ibd_industry_group": result.ibd_industry_group,
         "ibd_group_rank": result.ibd_group_rank,
+        "ibd_group_rank_date": details.get("ibd_group_rank_date"),
         "market_themes": normalize_string_list(details.get("market_themes")),
         "gics_sector": result.gics_sector,
         "gics_industry": result.gics_industry,

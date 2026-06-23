@@ -201,6 +201,23 @@ describe('ResultsTable', () => {
       expect(screen.getByText('AI Infrastructure')).toBeInTheDocument();
       expect(screen.getByText('+1')).toBeInTheDocument();
     });
+
+    it('keeps group rank compact and exposes the rank date in a tooltip', () => {
+      renderWithProviders(
+        <ResultsTable
+          {...defaultProps}
+          results={[{
+            ...fullSeRow,
+            ibd_group_rank: 153,
+            ibd_group_rank_date: '2026-06-14',
+          }]}
+        />
+      );
+
+      const rankCell = screen.getByText('153').closest('td');
+      expect(rankCell).toHaveAttribute('title', 'Group rank 153 as of Jun 14, 2026');
+      expect(screen.queryByText(/Jun 14, 2026/)).not.toBeInTheDocument();
+    });
   });
 
   // ── structural ───────────────────────────────────────────────────────

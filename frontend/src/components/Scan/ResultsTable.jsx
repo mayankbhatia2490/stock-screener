@@ -52,6 +52,25 @@ const MCAP_DISPLAY = Object.freeze({
   LOCAL: 'local',
 });
 
+const formatGroupRankDate = (value) => {
+  if (!value) return null;
+  const [year, month, day] = String(value).split('-').map((part) => Number(part));
+  if (year && month && day) {
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      timeZone: 'UTC',
+    }).format(new Date(Date.UTC(year, month - 1, day)));
+  }
+  return String(value);
+};
+
+const getGroupRankTooltip = (row) => {
+  if (row.ibd_group_rank == null || !row.ibd_group_rank_date) return undefined;
+  return `Group rank ${row.ibd_group_rank} as of ${formatGroupRankDate(row.ibd_group_rank_date)}`;
+};
+
 // Column definitions with explicit widths
 const columns = [
   { id: 'chart', label: '', sortable: false, width: 60 },
@@ -263,7 +282,7 @@ const VirtualTableRow = memo(function VirtualTableRow({
         <MarketThemesList themes={row.market_themes} variant="compact" />
       </TableCell>
 
-      <TableCell align="center" sx={{
+      <TableCell align="center" title={getGroupRankTooltip(row)} sx={{
         fontFamily: 'monospace',
         color: getGroupRankColor(row.ibd_group_rank),
         fontWeight: row.ibd_group_rank && row.ibd_group_rank <= 20 ? 600 : 400,
@@ -485,6 +504,7 @@ const VirtualTableRow = memo(function VirtualTableRow({
          prevProps.row.gics_sector === nextProps.row.gics_sector &&
          prevProps.row.ibd_industry_group === nextProps.row.ibd_industry_group &&
          prevProps.row.ibd_group_rank === nextProps.row.ibd_group_rank &&
+         prevProps.row.ibd_group_rank_date === nextProps.row.ibd_group_rank_date &&
          prevProps.row.scan_mode === nextProps.row.scan_mode &&
          prevProps.row.data_status === nextProps.row.data_status &&
          prevProps.row.is_scannable === nextProps.row.is_scannable &&

@@ -782,6 +782,7 @@ def _map_feature_to_scan_result(
         "eps_rating": d.get("eps_rating"),
         "ibd_industry_group": d.get("ibd_industry_group"),
         "ibd_group_rank": d.get("ibd_group_rank"),
+        "ibd_group_rank_date": d.get("ibd_group_rank_date"),
         "market_themes": normalize_string_list(d.get("market_themes")),
         "gics_sector": d.get("gics_sector"),
         "gics_industry": d.get("gics_industry"),

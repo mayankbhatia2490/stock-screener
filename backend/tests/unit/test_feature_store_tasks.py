@@ -1133,8 +1133,10 @@ def test_enrich_feature_run_with_ibd_metadata_updates_details_json():
     assert stats["missing_rank_rows"] == 1
     assert nvda.details_json["ibd_industry_group"] == "Semiconductors"
     assert nvda.details_json["ibd_group_rank"] == 1
+    assert nvda.details_json["ibd_group_rank_date"] == "2026-04-02"
     assert msft.details_json["ibd_industry_group"] == "Software"
     assert msft.details_json["ibd_group_rank"] is None
+    assert msft.details_json["ibd_group_rank_date"] is None
 
     engine.dispose()
 
