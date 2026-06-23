@@ -1448,4 +1448,3 @@ Type consistency:
 - Runtime activity records consistently use `RuntimeActivityRecord`, `RuntimeActivityUpdate`, and persisted payload dictionaries.
 - Market codes are normalized with `normalize_market`.
 - Stale states are read-side presentation states and do not expand `ACTIVE_ACTIVITY_STATUSES`.
-

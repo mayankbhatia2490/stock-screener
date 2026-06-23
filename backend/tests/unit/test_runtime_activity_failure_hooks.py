@@ -11,24 +11,32 @@ from celery.worker.request import Request
 SMART_REFRESH_TASK = "app.tasks.cache_tasks.smart_refresh_cache"
 
 
-def test_publish_runtime_activity_failure_marks_smart_refresh_failed(monkeypatch):
-    import app.tasks.runtime_activity_failure_hooks as module
+def _patch_failure_dependencies(monkeypatch, module):
+    harness = SimpleNamespace(
+        db=MagicMock(),
+        failed_activity_calls=[],
+        lock=MagicMock(),
+        coordination=MagicMock(),
+        price_cache=MagicMock(),
+    )
 
-    db = MagicMock()
-    failed_activity_calls = []
-    lock = MagicMock()
-    coordination = MagicMock()
-    price_cache = MagicMock()
-
-    monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: lock)
-    monkeypatch.setattr(module, "get_workload_coordination", lambda: coordination)
-    monkeypatch.setattr(module, "get_price_cache", lambda: price_cache)
+    monkeypatch.setattr(module, "SessionLocal", lambda: harness.db)
+    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: harness.lock)
+    monkeypatch.setattr(module, "get_workload_coordination", lambda: harness.coordination)
+    monkeypatch.setattr(module, "get_price_cache", lambda: harness.price_cache)
     monkeypatch.setattr(
         module,
         "mark_market_activity_failed",
-        lambda db_arg, **kwargs: failed_activity_calls.append((db_arg, kwargs)),
+        lambda db_arg, **kwargs: harness.failed_activity_calls.append((db_arg, kwargs)),
     )
+
+    return harness
+
+
+def test_publish_runtime_activity_failure_marks_smart_refresh_failed(monkeypatch):
+    import app.tasks.runtime_activity_failure_hooks as module
+
+    harness = _patch_failure_dependencies(monkeypatch, module)
 
     module.publish_runtime_activity_failure(
         SMART_REFRESH_TASK,
@@ -37,9 +45,9 @@ def test_publish_runtime_activity_failure_marks_smart_refresh_failed(monkeypatch
         RuntimeError("Worker exited prematurely: signal 9 (SIGKILL)"),
     )
 
-    assert failed_activity_calls == [
+    assert harness.failed_activity_calls == [
         (
-            db,
+            harness.db,
             {
                 "market": "US",
                 "stage_key": "prices",
@@ -53,11 +61,11 @@ def test_publish_runtime_activity_failure_marks_smart_refresh_failed(monkeypatch
             },
         )
     ]
-    price_cache.complete_warmup_heartbeat.assert_called_once_with("failed", market="US")
-    lock.release.assert_called_once_with("lost-task", market="US")
-    coordination.release_market_workload.assert_called_once_with("lost-task", market="US")
-    coordination.release_external_fetch.assert_called_once_with("lost-task")
-    db.close.assert_called_once_with()
+    harness.price_cache.complete_warmup_heartbeat.assert_called_once_with("failed", market="US")
+    harness.lock.release.assert_called_once_with("lost-task", market="US")
+    harness.coordination.release_market_workload.assert_called_once_with("lost-task", market="US")
+    harness.coordination.release_external_fetch.assert_called_once_with("lost-task")
+    harness.db.close.assert_called_once_with()
 
 
 def test_publish_runtime_activity_failure_keeps_shared_cleanup_scope_for_missing_market(
@@ -65,21 +73,7 @@ def test_publish_runtime_activity_failure_keeps_shared_cleanup_scope_for_missing
 ):
     import app.tasks.runtime_activity_failure_hooks as module
 
-    db = MagicMock()
-    failed_activity_calls = []
-    lock = MagicMock()
-    coordination = MagicMock()
-    price_cache = MagicMock()
-
-    monkeypatch.setattr(module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: lock)
-    monkeypatch.setattr(module, "get_workload_coordination", lambda: coordination)
-    monkeypatch.setattr(module, "get_price_cache", lambda: price_cache)
-    monkeypatch.setattr(
-        module,
-        "mark_market_activity_failed",
-        lambda db_arg, **kwargs: failed_activity_calls.append((db_arg, kwargs)),
-    )
+    harness = _patch_failure_dependencies(monkeypatch, module)
 
     module.publish_runtime_activity_failure(
         SMART_REFRESH_TASK,
@@ -88,15 +82,15 @@ def test_publish_runtime_activity_failure_keeps_shared_cleanup_scope_for_missing
         RuntimeError("worker lost"),
     )
 
-    assert failed_activity_calls[0][1]["market"] == "US"
-    price_cache.complete_warmup_heartbeat.assert_called_once_with("failed", market=None)
-    lock.release.assert_called_once_with("shared-task", market=None)
-    coordination.release_market_workload.assert_called_once_with(
+    assert harness.failed_activity_calls[0][1]["market"] == "US"
+    harness.price_cache.complete_warmup_heartbeat.assert_called_once_with("failed", market=None)
+    harness.lock.release.assert_called_once_with("shared-task", market=None)
+    harness.coordination.release_market_workload.assert_called_once_with(
         "shared-task",
         market=None,
     )
-    coordination.release_external_fetch.assert_called_once_with("shared-task")
-    db.close.assert_called_once_with()
+    harness.coordination.release_external_fetch.assert_called_once_with("shared-task")
+    harness.db.close.assert_called_once_with()
 
 
 def test_publish_runtime_activity_failure_ignores_untracked_tasks(monkeypatch):
