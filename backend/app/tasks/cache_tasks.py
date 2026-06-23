@@ -60,6 +60,7 @@ from ..wiring.bootstrap import (
 )
 from ..services.security_master_service import security_master_resolver
 from .data_fetch_lock import serialized_data_fetch
+from .runtime_activity_failure_hooks import RuntimeActivityTrackedTask
 from .transient_database import raise_if_transient_database_error
 
 logger = logging.getLogger(__name__)
@@ -1722,6 +1723,7 @@ def run_smart_price_refresh(
 
 @celery_app.task(
     bind=True,
+    base=RuntimeActivityTrackedTask,
     name='app.tasks.cache_tasks.smart_refresh_cache',
     soft_time_limit=14400,
 )

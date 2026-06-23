@@ -130,6 +130,13 @@ def test_celery_schedule_moves_orphan_cleanup_and_keeps_legacy_manual_routes():
     assert "app.tasks.cache_tasks.auto_refresh_after_close" in celery_app.conf.task_routes
 
 
+def test_smart_refresh_cache_uses_runtime_activity_tracked_task_base():
+    import app.tasks.cache_tasks as module
+    from app.tasks.runtime_activity_failure_hooks import RuntimeActivityTrackedTask
+
+    assert isinstance(module.smart_refresh_cache, RuntimeActivityTrackedTask)
+
+
 def test_smart_refresh_cache_reraises_soft_time_limit(monkeypatch):
     import app.tasks.cache_tasks as module
 
