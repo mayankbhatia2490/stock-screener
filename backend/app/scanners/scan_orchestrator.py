@@ -63,7 +63,18 @@ def _series_last_float(series) -> float | None:
     return float(value)
 
 
-def _build_precomputed_scan_context(stock_data: StockData) -> PrecomputedScanContext | None:
+def _finite_float(value: object) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    return numeric if math.isfinite(numeric) else None
+
+
     """Build shared derived scan metrics once per symbol."""
     price_data = stock_data.price_data
     if price_data is None or price_data.empty or "Close" not in price_data.columns:
@@ -884,13 +895,11 @@ class ScanOrchestrator:
                     avg_volume = int(vol_series.mean())
 
         # Calculate dollar volume if we have both avg_volume and price
-        if (
-            avg_volume is not None
-            and current_price is not None
-            and not math.isnan(float(avg_volume))
-            and not math.isnan(float(current_price))
-        ):
-            result["avg_dollar_volume"] = int(avg_volume * current_price)
+        avg_volume_value = _finite_float(avg_volume)
+        current_price_value = _finite_float(current_price)
+
+        if avg_volume_value is not None and current_price_value is not None:
+            result["avg_dollar_volume"] = int(avg_volume_value * current_price_value)
         else:
             logger.debug(
                 "Skipping avg_dollar_volume for %s avg_volume=%s current_price=%s",
