@@ -84,6 +84,11 @@ def test_bootstrap_plan_uses_stale_top_up_and_full_bootstrap_for_no_history(univ
         (PriceRefreshJobKind.STALE, ("0700.HK",), STALE_PRICE_TOP_UP_PERIOD),
         (PriceRefreshJobKind.NO_HISTORY, ("9999.HK",), NO_HISTORY_PRICE_BOOTSTRAP_PERIOD),
     ]
+    assert plan.coverage_summary is not None
+    assert plan.coverage_summary.universe_total == 2
+    assert plan.coverage_summary.already_fresh == 0
+    assert plan.coverage_summary.live_top_up_total == 2
+    assert plan.coverage_summary.universe_total_by_market == {"HK": 2}
 
 
 def test_price_refresh_plan_excludes_unsupported_yahoo_symbols_from_live_jobs():
@@ -102,6 +107,10 @@ def test_price_refresh_plan_excludes_unsupported_yahoo_symbols_from_live_jobs():
     assert plan.all_symbols == ("0335.T", "335A.T")
     assert plan.symbols == ("335A.T",)
     assert plan.unsupported_symbols == ("0335.T",)
+    assert plan.coverage_summary is not None
+    assert plan.coverage_summary.universe_total == 2
+    assert plan.coverage_summary.live_top_up_total == 1
+    assert plan.coverage_summary.unsupported_top_up_total == 1
     assert [(job.kind, job.symbols, job.period) for job in plan.jobs] == [
         (PriceRefreshJobKind.NO_HISTORY, ("335A.T",), "2y"),
     ]
@@ -159,6 +168,11 @@ def test_current_github_bundle_classifies_history_without_a_second_missing_symbo
         (PriceRefreshJobKind.STALE, ("0700.HK",), STALE_PRICE_TOP_UP_PERIOD),
         (PriceRefreshJobKind.NO_HISTORY, ("9999.HK",), NO_HISTORY_PRICE_BOOTSTRAP_PERIOD),
     ]
+    assert plan.coverage_summary is not None
+    assert plan.coverage_summary.universe_total == 3
+    assert plan.coverage_summary.already_fresh == 1
+    assert plan.coverage_summary.live_top_up_total == 2
+    assert plan.coverage_summary.universe_total_by_market == {"HK": 3}
 
 
 def test_current_github_bundle_accepts_datetime_as_of_date(universe_session):

@@ -42,6 +42,15 @@ class PriceRefreshOutcome:
     failed_symbols: list[str] = field(default_factory=list)
     completed_at: datetime = field(default_factory=datetime.now)
     github_seed: GitHubSeedOutcome | None = None
+    coverage_refreshed: int | None = None
+    coverage_failed: int | None = None
+    coverage_total: int | None = None
+    coverage_success_rate: float | None = None
+    already_fresh: int | None = None
+    live_top_up_refreshed: int | None = None
+    live_top_up_failed: int | None = None
+    live_top_up_total: int | None = None
+    unsupported_top_up_total: int | None = None
 
     def to_task_result(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -60,6 +69,24 @@ class PriceRefreshOutcome:
             result["message"] = self.message
         if self.failed_symbols:
             result["failed_symbols"] = self.failed_symbols[:20]
+        optional_counts = {
+            "coverage_refreshed": self.coverage_refreshed,
+            "coverage_failed": self.coverage_failed,
+            "coverage_total": self.coverage_total,
+            "coverage_success_rate": (
+                round(self.coverage_success_rate, 6)
+                if self.coverage_success_rate is not None
+                else None
+            ),
+            "already_fresh": self.already_fresh,
+            "live_top_up_refreshed": self.live_top_up_refreshed,
+            "live_top_up_failed": self.live_top_up_failed,
+            "live_top_up_total": self.live_top_up_total,
+            "unsupported_top_up_total": self.unsupported_top_up_total,
+        }
+        for key, value in optional_counts.items():
+            if value is not None:
+                result[key] = value
         return result
 
 

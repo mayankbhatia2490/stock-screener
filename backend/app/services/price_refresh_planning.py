@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
@@ -140,6 +141,7 @@ class PriceRefreshPlan:
     github_seed: GitHubSeedOutcome | None = None
     github_seed_used: bool = False
     completion_message: str | None = None
+    coverage_summary: "PriceRefreshCoverageSummary | None" = None
 
     @property
     def source(self) -> PriceRefreshSource:
@@ -154,6 +156,20 @@ class PriceRefreshPlan:
     @property
     def live_refresh_jobs(self) -> tuple[PriceRefreshJob, ...]:
         return self.jobs
+
+
+@dataclass(frozen=True)
+class PriceRefreshCoverageSummary:
+    universe_total: int
+    already_fresh: int
+    stale: int
+    no_history: int
+    live_top_up_total: int
+    unsupported_top_up_total: int = 0
+    universe_total_by_market: Mapping[str, int] = field(default_factory=dict)
+    already_fresh_by_market: Mapping[str, int] = field(default_factory=dict)
+    live_top_up_total_by_market: Mapping[str, int] = field(default_factory=dict)
+    unsupported_top_up_total_by_market: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -329,6 +345,12 @@ def plan_price_refresh_from_input(
         plan,
         all_symbols=normalized_symbols,
         symbol_markets=dict(planning_input.symbol_markets),
+        coverage_summary=_build_coverage_summary(
+            planning_input.coverage,
+            plan=plan,
+            symbol_markets=planning_input.symbol_markets,
+            default_market=planning_input.effective_market,
+        ),
     )
 
 
@@ -336,3 +358,55 @@ def _require_coverage(planning_input: PriceRefreshPlanningInput) -> PriceHistory
     if planning_input.coverage is None:
         raise ValueError("price refresh top-up planning requires precomputed coverage")
     return planning_input.coverage
+
+
+def _market_counts(
+    symbols: Sequence[str],
+    *,
+    symbol_markets: Mapping[str, str],
+    default_market: str,
+) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for symbol in symbols:
+        counts[str(symbol_markets.get(str(symbol).upper(), default_market)).upper()] += 1
+    return dict(counts)
+
+
+def _build_coverage_summary(
+    coverage: PriceHistoryCoverage | None,
+    *,
+    plan: PriceRefreshPlan,
+    symbol_markets: Mapping[str, str],
+    default_market: str,
+) -> PriceRefreshCoverageSummary | None:
+    if coverage is None:
+        return None
+    universe_symbols = coverage.fresh + coverage.stale + coverage.no_history
+    return PriceRefreshCoverageSummary(
+        universe_total=len(universe_symbols),
+        already_fresh=len(coverage.fresh),
+        stale=len(coverage.stale),
+        no_history=len(coverage.no_history),
+        live_top_up_total=len(plan.symbols),
+        unsupported_top_up_total=len(plan.unsupported_symbols),
+        universe_total_by_market=_market_counts(
+            universe_symbols,
+            symbol_markets=symbol_markets,
+            default_market=default_market,
+        ),
+        already_fresh_by_market=_market_counts(
+            coverage.fresh,
+            symbol_markets=symbol_markets,
+            default_market=default_market,
+        ),
+        live_top_up_total_by_market=_market_counts(
+            plan.symbols,
+            symbol_markets=symbol_markets,
+            default_market=default_market,
+        ),
+        unsupported_top_up_total_by_market=_market_counts(
+            plan.unsupported_symbols,
+            symbol_markets=symbol_markets,
+            default_market=default_market,
+        ),
+    )
