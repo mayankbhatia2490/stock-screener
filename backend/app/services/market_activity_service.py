@@ -23,6 +23,10 @@ from ..services.runtime_activity_contract import (
 )
 from ..services.runtime_activity_presenter import build_runtime_activity_status
 from ..services.runtime_activity_reducer import reduce_market_activity
+from ..services.runtime_activity_staleness import (
+    is_stale_running_activity,
+    parse_activity_timestamp,
+)
 from ..services.runtime_preferences_service import get_runtime_bootstrap_status
 from ..wiring.bootstrap import get_data_fetch_lock
 
@@ -53,9 +57,64 @@ def _load_market_activity(db: Session, market: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     try:
-        return PersistedRuntimeActivity.from_payload(payload).to_record().to_payload()
+        record = PersistedRuntimeActivity.from_payload(payload).to_record()
     except ValueError:
         return None
+    return record.to_payload()
+
+
+def _record_from_payload(payload: dict[str, Any] | None) -> RuntimeActivityRecord | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return PersistedRuntimeActivity.from_payload(payload).to_record()
+    except ValueError:
+        return None
+
+
+def _incoming_owner(
+    payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    if isinstance(payload, (RuntimeActivityUpdate, RuntimeActivityRecord)):
+        return payload.task_id, payload.stage_key, payload.status
+    return payload.get("task_id"), payload.get("stage_key"), payload.get("status")
+
+
+def _running_activity_has_live_owner(record: RuntimeActivityRecord) -> bool:
+    if not record.task_id:
+        return False
+    try:
+        current_task = get_data_fetch_lock().get_current_task(market=record.market)
+    except Exception:
+        return True
+    return bool(
+        isinstance(current_task, dict)
+        and current_task.get("task_id") == record.task_id
+    )
+
+
+def _should_override_stale_running_owner(
+    existing: RuntimeActivityRecord | None,
+    incoming_payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
+) -> bool:
+    if existing is None or existing.status != "running":
+        return False
+
+    incoming_task_id, incoming_stage_key, incoming_status = _incoming_owner(
+        incoming_payload
+    )
+    if incoming_status not in {"running", "completed", "failed"}:
+        return False
+    if not incoming_task_id:
+        return False
+    if existing.task_id == incoming_task_id and existing.stage_key == incoming_stage_key:
+        return False
+
+    now = parse_activity_timestamp(_utcnow_iso())
+    if now is None or not is_stale_running_activity(existing, now=now):
+        return False
+
+    return not _running_activity_has_live_owner(existing)
 
 
 def _load_runtime_bootstrap_run(db: Session) -> dict[str, Any] | None:
@@ -101,9 +160,17 @@ def _save_market_activity(
         except (json.JSONDecodeError, TypeError):
             existing_payload = None
 
+    existing_record = _record_from_payload(
+        existing_payload if isinstance(existing_payload, dict) else None
+    )
+    allow_running_owner_override = _should_override_stale_running_owner(
+        existing_record,
+        payload,
+    )
     transition = reduce_market_activity(
         existing_payload if isinstance(existing_payload, dict) else None,
         payload,
+        allow_running_owner_override=allow_running_owner_override,
     )
     if not transition.should_persist:
         return transition.payload

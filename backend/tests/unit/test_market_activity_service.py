@@ -45,6 +45,24 @@ class _FakeLock:
         return self._tasks.get(market)
 
 
+def _persist_activity_row(db_session, payload):
+    from app.models.app_settings import AppSetting
+    from app.services.market_activity_service import (
+        MARKET_ACTIVITY_KEY_PREFIX,
+        RUNTIME_ACTIVITY_CATEGORY,
+    )
+
+    db_session.add(
+        AppSetting(
+            key=f"{MARKET_ACTIVITY_KEY_PREFIX}{payload['market']}",
+            value=json.dumps(payload),
+            category=RUNTIME_ACTIVITY_CATEGORY,
+            description=f"Latest runtime activity state for {payload['market']}",
+        )
+    )
+    db_session.commit()
+
+
 def test_runtime_activity_status_reports_primary_bootstrap_progress(db_session, monkeypatch):
     from app.services import market_activity_service as module
 
@@ -528,6 +546,98 @@ def test_mark_market_activity_progress_does_not_overwrite_newer_running_task(
     assert us_market["task_id"] == "new-task"
     assert us_market["current"] is None
     assert us_market["percent"] is None
+
+
+def test_stale_running_activity_allows_new_task_owner_to_start(db_session, monkeypatch):
+    from app.services import market_activity_service as module
+    from app.services.runtime_activity_contract import (
+        PersistedRuntimeActivity,
+        RuntimeActivityRecord,
+    )
+
+    old_record = RuntimeActivityRecord.create(
+        market="US",
+        lifecycle="daily_refresh",
+        stage_key="prices",
+        status="running",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        task_id="old-task",
+        message="Refreshing market prices",
+        updated_at="2026-06-23T05:00:00+00:00",
+    )
+    _persist_activity_row(
+        db_session,
+        PersistedRuntimeActivity.from_record(old_record).to_payload(),
+    )
+    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
+    monkeypatch.setattr(
+        module,
+        "_utcnow_iso",
+        lambda: "2026-06-23T06:00:00+00:00",
+    )
+
+    result = module.mark_market_activity_started(
+        db_session,
+        market="US",
+        stage_key="prices",
+        lifecycle="daily_refresh",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        task_id="new-task",
+        message="Refreshing market prices",
+    )
+
+    assert result["status"] == "running"
+    assert result["task_id"] == "new-task"
+    assert result["updated_at"] == "2026-06-23T06:00:00+00:00"
+
+
+def test_stale_running_activity_does_not_override_when_old_owner_is_live(
+    db_session,
+    monkeypatch,
+):
+    from app.services import market_activity_service as module
+    from app.services.runtime_activity_contract import (
+        PersistedRuntimeActivity,
+        RuntimeActivityRecord,
+    )
+
+    old_record = RuntimeActivityRecord.create(
+        market="US",
+        lifecycle="daily_refresh",
+        stage_key="prices",
+        status="running",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        task_id="old-task",
+        message="Refreshing market prices",
+        updated_at="2026-06-23T05:00:00+00:00",
+    )
+    _persist_activity_row(
+        db_session,
+        PersistedRuntimeActivity.from_record(old_record).to_payload(),
+    )
+    monkeypatch.setattr(
+        module,
+        "get_data_fetch_lock",
+        lambda: _FakeLock({"US": {"task_id": "old-task"}}),
+    )
+    monkeypatch.setattr(
+        module,
+        "_utcnow_iso",
+        lambda: "2026-06-23T06:00:00+00:00",
+    )
+
+    result = module.mark_market_activity_started(
+        db_session,
+        market="US",
+        stage_key="prices",
+        lifecycle="daily_refresh",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        task_id="new-task",
+        message="Refreshing market prices",
+    )
+
+    assert result["status"] == "running"
+    assert result["task_id"] == "old-task"
 
 
 def test_mark_market_activity_completed_still_advances_same_task_running_record(
