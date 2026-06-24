@@ -119,6 +119,48 @@ def test_guard_price_refresh_accepts_high_coverage_partial_result():
     }
 
 
+def test_guard_price_refresh_uses_coverage_denominator_when_present():
+    from app.tasks import daily_market_pipeline_tasks as module
+
+    result = {
+        "status": "partial",
+        "refreshed": 50,
+        "failed": 34,
+        "total": 84,
+        "coverage_refreshed": 9949,
+        "coverage_failed": 34,
+        "coverage_total": 9983,
+        "live_top_up_refreshed": 50,
+        "live_top_up_failed": 34,
+        "live_top_up_total": 84,
+    }
+
+    assert module.guard_price_refresh.run(result, market="US") == {
+        "status": "ok",
+        "market": "US",
+        "stage": "prices",
+    }
+
+
+def test_guard_price_refresh_falls_back_when_coverage_values_are_null():
+    from app.tasks import daily_market_pipeline_tasks as module
+
+    result = {
+        "status": "partial",
+        "refreshed": 900,
+        "failed": 100,
+        "total": 1000,
+        "coverage_refreshed": None,
+        "coverage_total": None,
+    }
+
+    assert module.guard_price_refresh.run(result, market="HK") == {
+        "status": "ok",
+        "market": "HK",
+        "stage": "prices",
+    }
+
+
 def test_guard_price_refresh_fails_low_coverage_partial_result():
     from app.tasks import daily_market_pipeline_tasks as module
 

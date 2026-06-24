@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +11,7 @@ from typing import Any
 from celery.exceptions import SoftTimeLimitExceeded
 
 from ..config import settings
+from ..services.price_refresh_accounting import account_live_refresh
 from ..services.price_refresh_actions import (
     PriceRefreshTerminalCompletion,
     build_terminal_completion,
@@ -19,7 +19,6 @@ from ..services.price_refresh_actions import (
 from ..services.price_refresh_activity import (
     CeleryTaskLike,
     PriceRefreshActivityReporter,
-    PriceRefreshFinalization,
     PriceRefreshOutcome,
 )
 from ..services.price_refresh_live_runner import (
@@ -404,10 +403,6 @@ class PriceRefreshWorkflow:
         refresh_plan: PriceRefreshPlan,
     ) -> PriceRefreshOutcome:
         total = len(refresh_plan.symbols)
-        symbol_market_totals = Counter(
-            refresh_plan.symbol_markets.get(str(symbol).upper(), effective_market)
-            for symbol in refresh_plan.symbols
-        )
         bulk_fetcher = self._deps.bulk_fetcher_factory()
 
         self._deps.activity_reporter.publish_progress(
@@ -441,13 +436,6 @@ class PriceRefreshWorkflow:
             activity_reporter=self._deps.activity_reporter,
         )
 
-        success_rate = execution_result.refreshed / total if total > 0 else 0
-        status = "completed" if success_rate >= 0.95 else "partial"
-        market_success_rates = self._market_success_rates(
-            symbol_market_totals=symbol_market_totals,
-            refreshed_by_market=execution_result.refreshed_by_market,
-        )
-
         self._deps.retry_scheduler.schedule(
             execution_result.failed_symbols,
             failure_kinds=execution_result.failure_kinds,
@@ -455,25 +443,29 @@ class PriceRefreshWorkflow:
             symbol_markets=refresh_plan.symbol_markets,
             activity_lifecycle=activity_lifecycle,
         )
+        accounting = account_live_refresh(
+            refresh_plan,
+            execution_result,
+            effective_market=effective_market,
+            last_completed_trading_day=self._deps.last_completed_trading_day,
+        )
 
         logger.info("=" * 80)
         logger.info("Smart refresh completed (%s mode):", mode.value)
-        logger.info("  Refreshed: %s", execution_result.refreshed)
-        logger.info("  Failed: %s", execution_result.failed)
-        logger.info("  Total: %s", total)
+        logger.info("  Refreshed: %s", accounting.refreshed)
+        logger.info("  Failed: %s", accounting.failed)
+        logger.info("  Total: %s", accounting.total)
+        if accounting.live_top_up_total is not None:
+            logger.info(
+                "  Live top-up: %s refreshed, %s failed, %s total",
+                accounting.live_top_up_refreshed,
+                accounting.live_top_up_failed,
+                accounting.live_top_up_total,
+            )
         if execution_result.failed_symbols:
             logger.info("  Failed symbols: %s...", execution_result.failed_symbols[:10])
         logger.info("=" * 80)
 
-        finalization = PriceRefreshFinalization(
-            metadata_status=status,
-            metadata_refreshed=execution_result.refreshed,
-            metadata_total=total,
-            activity_current=total,
-            activity_total=total,
-            message=f"Price refresh {status}",
-            market_success_rates=market_success_rates,
-        )
         self._deps.activity_reporter.finalize_success(
             db,
             price_cache,
@@ -481,43 +473,10 @@ class PriceRefreshWorkflow:
             market=market,
             effective_market=effective_market,
             lifecycle=activity_lifecycle,
-            finalization=finalization,
+            finalization=accounting.to_finalization(),
         )
 
-        return PriceRefreshOutcome(
-            status=status,
-            source=(
-                PriceRefreshSource.GITHUB_AND_LIVE
-                if refresh_plan.used_github_seed
-                else PriceRefreshSource.LIVE
-            ),
-            mode=mode,
-            refreshed=execution_result.refreshed,
-            failed=execution_result.failed,
-            total=total,
-            failed_symbols=execution_result.failed_symbols,
-            github_seed=refresh_plan.github_seed,
-        )
-
-    def _market_success_rates(
-        self,
-        *,
-        symbol_market_totals: Mapping[str, int],
-        refreshed_by_market: Mapping[str, int],
-    ) -> dict[str, tuple[Any, float]]:
-        market_success_rates = {}
-        for refresh_market, market_total in symbol_market_totals.items():
-            market_success_rate = (
-                refreshed_by_market[refresh_market] / market_total
-                if market_total > 0
-                else 0
-            )
-            if market_success_rate >= 0.95:
-                market_success_rates[refresh_market] = (
-                    self._deps.last_completed_trading_day(refresh_market),
-                    market_success_rate,
-                )
-        return market_success_rates
+        return accounting.to_outcome(mode=mode)
 
     def _should_reject_full_refresh(
         self,
