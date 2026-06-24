@@ -564,6 +564,10 @@
     gap: 14px;
   }
 
+  .compact-grid.spaced {
+    margin-top: 18px;
+  }
+
   .compact-card {
     min-width: 0;
     min-height: 176px;
@@ -1125,7 +1129,9 @@
       Runtime bootstrap does not start from an empty database when GitHub data mode is available.
       The core path imports weekly reference data and daily prices from versioned release assets,
       validates manifest schema and sha256, then uses live providers only to fill gaps or top up the
-      current session. IBD classifications and CN shards support related GitHub build/bootstrap paths.
+      current session. When those release assets are disabled or unavailable, the same bootstrap
+      stages fall back to live provider and local seed sources, then write the results into the same
+      Postgres and Redis stores. IBD classifications and CN shards support related GitHub build/bootstrap paths.
     </p>
     <div class="compact-grid">
       <article class="compact-card">
@@ -1199,10 +1205,52 @@
       </div>
     </div>
 
+    <div class="compact-grid spaced">
+      <article class="compact-card">
+        <span class="mini-chip control">GitHub availability</span>
+        <h3>Empty token is not off</h3>
+        <ul>
+          <li><strong>Default mode:</strong> <code>github_first</code> still tries the public GitHub API.</li>
+          <li><strong>No token:</strong> requests are unauthenticated, so public releases can still download.</li>
+          <li><strong>Disabled mode:</strong> <code>MARKET_DATA_SOURCE_MODE=live_only</code> skips release downloads.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live universe</span>
+        <h3>Where symbols come from</h3>
+        <ul>
+          <li><strong>US:</strong> Finviz universe ingestion populates <code>stock_universe</code>.</li>
+          <li><strong>Non-US:</strong> official exchange adapters fetch HKEX, NSE/BSE, JPX, KRX, TW, CN, TMX, Deutsche Boerse, SGX, ASX, and Bursa sources.</li>
+          <li><strong>Fallback seeds:</strong> some markets use bundled CSV seeds when live official endpoints are unavailable.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live prices</span>
+        <h3>Where OHLCV comes from</h3>
+        <ul>
+          <li><strong>Plan:</strong> if the daily GitHub seed is missing, <code>smart_refresh_cache</code> builds a live top-up plan.</li>
+          <li><strong>Stale seed:</strong> an older daily bundle can still seed history, then live refresh fills current gaps.</li>
+          <li><strong>Most markets:</strong> yfinance batches provide daily price history.</li>
+          <li><strong>Special routes:</strong> Korea can use KRX first; China can use AKShare and Baostock before yfinance fallback.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live fundamentals</span>
+        <h3>Where fundamentals come from</h3>
+        <ul>
+          <li><strong>US:</strong> Finviz, then yfinance, then Alpha Vantage if configured.</li>
+          <li><strong>KR/CN:</strong> KRX/OpenDART or AKShare/Baostock routes, with yfinance fallback where allowed.</li>
+          <li><strong>Other markets:</strong> yfinance-backed fundamentals; US IBD groups still start from <code>data/IBD_industry_group.csv</code>.</li>
+        </ul>
+      </article>
+    </div>
+
     <div class="callout">
       <strong>Bootstrap source of truth:</strong>
       GitHub is a distribution layer for durable seed data, not a separate runtime database.
-      After import, the app reads and writes through Postgres and Redis just like a locally refreshed environment.
+      If GitHub succeeds, imports populate the stores quickly. If GitHub returns <code>live_only</code>,
+      <code>missing_manifest</code>, <code>network_error</code>, <code>stale</code>, or another non-success status,
+      the task falls back to live/local data sources and writes the refreshed data through Postgres and Redis.
     </div>
   </section>
 
