@@ -144,6 +144,65 @@ def test_terminal_github_accounting_reports_bundle_count_in_outcome_and_finaliza
     assert finalization.metadata_total == 2
 
 
+def test_terminal_github_accounting_counts_unsupported_top_up_as_coverage_gap():
+    from app.services.price_refresh_accounting import account_terminal_refresh
+    from app.services.price_refresh_planning import (
+        PriceRefreshCoverageSummary,
+        PriceRefreshMode,
+        PriceRefreshPlan,
+        PriceRefreshSource,
+    )
+
+    plan = PriceRefreshPlan(
+        symbols=(),
+        jobs=(),
+        all_symbols=("0335.T", "7203.T"),
+        unsupported_symbols=("0335.T",),
+        github_seed=_github_seed(),
+        github_seed_used=True,
+        completion_message="GitHub daily price bundle synced; unsupported symbols could not be live-refreshed",
+        coverage_summary=PriceRefreshCoverageSummary(
+            universe_total=2,
+            already_fresh=1,
+            stale=1,
+            no_history=0,
+            live_top_up_total=0,
+            unsupported_top_up_total=1,
+            universe_total_by_market={"JP": 2},
+            already_fresh_by_market={"JP": 1},
+            unsupported_top_up_total_by_market={"JP": 1},
+        ),
+    )
+
+    accounting = account_terminal_refresh(
+        plan,
+        mode=PriceRefreshMode.DELTA,
+        effective_market="JP",
+        last_completed_trading_day=lambda _market: date(2026, 6, 23),
+    )
+
+    assert accounting.status == "partial"
+    assert accounting.source is PriceRefreshSource.GITHUB
+    assert accounting.refreshed == 1
+    assert accounting.failed == 1
+    assert accounting.total == 2
+    assert accounting.coverage_refreshed == 1
+    assert accounting.coverage_failed == 1
+    assert accounting.coverage_total == 2
+    assert accounting.coverage_success_rate == 0.5
+    assert accounting.already_fresh == 1
+    assert accounting.live_top_up_refreshed == 0
+    assert accounting.live_top_up_failed == 0
+    assert accounting.live_top_up_total == 0
+    assert accounting.unsupported_top_up_total == 1
+    assert accounting.market_success_rates == {}
+
+    result = accounting.to_outcome(mode=PriceRefreshMode.DELTA).to_task_result()
+    assert result["status"] == "partial"
+    assert result["coverage_refreshed"] == 1
+    assert result["unsupported_top_up_total"] == 1
+
+
 def test_live_only_accounting_keeps_live_batch_as_denominator():
     from app.services.price_refresh_accounting import account_live_refresh
     from app.services.price_refresh_execution import PriceRefreshExecutionSummary

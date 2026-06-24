@@ -21,34 +21,120 @@ PRICE_REFRESH_COMPLETED_SUCCESS_RATE = 0.95
 
 
 @dataclass(frozen=True)
-class PriceRefreshAccounting:
-    status: str
-    source: PriceRefreshSource
+class PriceRefreshCounts:
     refreshed: int
     failed: int
     total: int
+
+    @classmethod
+    def from_refreshed_total(
+        cls,
+        *,
+        refreshed: int,
+        total: int,
+    ) -> "PriceRefreshCounts":
+        return cls(
+            refreshed=min(refreshed, total),
+            failed=max(total - refreshed, 0),
+            total=total,
+        )
+
+    @property
+    def success_rate(self) -> float:
+        return self.refreshed / self.total if self.total > 0 else 0
+
+
+@dataclass(frozen=True)
+class PriceRefreshCoverageAccounting:
+    counts: PriceRefreshCounts
+    already_fresh: int | None = None
+    unsupported_top_up_total: int | None = None
+
+
+@dataclass(frozen=True)
+class PriceRefreshAccounting:
+    status: str
+    source: PriceRefreshSource
+    counts: PriceRefreshCounts
     message: str
     github_seed: GitHubSeedOutcome | None = None
     failed_symbols: tuple[str, ...] = ()
     heartbeat_status: str | None = "completed"
     market_success_rates: Mapping[str, tuple[Any, float]] = field(default_factory=dict)
-    coverage_refreshed: int | None = None
-    coverage_failed: int | None = None
-    coverage_total: int | None = None
-    coverage_success_rate: float | None = None
-    already_fresh: int | None = None
-    live_top_up_refreshed: int | None = None
-    live_top_up_failed: int | None = None
-    live_top_up_total: int | None = None
-    unsupported_top_up_total: int | None = None
+    coverage: PriceRefreshCoverageAccounting | None = None
+    live_top_up_counts: PriceRefreshCounts | None = None
+
+    @property
+    def refreshed(self) -> int:
+        return self.counts.refreshed
+
+    @property
+    def failed(self) -> int:
+        return self.counts.failed
+
+    @property
+    def total(self) -> int:
+        return self.counts.total
+
+    @property
+    def coverage_refreshed(self) -> int | None:
+        return self.coverage.counts.refreshed if self.coverage is not None else None
+
+    @property
+    def coverage_failed(self) -> int | None:
+        return self.coverage.counts.failed if self.coverage is not None else None
+
+    @property
+    def coverage_total(self) -> int | None:
+        return self.coverage.counts.total if self.coverage is not None else None
+
+    @property
+    def coverage_success_rate(self) -> float | None:
+        return self.coverage.counts.success_rate if self.coverage is not None else None
+
+    @property
+    def already_fresh(self) -> int | None:
+        return self.coverage.already_fresh if self.coverage is not None else None
+
+    @property
+    def unsupported_top_up_total(self) -> int | None:
+        return (
+            self.coverage.unsupported_top_up_total
+            if self.coverage is not None
+            else None
+        )
+
+    @property
+    def live_top_up_refreshed(self) -> int | None:
+        return (
+            self.live_top_up_counts.refreshed
+            if self.live_top_up_counts is not None
+            else None
+        )
+
+    @property
+    def live_top_up_failed(self) -> int | None:
+        return (
+            self.live_top_up_counts.failed
+            if self.live_top_up_counts is not None
+            else None
+        )
+
+    @property
+    def live_top_up_total(self) -> int | None:
+        return (
+            self.live_top_up_counts.total
+            if self.live_top_up_counts is not None
+            else None
+        )
 
     def to_finalization(self) -> PriceRefreshFinalization:
         return PriceRefreshFinalization(
             metadata_status=self.status,
-            metadata_refreshed=self.refreshed,
-            metadata_total=self.total,
-            activity_current=self.total,
-            activity_total=self.total,
+            metadata_refreshed=self.counts.refreshed,
+            metadata_total=self.counts.total,
+            activity_current=self.counts.total,
+            activity_total=self.counts.total,
             message=self.message,
             heartbeat_status=self.heartbeat_status,
             market_success_rates=self.market_success_rates,
@@ -60,9 +146,9 @@ class PriceRefreshAccounting:
             source=self.source,
             mode=mode,
             message=self.message,
-            refreshed=self.refreshed,
-            failed=self.failed,
-            total=self.total,
+            refreshed=self.counts.refreshed,
+            failed=self.counts.failed,
+            total=self.counts.total,
             failed_symbols=list(self.failed_symbols),
             github_seed=self.github_seed,
             coverage_refreshed=self.coverage_refreshed,
@@ -94,12 +180,10 @@ def account_live_refresh(
 
     if use_seeded_coverage and coverage is not None:
         coverage_total = coverage.universe_total
-        coverage_refreshed = min(
-            coverage_total,
-            coverage.already_fresh + execution.refreshed,
+        coverage_counts = PriceRefreshCounts.from_refreshed_total(
+            refreshed=coverage.already_fresh + execution.refreshed,
+            total=coverage_total,
         )
-        coverage_failed = max(coverage_total - coverage_refreshed, 0)
-        success_rate = coverage_refreshed / coverage_total
         market_success_rates = _coverage_market_success_rates(
             coverage_total_by_market=coverage.universe_total_by_market,
             already_fresh_by_market=coverage.already_fresh_by_market,
@@ -108,30 +192,33 @@ def account_live_refresh(
             fallback_total=coverage_total,
             last_completed_trading_day=last_completed_trading_day,
         )
-        status = _status_from_success_rate(success_rate)
+        status = _status_from_success_rate(coverage_counts.success_rate)
         return PriceRefreshAccounting(
             status=status,
             source=PriceRefreshSource.GITHUB_AND_LIVE,
-            refreshed=coverage_refreshed,
-            failed=coverage_failed,
-            total=coverage_total,
+            counts=coverage_counts,
             message=f"Price refresh {status}",
             github_seed=plan.github_seed,
             failed_symbols=tuple(execution.failed_symbols),
             market_success_rates=market_success_rates,
-            coverage_refreshed=coverage_refreshed,
-            coverage_failed=coverage_failed,
-            coverage_total=coverage_total,
-            coverage_success_rate=success_rate,
-            already_fresh=coverage.already_fresh,
-            live_top_up_refreshed=execution.refreshed,
-            live_top_up_failed=execution.failed,
-            live_top_up_total=live_total,
-            unsupported_top_up_total=coverage.unsupported_top_up_total,
+            coverage=PriceRefreshCoverageAccounting(
+                counts=coverage_counts,
+                already_fresh=coverage.already_fresh,
+                unsupported_top_up_total=coverage.unsupported_top_up_total,
+            ),
+            live_top_up_counts=PriceRefreshCounts(
+                refreshed=execution.refreshed,
+                failed=execution.failed,
+                total=live_total,
+            ),
         )
 
-    success_rate = execution.refreshed / live_total if live_total > 0 else 0
-    status = _status_from_success_rate(success_rate)
+    counts = PriceRefreshCounts(
+        refreshed=execution.refreshed,
+        failed=execution.failed,
+        total=live_total,
+    )
+    status = _status_from_success_rate(counts.success_rate)
     return PriceRefreshAccounting(
         status=status,
         source=(
@@ -139,9 +226,7 @@ def account_live_refresh(
             if plan.used_github_seed
             else PriceRefreshSource.LIVE
         ),
-        refreshed=execution.refreshed,
-        failed=execution.failed,
-        total=live_total,
+        counts=counts,
         message=f"Price refresh {status}",
         github_seed=plan.github_seed,
         failed_symbols=tuple(execution.failed_symbols),
@@ -167,46 +252,48 @@ def account_terminal_refresh(
             plan.completion_message
             or "GitHub daily price bundle is current - no live fetch needed"
         )
-        symbol_count = _github_terminal_symbol_count(plan)
-        trading_day = _completion_trading_day(
-            plan.github_seed,
-            effective_market,
-            last_completed_trading_day=last_completed_trading_day,
+        counts, coverage = _terminal_github_counts(plan)
+        market_success_rates = (
+            _coverage_market_success_rates(
+                coverage_total_by_market=plan.coverage_summary.universe_total_by_market,
+                already_fresh_by_market=plan.coverage_summary.already_fresh_by_market,
+                refreshed_by_market={},
+                effective_market=effective_market,
+                fallback_total=plan.coverage_summary.universe_total,
+                last_completed_trading_day=lambda refresh_market: _completion_trading_day(
+                    plan.github_seed,
+                    refresh_market,
+                    last_completed_trading_day=last_completed_trading_day,
+                ),
+            )
+            if plan.coverage_summary is not None
+            else {
+                effective_market: (
+                    _completion_trading_day(
+                        plan.github_seed,
+                        effective_market,
+                        last_completed_trading_day=last_completed_trading_day,
+                    ),
+                    1.0,
+                )
+            }
         )
+        status = _status_from_success_rate(counts.success_rate)
         return PriceRefreshAccounting(
-            status="completed",
+            status=status,
             source=PriceRefreshSource.GITHUB,
-            refreshed=symbol_count,
-            failed=0,
-            total=symbol_count,
+            counts=counts,
             message=message,
             github_seed=plan.github_seed,
-            market_success_rates={effective_market: (trading_day, 1.0)},
-            coverage_refreshed=symbol_count,
-            coverage_failed=0,
-            coverage_total=symbol_count,
-            coverage_success_rate=1.0 if symbol_count > 0 else 0,
-            already_fresh=(
-                plan.coverage_summary.already_fresh
-                if plan.coverage_summary is not None
-                else symbol_count
-            ),
-            live_top_up_refreshed=0,
-            live_top_up_failed=0,
-            live_top_up_total=0,
-            unsupported_top_up_total=(
-                plan.coverage_summary.unsupported_top_up_total
-                if plan.coverage_summary is not None
-                else 0
-            ),
+            market_success_rates=market_success_rates,
+            coverage=coverage,
+            live_top_up_counts=PriceRefreshCounts(refreshed=0, failed=0, total=0),
         )
 
     return PriceRefreshAccounting(
         status="completed",
         source=plan.source,
-        refreshed=0,
-        failed=0,
-        total=0,
+        counts=PriceRefreshCounts(refreshed=0, failed=0, total=0),
         message=_empty_refresh_message(plan, mode),
         github_seed=plan.github_seed,
         heartbeat_status=None,
@@ -219,10 +306,29 @@ def _status_from_success_rate(success_rate: float) -> str:
     return "partial"
 
 
-def _github_terminal_symbol_count(plan: PriceRefreshPlan) -> int:
+def _terminal_github_counts(
+    plan: PriceRefreshPlan,
+) -> tuple[PriceRefreshCounts, PriceRefreshCoverageAccounting]:
     if plan.coverage_summary is not None and plan.coverage_summary.universe_total > 0:
-        return plan.coverage_summary.universe_total
-    return len(plan.all_symbols)
+        counts = PriceRefreshCounts.from_refreshed_total(
+            refreshed=plan.coverage_summary.already_fresh,
+            total=plan.coverage_summary.universe_total,
+        )
+        return counts, PriceRefreshCoverageAccounting(
+            counts=counts,
+            already_fresh=plan.coverage_summary.already_fresh,
+            unsupported_top_up_total=plan.coverage_summary.unsupported_top_up_total,
+        )
+    counts = PriceRefreshCounts(
+        refreshed=len(plan.all_symbols),
+        failed=0,
+        total=len(plan.all_symbols),
+    )
+    return counts, PriceRefreshCoverageAccounting(
+        counts=counts,
+        already_fresh=counts.refreshed,
+        unsupported_top_up_total=0,
+    )
 
 
 def _completion_trading_day(

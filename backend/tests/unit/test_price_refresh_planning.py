@@ -116,6 +116,35 @@ def test_price_refresh_plan_excludes_unsupported_yahoo_symbols_from_live_jobs():
     ]
 
 
+def test_current_github_bundle_reports_unsupported_only_top_up_as_terminal_gap():
+    from app.services.price_history_coverage import PriceHistoryCoverage
+    from app.services.price_refresh_planning import (
+        PriceRefreshSource,
+        plan_price_refresh_from_input,
+    )
+
+    plan = plan_price_refresh_from_input(_planning_input(
+        all_symbols=["0335.T"],
+        effective_market="JP",
+        github_seed=_seed({
+            "status": "success",
+            "as_of_date": "2026-06-08",
+            "source_revision": "daily_prices_jp:20260608090000",
+        }),
+        coverage=PriceHistoryCoverage(no_history=("0335.T",)),
+    ))
+
+    assert plan.source is PriceRefreshSource.GITHUB
+    assert plan.symbols == ()
+    assert plan.unsupported_symbols == ("0335.T",)
+    assert plan.completion_message == (
+        "GitHub daily price bundle synced; unsupported symbols could not be live-refreshed"
+    )
+    assert plan.coverage_summary is not None
+    assert plan.coverage_summary.already_fresh == 0
+    assert plan.coverage_summary.unsupported_top_up_total == 1
+
+
 def test_full_mode_stays_full_even_when_github_sync_result_is_available(universe_session):
     from app.services.price_refresh_planning import (
         NO_HISTORY_PRICE_BOOTSTRAP_PERIOD,

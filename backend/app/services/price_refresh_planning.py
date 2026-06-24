@@ -293,11 +293,16 @@ def _plan_github_top_up(
     live_symbols = _symbols_from_jobs(jobs)
     completion_message = None
     if not live_symbols:
-        completion_message = (
-            "GitHub daily price bundle is current - no live fetch needed"
-            if github_as_of == target_as_of
-            else "All symbols already fresh - no live fetch needed"
-        )
+        if unsupported:
+            completion_message = (
+                "GitHub daily price bundle synced; unsupported symbols could not be live-refreshed"
+            )
+        else:
+            completion_message = (
+                "GitHub daily price bundle is current - no live fetch needed"
+                if github_as_of == target_as_of
+                else "All symbols already fresh - no live fetch needed"
+            )
     return PriceRefreshPlan(
         symbols=live_symbols,
         jobs=jobs,
