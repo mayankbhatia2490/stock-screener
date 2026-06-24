@@ -146,19 +146,23 @@ Scan API endpoints read from the latest published run for fast query responses.
 
 ## Application Pages
 
+Canonical live-app route and user-flow documentation lives in the [Live App Guide](LIVE_APP_GUIDE.md).
+
 | Route | Page | Description |
 |-------|------|-------------|
-| `/` | Routine | Market dashboard with Key Markets, Themes, Watchlists, Stockbee tabs |
+| `/` | Daily | Market dashboard with Daily Snapshot, Key Markets, optional Themes, Watchlists, and Stockbee MM tabs |
 | `/scan` | Bulk Scanner | Multi-screener scanning with 80+ filters and CSV export |
 | `/breadth` | Market Breadth | StockBee-style breadth indicators and trends |
 | `/groups` | Group Rankings | IBD industry group rankings with movers |
-| `/themes` | Themes | AI-powered theme discovery with trending/emerging detection |
-| `/chatbot` | Assistant | Hermes-backed assistant with internal market tools and web context |
-| `/stock/:symbol` | Stock Detail | Individual stock analysis with charts and fundamentals |
+| `/validation` | Backtest | Deterministic validation for scan picks and theme alerts |
+| `/themes` | Themes | Feature-gated AI theme discovery with trending/emerging detection |
+| `/chatbot` | Assistant | Feature-gated Hermes-backed assistant with internal market tools and web context |
+| `/stocks/:ticker` | Stock Detail | Individual stock analysis with charts and fundamentals |
+| `/operations` | Operations | Runtime activity, telemetry alerts, queue/job inventory, and safe job controls |
 
 ## API Endpoint Groups
 
-Interactive Swagger docs available at `http://localhost:8000/docs`.
+Interactive Swagger docs are disabled by default in server deployments. Set `SERVER_EXPOSE_API_DOCS=true` for trusted local development, then open `http://localhost:8000/docs`.
 
 **Core:**
 - `/api/v1/scans` — Scan management and results
@@ -170,6 +174,7 @@ Interactive Swagger docs available at `http://localhost:8000/docs`.
 - `/api/v1/groups` — IBD group rankings
 - `/api/v1/themes` — Theme discovery and analysis
 - `/api/v1/technical` — Technical indicators
+- `/api/v1/validation` — Scan-pick and theme-alert validation
 
 **AI & Research:**
 - `/api/v1/assistant` — Assistant sessions, streaming, health, and watchlist preview
@@ -179,15 +184,18 @@ Interactive Swagger docs available at `http://localhost:8000/docs`.
 - `/api/v1/user-themes` — User theme management
 - `/api/v1/market-scan` — Dashboard market scan lists
 - `/api/v1/filter-presets` — Saved scan filter configurations
+- `/api/v1/strategy-profiles` — Strategy profile metadata and scan defaults
 
 **System:**
 - `/api/v1/universe` — Stock universe management
 - `/api/v1/cache` — Cache management
-- `/api/v1/tasks` — Background task status
+- `/api/v1/tasks` — Feature-gated scheduled task status and triggers
 - `/api/v1/config` — Admin configuration
 - `/api/v1/data-fetch-status` — Data fetch monitoring
 - `/api/v1/ticker-validation` — Ticker symbol validation
-- `/api/v1/app-runtime` — App capabilities and runtime info
+- `/api/v1/operations` — Queue/job inventory and safe job controls
+- `/api/v1/telemetry` — Market telemetry summaries and alerts
+- `/api/v1/app-capabilities` and `/api/v1/runtime/*` — App capabilities, bootstrap, runtime markets, and runtime activity
 
 **Health Endpoints (root-level):**
 

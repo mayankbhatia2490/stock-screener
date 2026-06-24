@@ -39,13 +39,17 @@ Requires backend API running on port 8000. See [Backend README](../backend/READM
 
 | Route | Component | Loading | Description |
 |-------|-----------|---------|-------------|
-| `/` | `MarketScanPage` | Eager | Market dashboard with Key Markets, Themes, Watchlists, Stockbee tabs |
-| `/scan` | `ScanPage` | Eager | Multi-screener scanning with 80+ filters and CSV export |
+| `/` | `MarketScanPage` | Lazy | Market dashboard with Daily Snapshot, Key Markets, optional Themes, Watchlists, and Stockbee MM tabs |
+| `/scan` | `ScanPage` | Lazy | Multi-screener scanning with 80+ filters and CSV export |
 | `/breadth` | `BreadthPage` | Lazy | StockBee-style breadth indicators and trends |
 | `/groups` | `GroupRankingsPage` | Lazy | IBD industry group rankings with movers |
-| `/themes` | `ThemesPage` | Lazy | AI-powered theme discovery with trending/emerging detection |
-| `/chatbot` | `ChatbotPage` | Lazy | Hermes-backed assistant with streaming, citations, and watchlist actions |
-| `/stock/:symbol` | `StockDetails` | Eager | Individual stock analysis with charts and fundamentals |
+| `/validation` | `ValidationPage` | Lazy | Deterministic validation for scan picks and theme alerts |
+| `/themes` | `ThemesPage` | Lazy | Feature-gated theme discovery with trending/emerging detection |
+| `/chatbot` | `ChatbotPage` | Lazy | Feature-gated Hermes-backed assistant with streaming, citations, and watchlist actions |
+| `/stocks/:ticker` | `StockDetails` | Lazy | Individual stock analysis with charts, fundamentals, themes, and validation history |
+| `/operations` | `OperationsPage` | Lazy | Runtime activity, telemetry alerts, queue/job inventory, and safe job controls |
+
+Canonical route/user-flow documentation lives in the [Live App Guide](../docs/LIVE_APP_GUIDE.md).
 
 ## Project Structure
 
@@ -62,6 +66,9 @@ src/
 │   ├── groups.js                #   Group rankings
 │   ├── themes.js                #   Theme discovery
 │   ├── assistant.js             #   Assistant sessions/messages
+│   ├── validation.js            #   Backtest/validation overview
+│   ├── operations.js            #   Operations job console
+│   ├── telemetry.js             #   Runtime telemetry alerts
 │   ├── userWatchlists.js        #   Watchlist CRUD
 │   ├── userThemes.js            #   User themes
 │   ├── marketScan.js            #   Dashboard scan lists
@@ -74,8 +81,10 @@ src/
 │   ├── MarketScanPage.jsx       #   Market dashboard (home)
 │   ├── BreadthPage.jsx          #   Market breadth
 │   ├── GroupRankingsPage.jsx    #   Group rankings
+│   ├── ValidationPage.jsx       #   Backtest/validation
 │   ├── ThemesPage.jsx           #   Theme discovery
-│   └── ChatbotPage.jsx          #   Assistant page route
+│   ├── ChatbotPage.jsx          #   Assistant page route
+│   └── OperationsPage.jsx       #   Runtime operations console
 ├── components/                  # Shared and feature components
 │   ├── Layout/                  #   App shell, navigation
 │   ├── Scan/                    #   Scanner UI (filters, results table)
@@ -89,7 +98,12 @@ src/
 │   ├── common/                  #   Reusable UI primitives
 │   └── PipelineProgressCard.jsx #   Scan progress indicator
 ├── contexts/                    # React contexts
-│   └── PipelineContext.jsx      #   Scan pipeline progress state
+│   ├── RuntimeContext.jsx       #   Auth, bootstrap, capabilities, runtime markets
+│   ├── MarketContext.jsx        #   Active market selection
+│   ├── StrategyProfileContext.jsx #   Strategy profile defaults
+│   ├── PipelineContext.jsx      #   Theme/scan pipeline progress state
+│   ├── AssistantChatContext.jsx #   Assistant sessions and messages
+│   └── ColorModeContext.js      #   Dark/light mode state
 ├── hooks/                       # Custom hooks
 │   ├── useChartNavigation.js    #   Keyboard nav for chart modal
 │   ├── useFilterPresets.js      #   Filter preset CRUD
@@ -137,13 +151,11 @@ Dark mode by default. Dense 24px table rows. Compact 11-14px typography. Light m
 
 ### Code Splitting
 
-`ScanPage`, `MarketScanPage`, and `StockDetails` are eagerly loaded (most frequently accessed). `BreadthPage`, `GroupRankingsPage`, `ThemesPage`, and `ChatbotPage` are lazy-loaded with `React.lazy()` and wrapped in `<Suspense>`.
+Live pages, auth screens, bootstrap setup, and the static shell are loaded with `React.lazy()` and wrapped in `<Suspense>`. This keeps the initial bundle free of heavy page-specific chart and dashboard chunks.
 
 ### State Management
 
-No global store. TanStack Query handles all server state. `useState` for local UI state. Two contexts:
-- `PipelineContext` — scan pipeline progress tracking
-- `ColorModeContext` — dark/light theme toggle
+No global store. TanStack Query handles server state, `useState` handles local UI state, and scoped contexts cover runtime capabilities/auth/bootstrap, active market, strategy profile defaults, pipeline progress, assistant chat state, and dark/light mode.
 
 ### Adding a Page
 
