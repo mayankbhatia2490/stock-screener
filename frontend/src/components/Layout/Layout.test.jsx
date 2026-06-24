@@ -99,6 +99,35 @@ describe('Layout', () => {
     expect(screen.queryByRole('link', { name: /digest/i })).not.toBeInTheDocument();
   });
 
+  it('shows stale runtime activity as a header warning', () => {
+    useRuntimeActivityMock.mockReturnValue({
+      dataUpdatedAt: 1,
+      data: {
+        bootstrap: { state: 'ready' },
+        summary: { active_market_count: 0, status: 'warning' },
+        markets: [
+          {
+            market: 'US',
+            status: 'stale',
+            stage_label: 'Price Refresh',
+            message: 'Refreshing market prices - stale: No live data-fetch lock owns task old-task.',
+          },
+        ],
+      },
+    });
+
+    renderWithProviders(
+      <MemoryRouter initialEntries={['/scan']}>
+        <Layout>
+          <div>content</div>
+        </Layout>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText('Refresh warning')).toBeInTheDocument();
+    expect(screen.getByText('US · Price Refresh')).toBeInTheDocument();
+  });
+
   it('does not show a fake 0 percent for indeterminate bootstrap progress', () => {
     useRuntimeActivityMock.mockReturnValue({
       dataUpdatedAt: 1,

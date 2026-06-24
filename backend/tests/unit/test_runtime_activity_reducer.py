@@ -59,6 +59,34 @@ def test_reduce_market_activity_rejects_ownerless_progress_over_completed_record
     assert transition.record == existing
 
 
+def test_reduce_market_activity_preserves_running_record_from_different_owner_by_default():
+    from app.services.runtime_activity_reducer import reduce_market_activity
+
+    existing = _record(status="running", stage_key="prices", task_id="old-task")
+    incoming = _record(status="running", stage_key="prices", task_id="new-task")
+
+    transition = reduce_market_activity(existing, incoming)
+
+    assert transition.should_persist is False
+    assert transition.record == existing
+
+
+def test_reduce_market_activity_allows_explicit_running_owner_override():
+    from app.services.runtime_activity_reducer import reduce_market_activity
+
+    existing = _record(status="running", stage_key="prices", task_id="old-task")
+    incoming = _record(status="running", stage_key="prices", task_id="new-task")
+
+    transition = reduce_market_activity(
+        existing,
+        incoming,
+        allow_running_owner_override=True,
+    )
+
+    assert transition.should_persist is True
+    assert transition.record == incoming
+
+
 def test_reduce_market_activity_inherits_running_context_from_existing_record():
     from app.services.runtime_activity_contract import RuntimeActivityUpdate
     from app.services.runtime_activity_reducer import reduce_market_activity

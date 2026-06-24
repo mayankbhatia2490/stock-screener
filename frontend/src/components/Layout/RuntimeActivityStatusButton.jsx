@@ -5,6 +5,7 @@ import { useRuntimeActivity } from '../../hooks/useRuntimeActivity';
 
 // Header status is best-effort chrome; let route-critical data requests start first.
 const HEADER_ACTIVITY_DELAY_MS = 1500;
+const WARNING_MARKET_STATUSES = new Set(['failed', 'stale', 'stuck']);
 
 function buildSummary(activity, { isPending = false, isError = false } = {}) {
   if (isError && isPending) {
@@ -31,7 +32,9 @@ function buildSummary(activity, { isPending = false, isError = false } = {}) {
   const activeMarket = markets.find((market) => (
     market.status === 'running' || market.status === 'queued'
   ));
-  const failedMarket = markets.find((market) => market.status === 'failed');
+  const warningMarket = markets.find((market) => (
+    WARNING_MARKET_STATUSES.has(market.status)
+  ));
 
   if (bootstrap.state === 'running') {
     const determinateBootstrap = (
@@ -51,12 +54,13 @@ function buildSummary(activity, { isPending = false, isError = false } = {}) {
     };
   }
 
-  if (summary.status === 'warning' && failedMarket) {
+  if (summary.status === 'warning' && warningMarket) {
+    const warningFallback = warningMarket.status === 'failed' ? 'Task failed' : 'Task needs attention';
     return {
       badge: 'Warn',
       badgeColor: 'warning',
       title: 'Refresh warning',
-      detail: `${failedMarket.market} · ${failedMarket.stage_label || failedMarket.message || 'Task failed'}`,
+      detail: `${warningMarket.market} · ${warningMarket.stage_label || warningMarket.message || warningFallback}`,
     };
   }
 

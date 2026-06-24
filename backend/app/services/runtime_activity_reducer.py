@@ -47,6 +47,8 @@ def _coerce_activity_record(
 def reduce_market_activity(
     existing_payload: RuntimeActivityRecord | Mapping[str, Any] | None,
     incoming_payload: RuntimeActivityRecord | RuntimeActivityUpdate | Mapping[str, Any],
+    *,
+    allow_running_owner_override: bool = False,
 ) -> RuntimeActivityTransition:
     """Return the activity payload that should win this state transition."""
     existing = _coerce_activity_record(existing_payload)
@@ -68,7 +70,11 @@ def reduce_market_activity(
     incoming_has_owner = incoming.task_id is not None
 
     if existing_status == "running":
-        if payload_status == "queued" or not same_owner:
+        if payload_status == "queued":
+            return RuntimeActivityTransition(should_persist=False, record=existing)
+        if not same_owner and (
+            not allow_running_owner_override or not incoming_has_owner
+        ):
             return RuntimeActivityTransition(should_persist=False, record=existing)
     elif existing_status == "completed":
         if payload_status != "failed":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,13 +22,22 @@ from ..services.runtime_activity_contract import (
     progress_mode,
     resolve_progress_percent,
 )
+from ..services.runtime_activity_ownership import lock_markets_for_runtime_activity
 from ..services.runtime_activity_presenter import build_runtime_activity_status
 from ..services.runtime_activity_reducer import reduce_market_activity
+from ..services.runtime_activity_staleness import (
+    is_stale_running_activity,
+    parse_activity_timestamp,
+    stale_runtime_activity_payload,
+)
 from ..services.runtime_preferences_service import get_runtime_bootstrap_status
 from ..wiring.bootstrap import get_data_fetch_lock
 
 RUNTIME_ACTIVITY_CATEGORY = "runtime_activity"
 MARKET_ACTIVITY_KEY_PREFIX = "runtime.activity.market."
+DATA_FETCH_RUNTIME_STAGE_KEYS = frozenset({"prices"})
+_LIVE_RUNTIME_TASK_LOOKUP_FAILED = object()
+logger = logging.getLogger(__name__)
 
 
 def _utcnow_iso() -> str:
@@ -53,9 +63,86 @@ def _load_market_activity(db: Session, market: str) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     try:
-        return PersistedRuntimeActivity.from_payload(payload).to_record().to_payload()
+        record = PersistedRuntimeActivity.from_payload(payload).to_record()
     except ValueError:
         return None
+    return record.to_payload()
+
+
+def _record_from_payload(payload: dict[str, Any] | None) -> RuntimeActivityRecord | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return PersistedRuntimeActivity.from_payload(payload).to_record()
+    except ValueError:
+        return None
+
+
+def _incoming_owner(
+    payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    if isinstance(payload, (RuntimeActivityUpdate, RuntimeActivityRecord)):
+        return payload.task_id, payload.stage_key, payload.status
+    return payload.get("task_id"), payload.get("stage_key"), payload.get("status")
+
+
+def _live_runtime_activity_task(
+    record: RuntimeActivityRecord,
+) -> dict[str, Any] | None | object:
+    if not record.task_id:
+        return None
+    try:
+        lock = get_data_fetch_lock()
+        for lock_market in lock_markets_for_runtime_activity(record.market):
+            current_task = lock.get_current_task(market=lock_market)
+            if (
+                isinstance(current_task, dict)
+                and current_task.get("task_id") == record.task_id
+            ):
+                return current_task
+    except Exception:
+        logger.warning(
+            "Runtime activity lock lookup failed; market=%s task_id=%s",
+            record.market,
+            record.task_id,
+            exc_info=True,
+        )
+        return _LIVE_RUNTIME_TASK_LOOKUP_FAILED
+    return None
+
+
+def _running_activity_has_live_owner(record: RuntimeActivityRecord) -> bool:
+    current_task = _live_runtime_activity_task(record)
+    return (
+        current_task is _LIVE_RUNTIME_TASK_LOOKUP_FAILED
+        or isinstance(current_task, dict)
+    )
+
+
+def _should_override_stale_running_owner(
+    existing: RuntimeActivityRecord | None,
+    incoming_payload: RuntimeActivityUpdate | RuntimeActivityRecord | dict[str, Any],
+) -> bool:
+    if existing is None or existing.status != "running":
+        return False
+    if existing.stage_key not in DATA_FETCH_RUNTIME_STAGE_KEYS:
+        return False
+
+    incoming_task_id, incoming_stage_key, incoming_status = _incoming_owner(
+        incoming_payload
+    )
+    if incoming_status not in {"running", "completed", "failed"}:
+        return False
+    if not incoming_task_id:
+        return False
+    if existing.task_id == incoming_task_id and existing.stage_key == incoming_stage_key:
+        return False
+
+    now = parse_activity_timestamp(_utcnow_iso())
+    if now is None or not is_stale_running_activity(existing, now=now):
+        return False
+
+    return not _running_activity_has_live_owner(existing)
 
 
 def _load_runtime_bootstrap_run(db: Session) -> dict[str, Any] | None:
@@ -101,9 +188,17 @@ def _save_market_activity(
         except (json.JSONDecodeError, TypeError):
             existing_payload = None
 
+    existing_record = _record_from_payload(
+        existing_payload if isinstance(existing_payload, dict) else None
+    )
+    allow_running_owner_override = _should_override_stale_running_owner(
+        existing_record,
+        payload,
+    )
     transition = reduce_market_activity(
         existing_payload if isinstance(existing_payload, dict) else None,
         payload,
+        allow_running_owner_override=allow_running_owner_override,
     )
     if not transition.should_persist:
         return transition.payload
@@ -327,16 +422,17 @@ def mark_current_market_activity_failed(
     )
 
 
-def _overlay_live_progress(record: dict[str, Any], market: str) -> dict[str, Any]:
-    if record.get("status") != "running":
-        return record
-    if record.get("stage_key") != "prices":
-        return record
+def _overlay_live_progress(record: dict[str, Any]) -> dict[str, Any]:
     try:
-        current_task = get_data_fetch_lock().get_current_task(market=market)
-    except Exception:
-        current_task = None
-    if not current_task or current_task.get("task_id") != record.get("task_id"):
+        typed_record = RuntimeActivityRecord.from_payload(record)
+    except ValueError:
+        return record
+    if typed_record.status != "running":
+        return record
+    if typed_record.stage_key != "prices":
+        return record
+    current_task = _live_runtime_activity_task(typed_record)
+    if not isinstance(current_task, dict):
         return record
     merged = dict(record)
     if merged.get("percent") is None and current_task.get("progress") is not None:
@@ -359,6 +455,21 @@ def _overlay_live_progress(record: dict[str, Any], market: str) -> dict[str, Any
         merged.get("total"),
     )
     return merged
+
+
+def _overlay_stale_runtime_activity(record: dict[str, Any]) -> dict[str, Any]:
+    try:
+        typed_record = RuntimeActivityRecord.from_payload(record)
+    except ValueError:
+        return record
+    if not is_stale_running_activity(typed_record):
+        return record
+    if typed_record.stage_key not in DATA_FETCH_RUNTIME_STAGE_KEYS:
+        return record
+    if _running_activity_has_live_owner(typed_record):
+        return record
+    reason = f"No live data-fetch lock owns task {typed_record.task_id or 'unknown'}."
+    return stale_runtime_activity_payload(typed_record, reason)
 
 
 def _queued_bootstrap_market_payload(
@@ -421,7 +532,9 @@ def _market_payload(
         )
     if record is None:
         return _idle_market_payload(market, None)
-    return _idle_market_payload(market, _overlay_live_progress(record, market))
+    live_record = _overlay_live_progress(record)
+    stale_checked_record = _overlay_stale_runtime_activity(live_record)
+    return _idle_market_payload(market, stale_checked_record)
 
 
 def get_runtime_activity_status(db: Session) -> dict[str, Any]:
