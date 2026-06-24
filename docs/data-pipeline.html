@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>StockScreenClaude Data Pipeline</title>
+<title>stock-screen Data Pipeline</title>
 <style>
   :root {
     color-scheme: light;
@@ -677,7 +677,7 @@
   <header class="hero">
     <div class="hero-main">
       <p class="eyebrow">Data pipeline and storage map</p>
-      <h1>How StockScreenClaude moves data into Postgres and Redis.</h1>
+      <h1>How stock-screen moves data into Postgres and Redis.</h1>
       <p class="lead">
         The app has two clocks. GitHub release artifacts seed cold starts and Actions builds;
         scheduled and bootstrap processes hydrate data into durable Postgres tables and Redis hot
@@ -1241,6 +1241,15 @@
           <li><strong>US:</strong> Finviz, then yfinance, then Alpha Vantage if configured.</li>
           <li><strong>KR/CN:</strong> KRX/OpenDART or AKShare/Baostock routes, with yfinance fallback where allowed.</li>
           <li><strong>Other markets:</strong> yfinance-backed fundamentals; US IBD groups still start from <code>data/IBD_industry_group.csv</code>.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">data/*.csv</span>
+        <h3>Static repo CSV seeds</h3>
+        <ul>
+          <li><strong>IBD:</strong> <code>data/IBD_industry_group.csv</code> is the authoritative US group seed and is loaded before GitHub classifications.</li>
+          <li><strong>Taxonomy:</strong> <code>hk-deep.csv</code>, <code>india-deep.csv</code>, <code>kabutan_themes_en.csv</code>, <code>korea-deep.csv</code>, <code>taiwan-deep.csv</code>, and <code>china-deep.csv</code> enrich sectors, industries, and themes.</li>
+          <li><strong>Universe fallback:</strong> <code>de_dax40_constituents.csv</code>, <code>sg_sgx_constituents.csv</code>, <code>my_klse_constituents.csv</code>, and <code>au_asx_listed_companies.csv</code> backstop official live sources.</li>
         </ul>
       </article>
     </div>
