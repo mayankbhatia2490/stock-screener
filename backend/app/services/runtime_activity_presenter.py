@@ -12,6 +12,8 @@ from .runtime_activity_contract import (
     stage_index,
 )
 
+WARNING_ACTIVITY_STATUSES = frozenset({"failed", "stale", "stuck"})
+
 
 def _bootstrap_progress_percent(record: RuntimeActivityRecord | None) -> float:
     if record is None:
@@ -46,8 +48,11 @@ def build_runtime_activity_status(
         for record in activity_records
         if record.status in ACTIVE_ACTIVITY_STATUSES
     ]
-    has_failed = any(record.status == "failed" for record in activity_records)
-    summary_status = "warning" if has_failed else ("active" if active_markets else "idle")
+    has_warning = any(
+        record.status in WARNING_ACTIVITY_STATUSES
+        for record in activity_records
+    )
+    summary_status = "warning" if has_warning else ("active" if active_markets else "idle")
 
     primary_record = next(
         (record for record in activity_records if record.market == primary_market),

@@ -1275,6 +1275,43 @@ def test_runtime_activity_status_surfaces_failed_market_stage(db_session, monkey
     assert jp_market["message"] == "Group ranking failed"
 
 
+def test_runtime_activity_status_marks_orphaned_running_row_stale(db_session, monkeypatch):
+    from app.services import market_activity_service as module
+    from app.services.runtime_activity_contract import (
+        PersistedRuntimeActivity,
+        RuntimeActivityRecord,
+    )
+
+    old_record = RuntimeActivityRecord.create(
+        market="US",
+        lifecycle="daily_refresh",
+        stage_key="prices",
+        status="running",
+        task_name="app.tasks.cache_tasks.smart_refresh_cache",
+        task_id="old-task",
+        message="Refreshing market prices",
+        updated_at="2026-06-23T05:00:00+00:00",
+    )
+    _persist_activity_row(
+        db_session,
+        PersistedRuntimeActivity.from_record(old_record).to_payload(),
+    )
+    monkeypatch.setattr(module, "get_data_fetch_lock", lambda: _FakeLock())
+    monkeypatch.setattr(
+        module,
+        "get_runtime_bootstrap_status",
+        lambda _db: _bootstrap_status(required=False, enabled=["US"], state="ready"),
+    )
+
+    payload = module.get_runtime_activity_status(db_session)
+
+    us_market = next(item for item in payload["markets"] if item["market"] == "US")
+    assert us_market["status"] == "stale"
+    assert "No live data-fetch lock owns task old-task" in us_market["message"]
+    assert payload["summary"]["status"] == "warning"
+    assert payload["summary"]["active_market_count"] == 0
+
+
 def test_runtime_activity_supports_scan_stage_progress(db_session, monkeypatch):
     from app.services import market_activity_service as module
 

@@ -31,7 +31,9 @@ function buildSummary(activity, { isPending = false, isError = false } = {}) {
   const activeMarket = markets.find((market) => (
     market.status === 'running' || market.status === 'queued'
   ));
-  const failedMarket = markets.find((market) => market.status === 'failed');
+  const warningMarket = markets.find((market) => (
+    market.status === 'failed' || market.status === 'stale' || market.status === 'stuck'
+  ));
 
   if (bootstrap.state === 'running') {
     const determinateBootstrap = (
@@ -51,12 +53,13 @@ function buildSummary(activity, { isPending = false, isError = false } = {}) {
     };
   }
 
-  if (summary.status === 'warning' && failedMarket) {
+  if (summary.status === 'warning' && warningMarket) {
+    const warningFallback = warningMarket.status === 'failed' ? 'Task failed' : 'Task needs attention';
     return {
       badge: 'Warn',
       badgeColor: 'warning',
       title: 'Refresh warning',
-      detail: `${failedMarket.market} · ${failedMarket.stage_label || failedMarket.message || 'Task failed'}`,
+      detail: `${warningMarket.market} · ${warningMarket.stage_label || warningMarket.message || warningFallback}`,
     };
   }
 

@@ -26,6 +26,7 @@ from ..services.runtime_activity_reducer import reduce_market_activity
 from ..services.runtime_activity_staleness import (
     is_stale_running_activity,
     parse_activity_timestamp,
+    stale_runtime_activity_payload,
 )
 from ..services.runtime_preferences_service import get_runtime_bootstrap_status
 from ..wiring.bootstrap import get_data_fetch_lock
@@ -436,6 +437,19 @@ def _overlay_live_progress(record: dict[str, Any], market: str) -> dict[str, Any
     return merged
 
 
+def _overlay_stale_runtime_activity(record: dict[str, Any], _market: str) -> dict[str, Any]:
+    try:
+        typed_record = RuntimeActivityRecord.from_payload(record)
+    except ValueError:
+        return record
+    if not is_stale_running_activity(typed_record):
+        return record
+    if _running_activity_has_live_owner(typed_record):
+        return record
+    reason = f"No live data-fetch lock owns task {typed_record.task_id or 'unknown'}."
+    return stale_runtime_activity_payload(typed_record, reason)
+
+
 def _queued_bootstrap_market_payload(
     market: str,
     _primary_market: str,
@@ -496,7 +510,9 @@ def _market_payload(
         )
     if record is None:
         return _idle_market_payload(market, None)
-    return _idle_market_payload(market, _overlay_live_progress(record, market))
+    live_record = _overlay_live_progress(record, market)
+    stale_checked_record = _overlay_stale_runtime_activity(live_record, market)
+    return _idle_market_payload(market, stale_checked_record)
 
 
 def get_runtime_activity_status(db: Session) -> dict[str, Any]:
