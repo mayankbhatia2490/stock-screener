@@ -26,7 +26,22 @@ def log_runtime_stage(logger, name: str, **extra) -> Iterator[None]:
     )
     try:
         yield
-    finally:
+    except BaseException as exc:
+        elapsed = round(time.perf_counter() - started, 3)
+        logger.info(
+            "Runtime stage failed: %s",
+            name,
+            extra={
+                "runtime_stage": name,
+                "elapsed_seconds": elapsed,
+                "max_rss_mb": _max_rss_mb(),
+                "exception_type": type(exc).__name__,
+                **extra,
+            },
+            exc_info=True,
+        )
+        raise
+    else:
         elapsed = round(time.perf_counter() - started, 3)
         logger.info(
             "Runtime stage finished: %s",

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 
 class _FakeLogger:
     def __init__(self) -> None:
@@ -52,6 +54,41 @@ def test_log_runtime_stage_emits_start_and_finish(monkeypatch):
             },
         },
     ]
+
+
+def test_log_runtime_stage_emits_failure_and_reraises(monkeypatch):
+    import app.services.runtime_diagnostics as module
+
+    logger = _FakeLogger()
+    monkeypatch.setattr(module.time, "perf_counter", iter([20.0, 22.3456]).__next__)
+    monkeypatch.setattr(module, "_max_rss_mb", lambda: 256.0)
+
+    with pytest.raises(RuntimeError, match="planner failed"):
+        with module.log_runtime_stage(
+            logger,
+            "price_refresh.classify_coverage",
+            market="US",
+            mode="delta",
+        ):
+            raise RuntimeError("planner failed")
+
+    assert len(logger.messages) == 2
+    assert logger.messages[0]["message"] == "Runtime stage started: %s"
+    assert logger.messages[1] == {
+        "message": "Runtime stage failed: %s",
+        "args": ("price_refresh.classify_coverage",),
+        "kwargs": {
+            "extra": {
+                "runtime_stage": "price_refresh.classify_coverage",
+                "elapsed_seconds": 2.346,
+                "max_rss_mb": 256.0,
+                "exception_type": "RuntimeError",
+                "market": "US",
+                "mode": "delta",
+            },
+            "exc_info": True,
+        },
+    }
 
 
 def test_max_rss_mb_converts_macos_bytes(monkeypatch):
