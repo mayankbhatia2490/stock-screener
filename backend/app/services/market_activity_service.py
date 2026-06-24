@@ -83,13 +83,21 @@ def _incoming_owner(
 def _running_activity_has_live_owner(record: RuntimeActivityRecord) -> bool:
     if not record.task_id:
         return False
+    lock_markets = [record.market]
+    if record.market == "US":
+        lock_markets.append(None)
     try:
-        current_task = get_data_fetch_lock().get_current_task(market=record.market)
+        lock = get_data_fetch_lock()
+        current_tasks = [
+            lock.get_current_task(market=lock_market)
+            for lock_market in lock_markets
+        ]
     except Exception:
         return True
-    return bool(
+    return any(
         isinstance(current_task, dict)
         and current_task.get("task_id") == record.task_id
+        for current_task in current_tasks
     )
 
 
