@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>StockScreenClaude Data Pipeline</title>
+<title>stock-screen Data Pipeline</title>
 <style>
   :root {
     color-scheme: light;
@@ -564,6 +564,10 @@
     gap: 14px;
   }
 
+  .compact-grid.spaced {
+    margin-top: 18px;
+  }
+
   .compact-card {
     min-width: 0;
     min-height: 176px;
@@ -673,12 +677,12 @@
   <header class="hero">
     <div class="hero-main">
       <p class="eyebrow">Data pipeline and storage map</p>
-      <h1>How StockScreenClaude moves data into Postgres and Redis.</h1>
+      <h1>How stock-screen moves data into Postgres and Redis.</h1>
       <p class="lead">
-        The app has two clocks. Scheduled and bootstrap processes hydrate data into durable
-        Postgres tables and Redis hot state. User-facing processes then read from those stores:
-        scans stay cache-only, APIs return persisted data, and static/MCP/assistant workflows reuse
-        the same published artifacts.
+        The app has two clocks. GitHub release artifacts seed cold starts and Actions builds;
+        scheduled and bootstrap processes hydrate data into durable Postgres tables and Redis hot
+        state. User-facing processes then read from those stores: scans stay cache-only, APIs return
+        persisted data, and static/MCP/assistant workflows reuse the same published artifacts.
       </p>
     </div>
     <aside class="hero-side" aria-label="Pipeline facts">
@@ -695,8 +699,8 @@
         <span>Postgres is the durable source for universes, scans, features, themes, and user data.</span>
       </div>
       <div class="fact">
-        <strong>0</strong>
-        <span>Manual scan requests should not fetch live provider data during execution.</span>
+        <strong>4</strong>
+        <span>GitHub release channels seed weekly reference, daily prices, IBD groups, and CN shards.</span>
       </div>
     </aside>
   </header>
@@ -704,8 +708,10 @@
   <nav class="nav" aria-label="Sections">
     <a href="#map">01 pipeline map</a>
     <a href="#stores">02 stores</a>
-    <a href="#daily">03 daily process</a>
-    <a href="#consumers">04 consumers</a>
+    <a href="#github-bootstrap">03 github bootstrap</a>
+    <a href="#github-workflows">04 github workflows</a>
+    <a href="#daily">05 daily process</a>
+    <a href="#consumers">06 consumers</a>
   </nav>
 
   <section class="section" id="map">
@@ -741,11 +747,15 @@
           <span>orchestrates stages</span>
           <strong>data_fetch_*</strong>
           <span>fetches provider data</span>
+          <strong>GitHub releases</strong>
+          <span>seed reference and price data</span>
         </div>
         <div class="card process">
           <h3><code>queue_local_runtime_bootstrap</code></h3>
-          <p>Builds a per-market chain from the bootstrap plan.</p>
+          <p>Builds a per-market chain from the bootstrap plan and imports GitHub seed bundles before live top-ups.</p>
           <div class="process-list">
+            <code>sync_weekly_reference_from_github</code>
+            <code>sync_daily_price_bundle_from_github</code>
             <code>refresh_*_universe</code>
             <code>smart_refresh_cache</code>
             <code>refresh_all_fundamentals</code>
@@ -761,6 +771,8 @@
               <li><code>stock_universe</code></li>
               <li><code>stock_prices</code></li>
               <li><code>stock_fundamentals</code></li>
+              <li><code>provider_snapshot_*</code> runs and rows</li>
+              <li><code>ibd_industry_groups</code></li>
               <li><code>feature_runs</code> and <code>stock_feature_daily</code></li>
             </ul>
           </div>
@@ -777,7 +789,7 @@
         <div class="arrow">></div>
         <div class="card consumer">
           <h3>Startup and runtime UI</h3>
-          <p>The first screen opens once the primary market is ready; secondary markets continue hydrating in the background.</p>
+          <p>The first screen opens once GitHub-seeded data plus any needed live top-up makes the primary market ready.</p>
           <ul>
             <li><code>/api/v1/app-runtime/runtime/activity</code></li>
             <li><code>/api/v1/cache/health</code></li>
@@ -798,6 +810,7 @@
           <h3><code>queue_daily_market_pipeline</code></h3>
           <p>Runs the daily market chain for the last completed trading day.</p>
           <div class="process-list">
+            <code>sync_daily_price_bundle_from_github</code>
             <code>smart_refresh_cache</code>
             <code>calculate_daily_breadth_with_gapfill</code>
             <code>calculate_market_exposure</code>
@@ -1110,8 +1123,201 @@
     </div>
   </section>
 
+  <section class="section" id="github-bootstrap">
+    <h2>03. GitHub Data Used During Bootstrap</h2>
+    <p class="section-intro">
+      Runtime bootstrap does not start from an empty database when GitHub data mode is available.
+      The core path imports weekly reference data and daily prices from versioned release assets,
+      validates manifest schema and sha256, then uses live providers only to fill gaps or top up the
+      current session. When those release assets are disabled or unavailable, the same bootstrap
+      stages fall back to live provider and local seed sources, then write the results into the same
+      Postgres and Redis stores. IBD classifications and CN shards support related GitHub build/bootstrap paths.
+    </p>
+    <div class="compact-grid">
+      <article class="compact-card">
+        <span class="mini-chip source">weekly-reference-data</span>
+        <h3>Universe plus fundamentals seed</h3>
+        <ul>
+          <li><strong>Assets:</strong> <code>weekly-reference-latest-{market}.json</code> and a gzipped bundle.</li>
+          <li><strong>Contains:</strong> active <code>stock_universe</code> rows, market metadata, and provider snapshot rows.</li>
+          <li><strong>Imported into:</strong> <code>stock_universe</code>, <code>provider_snapshot_*</code>, <code>stock_fundamentals</code>, and optional Redis fundamentals cache.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">daily-price-data</span>
+        <h3>Price-history baseline</h3>
+        <ul>
+          <li><strong>Assets:</strong> <code>daily-price-latest-{market}.json</code> and <code>daily-price-{market}-{date}.json.gz</code>.</li>
+          <li><strong>Contains:</strong> two years of OHLCV rows exported from <code>stock_prices</code> for active symbols.</li>
+          <li><strong>Imported into:</strong> <code>stock_prices</code> plus <code>app_settings</code> sync metadata under <code>github_sync.daily_prices.*</code>.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">ibd-classification-data</span>
+        <h3>Published group classifications</h3>
+        <ul>
+          <li><strong>Assets:</strong> <code>ibd-classification-latest-{market}.json</code> and a gzipped classification bundle.</li>
+          <li><strong>Contains:</strong> symbol, market, IBD industry group, source, confidence, method, and model id.</li>
+          <li><strong>Imported into:</strong> <code>ibd_industry_groups</code> by static-site and scheduled sync paths, preserving CSV/manual rows.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">cn-daily-price-shards</span>
+        <h3>CN Actions bootstrap data</h3>
+        <ul>
+          <li><strong>Assets:</strong> CN shard plan files, shard bundles, and shard manifests for resumable bootstraps.</li>
+          <li><strong>Contains:</strong> pinned CN weekly reference identity plus partial daily-price checkpoints.</li>
+          <li><strong>Imported into:</strong> shard jobs first, then a final CN bundle published back to <code>daily-price-data</code>.</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="timeline" aria-label="Bootstrap GitHub seed flow">
+      <div class="stage">
+        <span class="number">1</span>
+        <h3>Reference sync</h3>
+        <p><code>refresh_*_universe</code> calls <code>sync_weekly_reference_from_github</code> for the market manifest and bundle.</p>
+      </div>
+      <div class="stage">
+        <span class="number">2</span>
+        <h3>Universe import</h3>
+        <p>The weekly bundle replaces active market universe rows and records the published provider snapshot run.</p>
+      </div>
+      <div class="stage">
+        <span class="number">3</span>
+        <h3>Price seed</h3>
+        <p><code>smart_refresh_cache</code> asks the daily-price sync path for a GitHub baseline before fetching live deltas.</p>
+      </div>
+      <div class="stage">
+        <span class="number">4</span>
+        <h3>Live top-up</h3>
+        <p>If the GitHub bundle is stale or incomplete, price refresh fetches only the missing or current-session symbols.</p>
+      </div>
+      <div class="stage">
+        <span class="number">5</span>
+        <h3>Fundamentals hydrate</h3>
+        <p><code>refresh_all_fundamentals</code> can hydrate from the weekly provider snapshot instead of refetching every symbol.</p>
+      </div>
+      <div class="stage">
+        <span class="number">6</span>
+        <h3>Snapshot publish</h3>
+        <p>Breadth, exposure, groups, and <code>build_daily_snapshot</code> consume the GitHub-seeded stores and publish read paths.</p>
+      </div>
+    </div>
+
+    <div class="compact-grid spaced">
+      <article class="compact-card">
+        <span class="mini-chip control">GitHub availability</span>
+        <h3>Empty token is not off</h3>
+        <ul>
+          <li><strong>Default mode:</strong> <code>github_first</code> still tries the public GitHub API.</li>
+          <li><strong>No token:</strong> requests are unauthenticated, so public releases can still download.</li>
+          <li><strong>Disabled mode:</strong> <code>MARKET_DATA_SOURCE_MODE=live_only</code> skips release downloads.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live universe</span>
+        <h3>Where symbols come from</h3>
+        <ul>
+          <li><strong>US:</strong> Finviz universe ingestion populates <code>stock_universe</code>.</li>
+          <li><strong>Non-US:</strong> official exchange adapters fetch HKEX, NSE/BSE, JPX, KRX, TW, CN, TMX, Deutsche Boerse, SGX, ASX, and Bursa sources.</li>
+          <li><strong>Fallback seeds:</strong> some markets use bundled CSV seeds when live official endpoints are unavailable.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live prices</span>
+        <h3>Where OHLCV comes from</h3>
+        <ul>
+          <li><strong>Plan:</strong> if the daily GitHub seed is missing, <code>smart_refresh_cache</code> builds a live top-up plan.</li>
+          <li><strong>Stale seed:</strong> an older daily bundle can still seed history, then live refresh fills current gaps.</li>
+          <li><strong>Most markets:</strong> yfinance batches provide daily price history.</li>
+          <li><strong>Special routes:</strong> Korea can use KRX first; China can use AKShare and Baostock before yfinance fallback.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">live fundamentals</span>
+        <h3>Where fundamentals come from</h3>
+        <ul>
+          <li><strong>US:</strong> Finviz, then yfinance, then Alpha Vantage if configured.</li>
+          <li><strong>KR/CN:</strong> KRX/OpenDART or AKShare/Baostock routes, with yfinance fallback where allowed.</li>
+          <li><strong>Other markets:</strong> yfinance-backed fundamentals; US IBD groups still start from <code>data/IBD_industry_group.csv</code>.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip source">data/*.csv</span>
+        <h3>Static repo CSV seeds</h3>
+        <ul>
+          <li><strong>IBD:</strong> <code>data/IBD_industry_group.csv</code> is the authoritative US group seed and is loaded before GitHub classifications.</li>
+          <li><strong>Taxonomy:</strong> <code>hk-deep.csv</code>, <code>india-deep.csv</code>, <code>kabutan_themes_en.csv</code>, <code>korea-deep.csv</code>, <code>taiwan-deep.csv</code>, and <code>china-deep.csv</code> enrich sectors, industries, and themes.</li>
+          <li><strong>Universe fallback:</strong> <code>de_dax40_constituents.csv</code>, <code>sg_sgx_constituents.csv</code>, <code>my_klse_constituents.csv</code>, and <code>au_asx_listed_companies.csv</code> backstop official live sources.</li>
+        </ul>
+      </article>
+    </div>
+
+    <div class="callout">
+      <strong>Bootstrap source of truth:</strong>
+      GitHub is a distribution layer for durable seed data, not a separate runtime database.
+      If GitHub succeeds, imports populate the stores quickly. If GitHub returns <code>live_only</code>,
+      <code>missing_manifest</code>, <code>network_error</code>, <code>stale</code>, or another non-success status,
+      the task falls back to live/local data sources and writes the refreshed data through Postgres and Redis.
+    </div>
+  </section>
+
+  <section class="section" id="github-workflows">
+    <h2>04. Daily and Weekly GitHub Workflows</h2>
+    <p class="section-intro">
+      GitHub Actions produce the release assets that bootstrap and static-site builds reuse.
+      The daily workflow keeps prices and static market JSON current; the weekly workflows refresh
+      reference data and classifications.
+    </p>
+    <div class="compact-grid">
+      <article class="compact-card">
+        <span class="mini-chip process">daily static-site.yml</span>
+        <h3>Daily price and static export</h3>
+        <ul>
+          <li><strong>Schedule:</strong> Asia markets at 10:30 UTC Monday-Friday; US group at 4:10pm New York time Monday-Saturday.</li>
+          <li><strong>Data sources:</strong> <code>weekly-reference-data</code>, repo CSV seed, <code>ibd-classification-data</code>, previous <code>daily-price-data</code>, and live price providers.</li>
+          <li><strong>Outputs:</strong> per-market static artifacts and refreshed <code>daily-price-data</code> bundle assets.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip process">weekly-reference-data.yml</span>
+        <h3>Weekly reference bundle</h3>
+        <ul>
+          <li><strong>Schedule:</strong> Saturday at 8:10am New York time, or manual per-market dispatch.</li>
+          <li><strong>Data sources:</strong> prior weekly bundle seed, market universe adapters/endpoints, and provider/fundamental routes.</li>
+          <li><strong>Outputs:</strong> <code>weekly-reference-data</code> manifests and bundles for all supported markets.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip process">ibd-classification.yml</span>
+        <h3>Weekly classification bundle</h3>
+        <ul>
+          <li><strong>Schedule:</strong> after successful Weekly Reference Data, with Saturday 11:10am New York fallback.</li>
+          <li><strong>Data sources:</strong> weekly reference universe, <code>data/IBD_industry_group.csv</code>, US crosswalk, previous IBD bundle, embeddings, and optional LLM tiebreaker.</li>
+          <li><strong>Outputs:</strong> <code>ibd-classification-data</code> bundles and health reports.</li>
+        </ul>
+      </article>
+      <article class="compact-card">
+        <span class="mini-chip process">cn-daily-price-bootstrap.yml</span>
+        <h3>CN shard bootstrap support</h3>
+        <ul>
+          <li><strong>Schedule:</strong> manual dispatch when CN needs resumable large-universe price bootstrapping.</li>
+          <li><strong>Data sources:</strong> pinned CN weekly reference, previous CN daily price bundle, shard checkpoints, and live CN price refresh.</li>
+          <li><strong>Outputs:</strong> <code>cn-daily-price-shards</code> checkpoints and a final CN asset in <code>daily-price-data</code>.</li>
+        </ul>
+      </article>
+    </div>
+    <div class="callout">
+      <strong>Daily build order:</strong>
+      import weekly reference, load the curated IBD CSV, add GitHub IBD classifications,
+      seed the previous daily price bundle, refresh price deltas, export static JSON, then
+      publish the next daily-price bundle.
+    </div>
+  </section>
+
   <section class="section" id="daily">
-    <h2>03. Daily Market Pipeline</h2>
+    <h2>05. Daily Market Pipeline</h2>
     <p class="section-intro">
       <code>queue_daily_market_pipeline</code> is the clearest example of the flow:
       one market-local chain refreshes raw data, computes market artifacts, publishes
@@ -1157,7 +1363,7 @@
   </section>
 
   <section class="section" id="consumers">
-    <h2>04. Processes That Get Data From the Stores</h2>
+    <h2>06. Processes That Get Data From the Stores</h2>
     <p class="section-intro">
       These are the major reader groups. Some also write their own derived rows,
       but they depend on Postgres and Redis being populated first.
