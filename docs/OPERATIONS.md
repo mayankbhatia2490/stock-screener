@@ -101,7 +101,9 @@ Any GitHub miss (missing/stale manifest, checksum mismatch, network error) silen
 **Changing it on a running app.** The value is baked into the containers at startup, so a running stack must be **stopped** for the change to take effect — recreating alone is not enough:
 
 ```bash
-# 1. Edit .env (or .env.docker):
+# 1. Set it in the env file your stack loads (.env for the base stack;
+#    .env.docker for the prod overlay) — it is wired into every container
+#    via the x-app-env block in docker-compose.yml:
 #      MARKET_DATA_SOURCE_MODE=live_only      # or github_first
 
 # 2. Stop the stack — running containers will not pick up the change
