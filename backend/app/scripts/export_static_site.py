@@ -467,6 +467,24 @@ def _run_daily_refresh(
         feature_snapshots: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
+            exposure_result = market_exposure.get(selected_market)
+            if isinstance(exposure_result, dict) and exposure_result.get("error"):
+                exposure_warning = (
+                    f"Static export market {selected_market} exposure not stored "
+                    f"for {market_as_of.isoformat()}: {exposure_result['error']}."
+                )
+                feature_snapshots[selected_market] = {
+                    "status": "skipped",
+                    "reason": "market_exposure_not_ready",
+                    "market": selected_market,
+                    "as_of_date": market_as_of.isoformat(),
+                    "failure_diagnostics": {
+                        "date": exposure_result.get("date") or market_as_of.isoformat(),
+                        "error": exposure_result["error"],
+                    },
+                    "warnings": [exposure_warning],
+                }
+                continue
             market_result = build_daily_snapshot.run(
                 as_of_date_str=market_as_of.isoformat(),
                 static_daily_mode=True,

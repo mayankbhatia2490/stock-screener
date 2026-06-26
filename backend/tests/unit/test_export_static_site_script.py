@@ -292,6 +292,97 @@ def test_run_daily_refresh_computes_market_exposure_before_snapshot(monkeypatch)
     }
 
 
+def test_run_daily_refresh_skips_snapshot_when_market_exposure_errors(monkeypatch):
+    calls: list[str] = []
+
+    @contextmanager
+    def fake_session():
+        yield object()
+
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 6, 25),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}:{as_of_date.isoformat()}")
+        or {"task": "price_refresh"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: calls.append(f"exposure:{market}:{as_of_date.isoformat()}")
+        or {"market": market, "date": as_of_date.isoformat(), "error": "no_benchmark_data"},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("snapshot should not publish after exposure failure")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda db, csv_path=None: 10105,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("group rank backfill should not run without a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata enrichment should not run without a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_upsert_feature_run_pointer",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default pointer should not update without a snapshot")
+        ),
+    )
+
+    results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert calls == [
+        "price:US:2026-06-25",
+        "exposure:US:2026-06-25",
+    ]
+    assert results["feature_snapshots"] == {
+        "US": {
+            "status": "skipped",
+            "reason": "market_exposure_not_ready",
+            "market": "US",
+            "as_of_date": "2026-06-25",
+            "failure_diagnostics": {
+                "date": "2026-06-25",
+                "error": "no_benchmark_data",
+            },
+            "warnings": [
+                "Static export market US exposure not stored for 2026-06-25: no_benchmark_data."
+            ],
+        }
+    }
+    assert results["group_rank_history_backfill"]["US"]["reason"] == "snapshot_not_ready"
+    assert results["ibd_metadata_refresh"]["US"]["reason"] == "snapshot_not_ready"
+    assert "Static export market US exposure not stored for 2026-06-25: no_benchmark_data." in warnings
+
+
 def test_run_daily_refresh_can_hydrate_imported_snapshot_without_live_fundamentals(monkeypatch):
     calls: list[str] = []
 
