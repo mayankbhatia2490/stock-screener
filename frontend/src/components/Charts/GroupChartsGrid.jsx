@@ -118,7 +118,7 @@ function GroupChartsGrid({ symbols = [], period = '6mo', height = 200 }) {
           const lastClose = priceData && priceData.length > 0 ? priceData[priceData.length - 1].close : null;
 
           return (
-            <Grid item xs={12} sm={6} md={4} lg={3} key={sym}>
+            <Grid item xs={12} md={6} key={sym}>
               <Card
                 variant="outlined"
                 sx={{

@@ -12,10 +12,13 @@ from typing import Any, Optional, Dict, List
 from datetime import datetime, date, timedelta
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..config import settings
+from ..domain.common.query import FilterSpec, SortOrder, SortSpec
+from ..infra.db.models.feature_store import FeatureRun
+from ..infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
 from ..models.industry import IBDGroupRank
 from ..models.stock_universe import StockUniverse
 from ..models.scan_result import Scan, ScanResult
@@ -710,7 +713,12 @@ class IBDGroupRankService:
         ]
 
         # Get constituent stocks with metrics
-        stocks = self._get_constituent_stocks(db, industry_group)
+        stocks = self._get_constituent_stocks(
+            db,
+            industry_group,
+            market=normalized_market,
+            as_of_date=current.date,
+        )
 
         pct_above_80 = self._calculate_pct_above_80(
             current.num_stocks_rs_above_80, current.num_stocks
@@ -740,12 +748,15 @@ class IBDGroupRankService:
     def _get_constituent_stocks(
         self,
         db: Session,
-        industry_group: str
+        industry_group: str,
+        *,
+        market: str = "US",
+        as_of_date: date | None = None,
     ) -> List[Dict]:
         """
         Get constituent stocks for an industry group with their metrics.
 
-        Fetches from the most recent completed scan results.
+        Fetches from the most recent completed scan for the requested market.
 
         Args:
             db: Database session
@@ -755,10 +766,33 @@ class IBDGroupRankService:
             List of stocks with RS, earnings, and sales metrics
         """
         try:
-            # Get the most recent completed scan
-            latest_scan = db.query(Scan).filter(
-                Scan.status == 'completed'
-            ).order_by(desc(Scan.completed_at)).first()
+            latest_feature_scan = self._get_latest_completed_scan_for_market(
+                db,
+                market=market,
+                as_of_date=as_of_date,
+                feature_backed=True,
+            )
+            if latest_feature_scan and latest_feature_scan.feature_run_id is not None:
+                stocks = self._get_feature_run_constituent_stocks(
+                    db,
+                    run_id=latest_feature_scan.feature_run_id,
+                    industry_group=industry_group,
+                )
+                if stocks:
+                    logger.info(
+                        "Found %d feature-run stocks for group %s (%s)",
+                        len(stocks),
+                        industry_group,
+                        market,
+                    )
+                    return stocks
+
+            latest_scan = self._get_latest_completed_scan_for_market(
+                db,
+                market=market,
+                as_of_date=as_of_date,
+                feature_backed=False,
+            )
 
             if not latest_scan:
                 logger.warning("No completed scans found for constituent stocks")
@@ -779,33 +813,142 @@ class IBDGroupRankService:
 
             stocks = []
             for r, company_name in results:
-                stocks.append({
-                    'symbol': r.symbol,
-                    'company_name': company_name,
-                    'price': r.price,
-                    'rs_rating': r.rs_rating,
-                    'rs_rating_1m': r.rs_rating_1m,
-                    'rs_rating_3m': r.rs_rating_3m,
-                    'rs_rating_12m': r.rs_rating_12m,
-                    'eps_growth_qq': r.eps_growth_qq,
-                    'eps_growth_yy': r.eps_growth_yy,
-                    'sales_growth_qq': r.sales_growth_qq,
-                    'sales_growth_yy': r.sales_growth_yy,
-                    'composite_score': r.composite_score,
-                    'stage': r.stage,
-                    'price_sparkline_data': r.price_sparkline_data,
-                    'price_trend': r.price_trend,
-                    'price_change_1d': r.price_change_1d,
-                    'rs_sparkline_data': r.rs_sparkline_data,
-                    'rs_trend': r.rs_trend,
-                })
+                stocks.append(self._legacy_scan_result_constituent_payload(r, company_name))
 
-            logger.info(f"Found {len(stocks)} stocks for group {industry_group}")
+            logger.info(
+                "Found %d legacy scan stocks for group %s (%s)",
+                len(stocks),
+                industry_group,
+                market,
+            )
             return stocks
 
         except Exception as e:
             logger.error(f"Error fetching constituent stocks: {e}", exc_info=True)
             return []
+
+    @staticmethod
+    def _scan_market_filter(normalized_market: str):
+        if normalized_market == "US":
+            return or_(Scan.universe_market == "US", Scan.universe_market.is_(None))
+        return Scan.universe_market == normalized_market
+
+    def _get_latest_completed_scan_for_market(
+        self,
+        db: Session,
+        *,
+        market: str,
+        as_of_date: date | None,
+        feature_backed: bool,
+    ) -> Scan | None:
+        normalized_market = str(market or "US").strip().upper()
+        query = db.query(Scan).filter(
+            Scan.status == "completed",
+            self._scan_market_filter(normalized_market),
+        )
+
+        if feature_backed:
+            query = query.join(FeatureRun, Scan.feature_run_id == FeatureRun.id).filter(
+                Scan.feature_run_id.isnot(None),
+                FeatureRun.status == "published",
+            )
+            if as_of_date is not None:
+                query = query.filter(FeatureRun.as_of_date <= as_of_date)
+            return query.order_by(
+                desc(FeatureRun.as_of_date),
+                desc(Scan.completed_at),
+                desc(Scan.id),
+            ).first()
+
+        return query.filter(
+            Scan.feature_run_id.is_(None),
+        ).order_by(
+            desc(Scan.completed_at),
+            desc(Scan.id),
+        ).first()
+
+    def _get_feature_run_constituent_stocks(
+        self,
+        db: Session,
+        *,
+        run_id: int,
+        industry_group: str,
+    ) -> List[Dict]:
+        filters = FilterSpec().add_categorical(
+            "ibd_industry_group",
+            (industry_group,),
+        )
+        rows = SqlFeatureStoreRepository(db).query_all_as_scan_results(
+            run_id,
+            filters,
+            SortSpec(field="composite_score", order=SortOrder.DESC),
+            include_sparklines=True,
+        )
+        stocks = [
+            self._feature_scan_result_constituent_payload(row)
+            for row in rows
+        ]
+        stocks.sort(key=self._constituent_sort_key, reverse=True)
+        return stocks
+
+    @staticmethod
+    def _constituent_sort_key(stock: Dict) -> tuple[float, float]:
+        rs_rating = stock.get("rs_rating")
+        composite_score = stock.get("composite_score")
+        return (
+            float(rs_rating) if rs_rating is not None else float("-inf"),
+            float(composite_score) if composite_score is not None else float("-inf"),
+        )
+
+    @staticmethod
+    def _feature_scan_result_constituent_payload(row) -> Dict:
+        extended = row.extended_fields or {}
+        return {
+            "symbol": row.symbol,
+            "company_name": extended.get("company_name"),
+            "price": row.current_price,
+            "rs_rating": extended.get("rs_rating"),
+            "rs_rating_1m": extended.get("rs_rating_1m"),
+            "rs_rating_3m": extended.get("rs_rating_3m"),
+            "rs_rating_12m": extended.get("rs_rating_12m"),
+            "eps_growth_qq": extended.get("eps_growth_qq"),
+            "eps_growth_yy": extended.get("eps_growth_yy"),
+            "sales_growth_qq": extended.get("sales_growth_qq"),
+            "sales_growth_yy": extended.get("sales_growth_yy"),
+            "composite_score": row.composite_score,
+            "stage": extended.get("stage"),
+            "price_sparkline_data": extended.get("price_sparkline_data"),
+            "price_trend": extended.get("price_trend"),
+            "price_change_1d": extended.get("price_change_1d"),
+            "rs_sparkline_data": extended.get("rs_sparkline_data"),
+            "rs_trend": extended.get("rs_trend"),
+        }
+
+    @staticmethod
+    def _legacy_scan_result_constituent_payload(
+        row: ScanResult,
+        company_name: str | None,
+    ) -> Dict:
+        return {
+            "symbol": row.symbol,
+            "company_name": company_name,
+            "price": row.price,
+            "rs_rating": row.rs_rating,
+            "rs_rating_1m": row.rs_rating_1m,
+            "rs_rating_3m": row.rs_rating_3m,
+            "rs_rating_12m": row.rs_rating_12m,
+            "eps_growth_qq": row.eps_growth_qq,
+            "eps_growth_yy": row.eps_growth_yy,
+            "sales_growth_qq": row.sales_growth_qq,
+            "sales_growth_yy": row.sales_growth_yy,
+            "composite_score": row.composite_score,
+            "stage": row.stage,
+            "price_sparkline_data": row.price_sparkline_data,
+            "price_trend": row.price_trend,
+            "price_change_1d": row.price_change_1d,
+            "rs_sparkline_data": row.rs_sparkline_data,
+            "rs_trend": row.rs_trend,
+        }
 
     def get_rank_movers(
         self,

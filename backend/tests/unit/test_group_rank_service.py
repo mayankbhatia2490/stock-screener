@@ -9,7 +9,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
 from app.database import Base
+from app.infra.db.models.feature_store import FeatureRun, StockFeatureDaily
 from app.models.industry import IBDGroupRank
+from app.models.scan_result import Scan, ScanResult
+from app.models.stock import StockFundamental
 from app.models.stock_universe import StockUniverse
 from app.services.group_rank_cache_policy import GroupRankCacheRequirement
 from app.services.ibd_group_rank_service import (
@@ -41,6 +44,23 @@ def _make_session():
     Base.metadata.create_all(
         engine,
         tables=[IBDGroupRank.__table__, StockUniverse.__table__],
+    )
+    return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
+
+
+def _make_group_detail_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            FeatureRun.__table__,
+            IBDGroupRank.__table__,
+            StockUniverse.__table__,
+            StockFundamental.__table__,
+            Scan.__table__,
+            ScanResult.__table__,
+            StockFeatureDaily.__table__,
+        ],
     )
     return sessionmaker(bind=engine, autocommit=False, autoflush=False)()
 
@@ -168,6 +188,167 @@ def test_get_group_history_uses_universe_lookup_for_top_symbol_name(monkeypatch)
 
         assert result["top_symbol"] == "AAPL"
         assert result["top_symbol_name"] == "Apple Inc."
+    finally:
+        db_session.rollback()
+        db_session.close()
+
+
+def test_get_group_history_uses_constituents_from_requested_market_scan(monkeypatch):
+    service = _make_group_rank_service()
+    db_session = _make_group_detail_session()
+    group = f"TEST_GROUP_UNIT_{uuid4().hex}"
+    current_date = date.today()
+
+    try:
+        db_session.add(
+            IBDGroupRank(
+                market="US",
+                industry_group=group,
+                date=current_date,
+                rank=1,
+                avg_rs_rating=91.0,
+                median_rs_rating=90.0,
+                weighted_avg_rs_rating=92.0,
+                rs_std_dev=2.0,
+                num_stocks=1,
+                num_stocks_rs_above_80=1,
+                top_symbol="USWIN",
+                top_rs_rating=96.0,
+            )
+        )
+        db_session.add_all(
+            [
+                Scan(
+                    scan_id="us-scan",
+                    status="completed",
+                    universe_market="US",
+                    completed_at=datetime(2026, 6, 24, 22, 0, 0),
+                ),
+                Scan(
+                    scan_id="hk-scan",
+                    status="completed",
+                    universe_market="HK",
+                    completed_at=datetime(2026, 6, 26, 22, 0, 0),
+                ),
+                StockUniverse(symbol="USWIN", name="US Winner", market="US"),
+                StockUniverse(symbol="HKNEW", name="HK Newer", market="HK"),
+                ScanResult(
+                    scan_id="us-scan",
+                    symbol="USWIN",
+                    price=42.0,
+                    rs_rating=96.0,
+                    ibd_industry_group=group,
+                    price_sparkline_data=[1.0, 1.1],
+                    rs_sparkline_data=[1.0, 1.2],
+                ),
+                ScanResult(
+                    scan_id="hk-scan",
+                    symbol="HKNEW",
+                    price=84.0,
+                    rs_rating=99.0,
+                    ibd_industry_group=group,
+                    price_sparkline_data=[1.0, 0.9],
+                    rs_sparkline_data=[1.0, 0.8],
+                ),
+            ]
+        )
+        db_session.commit()
+
+        monkeypatch.setattr(
+            service,
+            "_get_historical_ranks_batch",
+            lambda *_args, **_kwargs: {},
+        )
+
+        result = service.get_group_history(db_session, group, days=30, market="US")
+
+        assert [stock["symbol"] for stock in result["stocks"]] == ["USWIN"]
+        assert result["stocks"][0]["company_name"] == "US Winner"
+        assert result["stocks"][0]["price_sparkline_data"] == [1.0, 1.1]
+        assert result["stocks"][0]["rs_sparkline_data"] == [1.0, 1.2]
+    finally:
+        db_session.rollback()
+        db_session.close()
+
+
+def test_get_group_history_hydrates_constituents_from_feature_run_scan(monkeypatch):
+    service = _make_group_rank_service()
+    db_session = _make_group_detail_session()
+    group = f"TEST_GROUP_UNIT_{uuid4().hex}"
+    current_date = date(2026, 6, 24)
+
+    try:
+        db_session.add(
+            IBDGroupRank(
+                market="US",
+                industry_group=group,
+                date=current_date,
+                rank=1,
+                avg_rs_rating=91.0,
+                median_rs_rating=90.0,
+                weighted_avg_rs_rating=92.0,
+                rs_std_dev=2.0,
+                num_stocks=1,
+                num_stocks_rs_above_80=1,
+                top_symbol="FSTORE",
+                top_rs_rating=96.0,
+            )
+        )
+        db_session.add(
+            FeatureRun(
+                id=77,
+                as_of_date=current_date,
+                run_type="daily_snapshot",
+                status="published",
+                published_at=datetime(2026, 6, 24, 21, 0, 0),
+                config_json={"universe": {"market": "US"}},
+            )
+        )
+        db_session.add_all(
+            [
+                Scan(
+                    scan_id="feature-us-scan",
+                    status="completed",
+                    universe_market="US",
+                    completed_at=datetime(2026, 6, 24, 22, 0, 0),
+                    feature_run_id=77,
+                ),
+                StockUniverse(symbol="FSTORE", name="Feature Store Inc.", market="US"),
+                StockFeatureDaily(
+                    run_id=77,
+                    symbol="FSTORE",
+                    as_of_date=current_date,
+                    composite_score=88.0,
+                    details_json={
+                        "company_name": "Ignored in favor of universe name",
+                        "current_price": 123.45,
+                        "rs_rating": 96.0,
+                        "rs_rating_1m": 93.0,
+                        "rs_rating_3m": 91.0,
+                        "ibd_industry_group": group,
+                        "price_sparkline_data": [1.0, 1.2],
+                        "rs_sparkline_data": [1.0, 1.3],
+                        "stage": 2,
+                    },
+                ),
+            ]
+        )
+        db_session.commit()
+
+        monkeypatch.setattr(
+            service,
+            "_get_historical_ranks_batch",
+            lambda *_args, **_kwargs: {},
+        )
+
+        result = service.get_group_history(db_session, group, days=30, market="US")
+
+        assert [stock["symbol"] for stock in result["stocks"]] == ["FSTORE"]
+        assert result["stocks"][0]["company_name"] == "Feature Store Inc."
+        assert result["stocks"][0]["price"] == 123.45
+        assert result["stocks"][0]["stage"] == 2
+        assert result["stocks"][0]["price_sparkline_data"] == [1.0, 1.2]
+        assert result["stocks"][0]["rs_sparkline_data"] == [1.0, 1.3]
     finally:
         db_session.rollback()
         db_session.close()
