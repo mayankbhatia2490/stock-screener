@@ -1,6 +1,6 @@
 # Operations Guide
 
-This guide covers live runtime operations for the server-backed app: first-run bootstrap, enabled-market workers, runtime activity, job controls, telemetry, scheduled tasks, and common recovery paths.
+This guide covers live runtime operations for the server-backed app: starting and stopping the stack, first-run bootstrap, resetting to a clean bootstrap, enabled-market workers, runtime activity, job controls, telemetry, scheduled tasks, and common recovery paths.
 
 ## Runtime Model
 
@@ -13,25 +13,58 @@ The live app stores runtime choices in PostgreSQL and runs market work through R
 
 The UI surfaces this through the header status chip and `/operations`.
 
-## Enabled Market Workers
+## Starting the Stack
 
-The default Compose file defines worker services for every supported market, but market-specific workers are behind Compose profiles. Use the helper script to start only the worker profiles required by `ENABLED_MARKETS`:
+All start/stop goes through `scripts/docker-compose-enabled-markets.sh` — a thin wrapper around `docker compose` that derives the right Compose **profiles** from `ENABLED_MARKETS` and forwards every other argument unchanged.
 
-```bash
-ENABLED_MARKETS=US,HK,CN scripts/docker-compose-enabled-markets.sh up -d
-```
-
-For `ENABLED_MARKETS=US,HK,CN`, Docker starts US/HK/CN market job and user scan workers. IN/JP/KR/TW/DE/CA/SG/MY/AU worker containers are not created. The global data-fetch worker listens only to `data_fetch_shared,data_fetch_us,data_fetch_hk,data_fetch_cn`.
-
-Keep the first-run wizard's enabled markets within the deployment `ENABLED_MARKETS` set. To add a market later, update `ENABLED_MARKETS` and recreate the stack:
+**Prerequisites:** Docker (with Compose v2), Python 3.11+ on `PATH` (the wrapper uses it to compute profiles), and a `.env` (or `.env.docker`) holding at least `SERVER_AUTH_PASSWORD` and `ENABLED_MARKETS`.
 
 ```bash
-ENABLED_MARKETS=US,HK,CN,TW scripts/docker-compose-enabled-markets.sh up -d
+# Start (detached), enabling US + four Asian markets
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh up -d
+
+# Foreground (watch logs); Ctrl-C stops
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh up
+
+# Stop and remove containers
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh down
 ```
+
+Open the app at the deployment URL and sign in with `SERVER_AUTH_PASSWORD`. The wrapper prints the resolved `ENABLED_MARKETS` and `COMPOSE_PROFILES` before running.
+
+### Options
+
+| Capability | How |
+|------------|-----|
+| Select market workers | `ENABLED_MARKETS=US,HK,JP,TW,KR` as an env var, or set it in `.env` / `.env.docker`. Default: `US`. |
+| Any Compose subcommand | Forwarded verbatim: `up`, `up -d`, `down`, `pull`, `ps`, `logs -f`, `restart <service>`. |
+| Compose overlays | Append `-f docker-compose.yml -f docker-compose.prod.yml …` for prod/HTTPS/release layers. |
+| Env file | Auto-uses `.env`, then `.env.docker`; override with `--env-file <path>`. |
+| Extra profiles | `COMPOSE_PROFILES=…` is merged with the derived market profiles. |
+| Python interpreter | Pin with `STOCKSCREEN_PYTHON=/path/to/python3.11+` if the default isn't 3.11+. |
+
+### Selecting enabled markets
+
+The base Compose file defines workers for every supported market, but market-specific workers sit behind Compose profiles. The wrapper starts only the profiles required by `ENABLED_MARKETS`.
+
+For `ENABLED_MARKETS=US,HK,JP,TW,KR`, Docker starts the US/HK/JP/TW/KR market-job and user-scan workers; CN/IN/DE/CA/SG/MY/AU containers are not created, and the global data-fetch worker listens only to those markets' `data_fetch_*` queues.
+
+Keep the first-run wizard's enabled markets within the deployment `ENABLED_MARKETS` set. To add a market later, update `ENABLED_MARKETS` and recreate:
+
+```bash
+ENABLED_MARKETS=US,HK,JP,TW,KR,CN scripts/docker-compose-enabled-markets.sh up -d
+```
+
+> **Note:** `down` always tears down **all** market profiles (not just the enabled ones) and auto-adds `--remove-orphans`, so it fully stops the stack regardless of the `ENABLED_MARKETS` value on that line.
 
 ## First-Run Bootstrap
 
-On first launch, choose a primary market and any secondary markets to hydrate in the background. The workspace opens when the primary market is ready; secondary markets continue on their own queues.
+On a fresh (empty) database the app opens to the first-run wizard. Choose a primary market and any secondary markets to hydrate in the background. The workspace opens when the primary market is ready; secondary markets continue on their own queues.
+
+| | |
+|---|---|
+| ![First-run primary-market picker](screenshots/bootstrap-setup.jpg) | ![Staged bootstrap progress](screenshots/bootstrap-progress.jpg) |
+| *Primary-market picker* | *Staged hydration progress* |
 
 Bootstrap stages:
 
@@ -44,6 +77,46 @@ Bootstrap stages:
 7. **Initial autoscan** — publishes the first default-profile scan.
 
 Selecting many enabled markets multiplies this work. On smaller hosts, start with one primary market and add markets after the workspace is ready.
+
+## Reset to a Clean Bootstrap
+
+To re-run the first-run wizard from scratch (e.g. corrupt state, schema reset, or a clean demo), stop the stack, clear DB/cache/scheduler state, and start again. The Postgres directory is **moved, not deleted**, so the reset is reversible.
+
+```bash
+# 1. Stop the stack
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh down
+
+# 2. Preserve the current DB → forces an empty one (this is what re-triggers bootstrap)
+mv docker-data/postgres docker-data/postgres.saved.$(date +%Y%m%d_%H%M%S)
+
+# 3. Drop the Redis volume (Celery broker + results + app cache)
+docker volume rm $(docker volume ls -q | grep '_redis_data$')
+
+# 4. Reset the Celery Beat schedule
+rm -f data/celerybeat-schedule
+
+# 5. Start again — the app opens to the first-run wizard
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh up
+```
+
+| Step | Effect |
+|------|--------|
+| `down` | Stops all containers (and orphans). |
+| `mv docker-data/postgres …saved.<timestamp>` | Empties the live DB while keeping a timestamped backup (e.g. `postgres.saved.20260624_110650`). |
+| `docker volume rm …_redis_data` | Clears the Celery broker/results and the application cache. |
+| `rm -f data/celerybeat-schedule` | Forces the scheduler to rebuild its run state. |
+| `up` | Boots into first-run bootstrap; watch progress on `/operations`. |
+
+> **Warning:** steps 2–4 wipe the live database, cache, and scheduler state, and step 5 re-hydrates **every** enabled market — heavy on large `ENABLED_MARKETS` sets. The data loss is recoverable only from the moved Postgres directory (and any external backups).
+
+**Roll back** to the pre-reset database:
+
+```bash
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh down
+rm -rf docker-data/postgres                                   # discard the fresh bootstrap DB
+mv docker-data/postgres.saved.<timestamp> docker-data/postgres
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh up -d
+```
 
 ## Runtime Activity
 
@@ -58,6 +131,9 @@ Click the chip to open `/operations`.
 
 ## Operations Page
 
+![Operations — per-market activity cards and the job console with cancel controls](screenshots/operations.png)
+*Operations — per-market activity (states, messages, timestamps) above the filterable job console*
+
 The Operations page includes:
 
 - **Market activity** — per-market lifecycle, stage, message, task name, progress, and updated time.
@@ -67,19 +143,16 @@ The Operations page includes:
 - **Lease view** — current external-fetch and market-workload ownership.
 - **Safe cancellation controls** — revoke, scan cancel, force refresh cancel, or queue removal when the backend marks an action as supported.
 
-Use the filters to narrow by state, queue, market, or task text before cancelling anything.
+Use the filters (state, queue, market, task text) to narrow the job console before cancelling anything.
 
 ## Scheduled Tasks
 
-When the tasks feature is enabled, the header settings icon opens **Scheduled Tasks**. The dialog shows:
+When the tasks feature is enabled, the header settings icon opens **Scheduled Tasks**.
 
-- registered task display name and description,
-- schedule description,
-- last run time and duration,
-- last status,
-- run-now action with polling while a task is active.
+![Scheduled Tasks — registered jobs with schedules, last run, and run-now actions](screenshots/scheduled-tasks.png)
+*Scheduled Tasks — registered jobs with schedule, last-run, status, and run-now*
 
-Tasks are feature-gated; deployments without task support do not show this control.
+The dialog shows each task's display name and description, schedule, last run time and duration, last status, and a run-now action (with polling while a task is active). Tasks are feature-gated; deployments without task support do not show this control.
 
 ## Common Recovery Paths
 
@@ -101,6 +174,10 @@ Use `/operations` to confirm whether a live worker owns the task. If no worker o
 ### Job Cancellation Fails
 
 Cancellation is intentionally conservative. If a job has no supported cancel strategy, inspect the queue/worker state first, then restart only the affected worker profile if necessary.
+
+### Bootstrap Won't Re-Trigger
+
+The wizard only appears on an empty database. If a stale DB persists, confirm `docker-data/postgres` was moved/emptied (see [Reset to a Clean Bootstrap](#reset-to-a-clean-bootstrap)) before restarting.
 
 ### API Docs Are Missing
 
