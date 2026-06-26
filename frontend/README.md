@@ -1,159 +1,161 @@
 # Stock Scanner Frontend
 
-React 18 SPA for stock screening, market analysis, assistant workflows, and portfolio tracking.
+React 18/Vite SPA for the live stock screener, static demo shell, market dashboards, scans, stock detail, watchlists, operations, validation, optional themes, and optional assistant workflows.
 
-> Full project overview and screenshots: [Root README](../README.md)
-> Backend docs: [Backend README](../backend/README.md)
-> Development setup: [Development Guide](../docs/DEVELOPMENT.md)
+References:
+
+- [Project overview](../README.md)
+- [Live app guide](../docs/LIVE_APP_GUIDE.md)
+- [Static site guide](../docs/STATIC_SITE.md)
+- [Architecture](../docs/ARCHITECTURE.md)
+- [Backend README](../backend/README.md)
 
 ## Setup
 
 ```bash
-npm install        # Install dependencies
-npm run dev        # Development server on :5173
-npm run build      # Production build
-npm run lint       # ESLint
+npm install
+npm run dev       # Vite dev server on :5173
+npm run build     # production build
+npm run lint      # ESLint
+npm run test:run  # Vitest once
 ```
 
-Requires backend API running on port 8000. See [Backend README](../backend/README.md) for setup.
+The Vite dev server proxies `/api` to `http://127.0.0.1:8000`, so the backend should be running for live-app work.
 
-## Tech Stack
+## Stack
 
 | Library | Purpose |
-|---------|---------|
-| React 18 | UI framework |
-| Vite | Build tool and dev server |
-| Material-UI (MUI) | Component library |
-| TanStack Query | Server state management and data fetching |
-| TanStack Table | Headless table with sorting, filtering, column visibility |
-| TanStack Virtual | Row virtualization for large datasets |
-| lightweight-charts | TradingView-style candlestick charts |
-| Recharts | Area charts, sparklines, breadth visualizations |
-| @hello-pangea/dnd | Drag-and-drop (watchlist ordering, folders) |
-| react-markdown | Markdown rendering in assistant responses |
+|---|---|
+| React 18 + React Router 6 | SPA routing and UI composition |
+| Vite | Dev server and production build |
+| MUI | Component system and icons |
+| TanStack Query | Server state, caching, polling, invalidation |
+| TanStack Table / Virtual | Scan tables and large result lists |
+| Recharts | Sparklines, breadth, exposure, and dashboard charts |
+| lightweight-charts | Candlestick and chart-modal views |
 | axios | HTTP client |
-| react-router-dom | Client-side routing |
-| date-fns | Date formatting and manipulation |
+| date-fns | Date formatting |
+| @hello-pangea/dnd | Watchlist drag/drop |
+| react-markdown | Assistant message rendering |
 
-## Pages
+## App Shape
 
-| Route | Component | Loading | Description |
-|-------|-----------|---------|-------------|
-| `/` | `MarketScanPage` | Eager | Market dashboard with Key Markets, Themes, Watchlists, Stockbee tabs |
-| `/scan` | `ScanPage` | Eager | Multi-screener scanning with 80+ filters and CSV export |
-| `/breadth` | `BreadthPage` | Lazy | StockBee-style breadth indicators and trends |
-| `/groups` | `GroupRankingsPage` | Lazy | IBD industry group rankings with movers |
-| `/themes` | `ThemesPage` | Lazy | AI-powered theme discovery with trending/emerging detection |
-| `/chatbot` | `ChatbotPage` | Lazy | Hermes-backed assistant with streaming, citations, and watchlist actions |
-| `/stock/:symbol` | `StockDetails` | Eager | Individual stock analysis with charts and fundamentals |
+`src/App.jsx` is the route source of truth. User-facing route documentation belongs in the [Live App Guide](../docs/LIVE_APP_GUIDE.md).
+
+Current live routes:
+
+- `/`
+- `/scan`
+- `/breadth`
+- `/groups`
+- `/validation`
+- `/themes` when `features.themes` is enabled
+- `/chatbot` when `features.chatbot` is enabled
+- `/stocks/:ticker`
+- `/operations`
+
+The app also lazy-loads login, first-run bootstrap, and static-mode shells.
 
 ## Project Structure
 
-```
+```text
 src/
-├── main.jsx                     # App entry point
-├── App.jsx                      # Router, theme, providers
-├── index.css                    # Global styles
-├── api/                         # API client modules (one per backend group)
-│   ├── client.js                #   Axios instance with baseURL
-│   ├── scans.js                 #   Scan operations
-│   ├── stocks.js                #   Stock data
-│   ├── breadth.js               #   Market breadth
-│   ├── groups.js                #   Group rankings
-│   ├── themes.js                #   Theme discovery
-│   ├── assistant.js             #   Assistant sessions/messages
-│   ├── userWatchlists.js        #   Watchlist CRUD
-│   ├── userThemes.js            #   User themes
-│   ├── marketScan.js            #   Dashboard scan lists
-│   ├── filterPresets.js         #   Saved filter configs
-│   ├── priceHistory.js          #   Price/chart data
-│   ├── tasks.js                 #   Background task polling
-│   └── cache.js                 #   Cache management
-├── pages/                       # Top-level page components
-│   ├── ScanPage.jsx             #   Bulk scanner
-│   ├── MarketScanPage.jsx       #   Market dashboard (home)
-│   ├── BreadthPage.jsx          #   Market breadth
-│   ├── GroupRankingsPage.jsx    #   Group rankings
-│   ├── ThemesPage.jsx           #   Theme discovery
-│   └── ChatbotPage.jsx          #   Assistant page route
-├── components/                  # Shared and feature components
-│   ├── Layout/                  #   App shell, navigation
-│   ├── Scan/                    #   Scanner UI (filters, results table)
-│   ├── MarketScan/              #   Dashboard cards, watchlist table
-│   ├── Stock/                   #   StockDetails view
-│   ├── Charts/                  #   Chart modal, candlestick charts
-│   ├── AssistantChat/           #   Assistant interface and message rendering
-│   ├── Themes/                  #   Theme rankings, emerging panel
-│   ├── Technical/               #   Technical indicator displays
-│   ├── Settings/                #   App settings
-│   ├── common/                  #   Reusable UI primitives
-│   └── PipelineProgressCard.jsx #   Scan progress indicator
-├── contexts/                    # React contexts
-│   └── PipelineContext.jsx      #   Scan pipeline progress state
-├── hooks/                       # Custom hooks
-│   ├── useChartNavigation.js    #   Keyboard nav for chart modal
-│   ├── useFilterPresets.js      #   Filter preset CRUD
-│   └── ...                      #   Additional feature hooks
-├── config/                      # Static configuration
-│   └── runtimeMode.js           #   Static export mode flags
-└── utils/                       # Pure utility functions
-    ├── colorUtils.js            #   Color calculations
-    ├── filterUtils.js           #   Filter logic helpers
-    └── formatUtils.js           #   Number/date formatting
+  App.jsx                    Router and provider stack
+  main.jsx                   React entry point
+  api/                       Axios client plus backend route modules
+  components/                Shared UI and domain components
+  components/Layout/         App shell, nav, runtime controls
+  contexts/                  Runtime, strategy profile, pipeline, assistant, color mode
+  features/scan/             Scan page containers, filter state, presets
+  features/themes/           Theme page containers and theme-specific UI
+  pages/                     Top-level route components
+  static/                    Static-site shell and read-only pages
+  hooks/                     Reusable UI/data hooks
+  utils/                     Pure formatting/filter/color helpers
+  test/                      Test setup and fixtures
 ```
+
+Keep new feature-heavy code under `features/<area>/` when it has page state, containers, and local helpers. Use `components/` for reusable UI shared across pages.
+
+## Provider And State Rules
+
+Provider stack lives in `App.jsx`:
+
+```text
+QueryClient -> ColorMode -> Runtime -> StrategyProfile -> Router
+```
+
+`PipelineProvider` wraps the routed app only when theme features are enabled.
+
+Guidelines:
+
+- Server data belongs in TanStack Query.
+- Context is only for global UI/runtime state.
+- Local component state is preferred for local UI controls.
+- Avoid copying query data into context or module globals.
+- Feature availability comes from runtime capabilities, not hard-coded frontend assumptions.
 
 ## API Client Convention
 
-The axios client in `api/client.js` sets `baseURL` to include the `/api` prefix:
-- **Local dev**: `baseURL = 'http://localhost:8000/api'`
-- **Docker**: `baseURL = '/api'` (set via `VITE_API_URL` build arg)
+`src/api/client.js` sets the axios `baseURL`.
 
-All API paths must start with `/v1/...`, never `/api/v1/...`:
+| Mode | Base URL |
+|---|---|
+| Vite dev | `/api`, proxied to `127.0.0.1:8000` |
+| Docker/nginx | `/api`, proxied by nginx to backend |
+| Custom build | `VITE_API_URL` override |
 
-```javascript
-// CORRECT — path without /api prefix
-const response = await apiClient.get('/v1/themes/rankings');
-
-// WRONG — double prefix in Docker: /api/api/v1/...
-const response = await apiClient.get('/api/v1/themes/rankings');
-```
-
-For modules with a `BASE_PATH` constant, same rule:
+API modules must use `/v1/...` paths because the base URL already includes `/api`.
 
 ```javascript
-const BASE_PATH = '/v1/user-themes';     // correct
-const BASE_PATH = '/api/v1/user-themes'; // wrong
+// Correct
+apiClient.get('/v1/themes/rankings');
+
+// Wrong in Docker: becomes /api/api/v1/...
+apiClient.get('/api/v1/themes/rankings');
 ```
 
-## Patterns
+Themes requests receive a longer timeout in the shared client. Normal API requests use the default timeout.
 
-### Data Fetching
+## Routing And Feature Gates
 
-TanStack Query with 5-minute stale time and `placeholderData` for smooth transitions between loading states. Cache time is 30 minutes. Configured once in `App.jsx`.
+Routes are lazy-loaded with `React.lazy()` and `<Suspense>`.
 
-### Theming
+Feature-gated UI should check runtime capabilities before rendering nav items, controls, or routes. Current gated surfaces include:
 
-Dark mode by default. Dense 24px table rows. Compact 11-14px typography. Light mode supported via `ColorModeContext` toggle. Theme tokens defined in `App.jsx` → `getDesignTokens()`.
+- Themes
+- Assistant/chatbot
+- Task controls
+- API docs links
 
-### Code Splitting
+Server login and bootstrap flows are handled by `RuntimeContext` and the app-level guards in `App.jsx`.
 
-`ScanPage`, `MarketScanPage`, and `StockDetails` are eagerly loaded (most frequently accessed). `BreadthPage`, `GroupRankingsPage`, `ThemesPage`, and `ChatbotPage` are lazy-loaded with `React.lazy()` and wrapped in `<Suspense>`.
+## Static Mode
 
-### State Management
+The static shell under `src/static/` reads JSON bundles from `/static-data/*` and must not call live `/api` endpoints. See [Static Site Guide](../docs/STATIC_SITE.md) for the read-only behavior contract.
 
-No global store. TanStack Query handles all server state. `useState` for local UI state. Two contexts:
-- `PipelineContext` — scan pipeline progress tracking
-- `ColorModeContext` — dark/light theme toggle
+## Styling
 
-### Adding a Page
+- MUI theme tokens are defined in `App.jsx`.
+- Dark mode is the default; light mode is supported.
+- Keep operational screens dense and scannable.
+- Prefer MUI icon buttons and compact controls over explanatory text.
+- Reuse existing table, chart, modal, and layout patterns before adding new primitives.
 
-1. Create component in `pages/`
-2. Add route in `App.jsx` (eager import or `React.lazy()`)
-3. Add navigation item in `components/Layout/`
-4. Create API module in `api/` if new endpoints are needed
+## Testing
 
-### Adding an API Endpoint
+```bash
+npm run test:run
+npm run lint
+npm run build
+npm run test:smoke
+```
 
-1. Create or update module in `api/` (e.g., `api/myFeature.js`)
-2. Import and use `apiClient` from `api/client.js`
-3. Use `/v1/...` paths (never `/api/v1/...`)
+Use focused Vitest files while iterating:
+
+```bash
+npm run test:run -- src/pages/OperationsPage.test.jsx
+npm run test:run -- src/features/scan/filterOptions.test.js
+```
+
+Smoke tests use Playwright and expect a reachable app/backend according to the test target.
