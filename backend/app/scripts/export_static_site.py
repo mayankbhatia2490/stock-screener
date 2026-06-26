@@ -86,6 +86,13 @@ def _upsert_feature_run_pointer(*, pointer_key: str, run_id: int) -> None:
         db.commit()
 
 
+def _compute_static_market_exposure(*, as_of_date: date, market: str) -> dict[str, Any]:
+    from app.services.market_exposure_service import compute_and_store
+
+    with SessionLocal() as db:
+        return compute_and_store(market, as_of_date, db)
+
+
 def _snapshot_publishable(snapshot: dict[str, Any]) -> bool:
     status = snapshot.get("status")
     if status == "published":
@@ -389,6 +396,28 @@ def _run_daily_refresh(
             if market is not None
             else price_refresh_results
         )
+
+        market_exposure: dict[str, Any] = {}
+        for selected_market in selected_markets:
+            market_as_of = as_of_by_market[selected_market]
+            try:
+                exposure_result = _compute_static_market_exposure(
+                    as_of_date=market_as_of,
+                    market=selected_market,
+                )
+            except Exception as exc:  # pragma: no cover - defensive diagnostics path
+                exposure_result = {
+                    "error": str(exc),
+                    "market": selected_market,
+                    "date": market_as_of.isoformat(),
+                }
+            market_exposure[selected_market] = exposure_result
+            if isinstance(exposure_result, dict) and exposure_result.get("error"):
+                warnings.append(
+                    f"Static export market {selected_market} exposure not stored "
+                    f"for {market_as_of.isoformat()}: {exposure_result['error']}."
+                )
+        results["market_exposure"] = market_exposure
 
         feature_snapshots: dict[str, Any] = {}
         for selected_market in selected_markets:

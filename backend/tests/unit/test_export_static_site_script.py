@@ -24,6 +24,19 @@ def test_static_export_markets_match_market_registry():
     assert export_script.STATIC_EXPORT_MARKETS == market_registry.supported_market_codes()
 
 
+@pytest.fixture(autouse=True)
+def stub_static_market_exposure(monkeypatch):
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: {
+            "market": market,
+            "date": as_of_date.isoformat(),
+            "exposure_score": 50.0,
+        },
+    )
+
+
 def test_ensure_group_rank_history_uses_market_calendar_for_non_us_market(monkeypatch):
     query = MagicMock()
     query.filter.return_value = query
@@ -208,6 +221,73 @@ def test_run_daily_refresh_uses_resolved_tracked_ibd_csv_path(monkeypatch, tmp_p
     assert results["ibd_seed_refresh"] == {
         "csv_path": str(resolved_csv),
         "loaded": 10105,
+    }
+
+
+def test_run_daily_refresh_computes_market_exposure_before_snapshot(monkeypatch):
+    calls: list[str] = []
+
+    @contextmanager
+    def fake_session():
+        yield object()
+
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 6, 25),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}:{as_of_date.isoformat()}")
+        or {"task": "price_refresh"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: calls.append(f"exposure:{market}:{as_of_date.isoformat()}")
+        or {"market": market, "date": as_of_date.isoformat(), "exposure_score": 42.0},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: calls.append(f"snapshot:{kwargs['market']}:{kwargs['as_of_date_str']}")
+            or {"run_id": 77, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda db, csv_path=None: 10105,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda *, as_of_date, market: {"status": "skipped", "market": market},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: {"status": "skipped"},
+    )
+    monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+
+    results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert warnings == []
+    assert calls == [
+        "price:US:2026-06-25",
+        "exposure:US:2026-06-25",
+        "snapshot:US:2026-06-25",
+    ]
+    assert results["market_exposure"] == {
+        "US": {"market": "US", "date": "2026-06-25", "exposure_score": 42.0}
     }
 
 
