@@ -69,7 +69,7 @@ On a fresh (empty) database the app opens to the first-run wizard. Choose a prim
 Bootstrap stages:
 
 1. **Universe refresh** — seeds the market symbol list. US uses S&P 500 / Russell / NDX via `refresh_stock_universe`; HK / IN / JP / KR / TW / CN / CA / DE / SG / MY / AU use official exchange feeds via `refresh_official_market_universe`.
-2. **Benchmark + price refresh** — imports the GitHub daily price bundle first, accepts recent stale bundles during bootstrap, then live-fetches missing/current-session gaps (`7d` top-up for stale symbols, `2y` for no-history symbols).
+2. **Benchmark + price refresh** — imports the GitHub daily price bundle first, accepts recent stale bundles during bootstrap, then live-fetches missing/current-session gaps (`7d` top-up for stale symbols, `2y` for no-history symbols). Under `live_only` this stage skips the bundle and fetches live — see [Market Data Source Mode](#market-data-source-mode).
 3. **Fundamentals refresh** — loads quarterly and annual financials.
 4. **Breadth calculation** — computes StockBee-style advance/decline data with gap-fill.
 5. **Group rankings** — computes IBD-style relative strength group ranks.
@@ -77,6 +77,48 @@ Bootstrap stages:
 7. **Initial autoscan** — publishes the first default-profile scan.
 
 Selecting many enabled markets multiplies this work. On smaller hosts, start with one primary market and add markets after the workspace is ready.
+
+## Market Data Source Mode
+
+`MARKET_DATA_SOURCE_MODE` controls **where market data is sourced from**. It is a Pydantic setting read once at process startup by every app and worker container (from `.env` / `.env.docker`); there is no runtime toggle.
+
+| Value | Behavior |
+|-------|----------|
+| `github_first` *(default)* | Pull prebuilt data from the project's GitHub release bundles first, then live-fetch only what's missing or stale. |
+| `live_only` | Skip the GitHub bundles; fetch live from yfinance / Finviz — **except IBD classification, which has no live source and simply stops refreshing** (see below). |
+
+The valid values are `github_first` and `live_only` (not `live`).
+
+**What `github_first` pulls from GitHub** — published release bundles are tried before live providers, both during bootstrap and on the weekly schedule:
+
+- **Daily prices** — a per-market 2-year OHLCV bundle (release tag `daily-price-data`). Imported when the manifest is fresh (within ~4 days) and the checksum matches, then live top-ups fill stale / no-history symbols.
+- **Weekly universe** — `refresh_stock_universe` / `refresh_official_market_universe` check the GitHub weekly-reference bundle first; if current it no-ops, if missing/stale it falls back to live universe sources.
+- **Weekly fundamentals** — `refresh_all_fundamentals` tries the GitHub weekly-reference bundle before the live provider path.
+- **Weekly IBD classification** — syncs the GitHub `ibd-classification-data` bundle (Sunday, after the weekly classifier publishes). **GitHub-only: there is no live provider for IBD classification**, and it is how non-US markets without a curated CSV get IBD coverage.
+
+For prices, universe, and fundamentals, any GitHub miss (missing/stale manifest, checksum mismatch, network error) silently falls back to live, so `github_first` is safe to leave on; its benefit is speed and fewer provider rate-limit hits (the heavy history downloads as one bundle instead of symbol-by-symbol). This is also why, under `github_first`, some Celery jobs still reach GitHub *after* bootstrap — expected behavior, see [issue #266](https://github.com/xang1234/stock-screener/issues/266).
+
+`live_only` routes prices, universe, and fundamentals through live providers. **IBD classification is the exception**: it has no live source, so under `live_only` its weekly sync is a clean no-op and classifications simply stop updating — mainly affecting non-US markets, whose IBD coverage comes entirely from the GitHub bundle. Under `github_first`, the IBD sync no-ops only when the bundle is already `up_to_date`; a genuine GitHub miss (missing/stale manifest, checksum mismatch, network error) instead **fails the IBD sync and raises an alert** (unlike prices/universe/fundamentals, which quietly fall back to live), leaving the prior classifications in place until the next successful run.
+
+**Changing it on a running app.** The value is baked into the containers at startup, so a running stack must be **stopped** for the change to take effect — recreating alone is not enough:
+
+```bash
+# 1. Put it in the env file you pass via --env-file — Compose interpolates the
+#    x-app-env entry from there: .env for the base stack, .env.docker for the
+#    prod overlay (the README / INSTALL_DOCKER prod commands already pass
+#    --env-file .env.docker). Note: that environment: entry outranks the prod
+#    overlay's own env_file, so setting it ONLY in .env.docker without passing
+#    --env-file will not take effect.
+#      MARKET_DATA_SOURCE_MODE=live_only      # or github_first
+
+# 2. Stop the stack — running containers will not pick up the change
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh down
+
+# 3. Start again with the new value
+ENABLED_MARKETS=US,HK,JP,TW,KR scripts/docker-compose-enabled-markets.sh up -d
+```
+
+No cache flush is needed — the setting changes the *fetch strategy*, not data already stored. Switching to `live_only` keeps existing data and refreshes prices, universe, and fundamentals live going forward (IBD classification will not refresh); switching back to `github_first` resumes bundle syncing on the next refresh.
 
 ## Reset to a Clean Bootstrap
 
