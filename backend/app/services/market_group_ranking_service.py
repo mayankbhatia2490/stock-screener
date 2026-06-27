@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 from app.domain.common.query import FilterSpec, SortOrder, SortSpec
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
-from app.services.group_constituents import (
-    group_row_to_constituent_stock,
+from app.services.group_detail_payloads import (
+    constituent_stock_payloads_from_group_rows,
     scan_result_item_to_group_row,
 )
 from app.services.redis_pool import get_redis_client
@@ -345,17 +345,7 @@ class MarketGroupRankingService:
             for payload in (self.extract_group_row_payload(row) for row in rows)
             if payload.get("ibd_industry_group") == industry_group
         ]
-        current_rows.sort(
-            key=lambda row: (
-                row.get("rs_rating") if row.get("rs_rating") is not None else float("-inf"),
-                row.get("composite_score") if row.get("composite_score") is not None else float("-inf"),
-            ),
-            reverse=True,
-        )
-        stocks = [
-            group_row_to_constituent_stock(row)
-            for row in current_rows
-        ]
+        stocks = constituent_stock_payloads_from_group_rows(current_rows)
 
         return {
             "industry_group": industry_group,

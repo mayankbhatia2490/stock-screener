@@ -1,0 +1,130 @@
+"""Resolve group constituent stocks from feature-run or legacy scan storage."""
+
+from __future__ import annotations
+
+import logging
+from datetime import date
+from typing import Any, Callable
+
+from sqlalchemy import desc, or_
+from sqlalchemy.orm import Session
+
+from app.infra.db.models.feature_store import FeatureRun
+from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
+from app.infra.db.repositories.scan_result_repo import SqlScanResultRepository
+from app.models.scan_result import Scan
+from app.services.group_detail_payloads import (
+    constituent_stock_payloads_from_scan_items,
+)
+
+logger = logging.getLogger(__name__)
+
+FeatureRepoFactory = Callable[[Session], SqlFeatureStoreRepository]
+ScanRepoFactory = Callable[[Session], SqlScanResultRepository]
+
+
+class GroupConstituentSource:
+    """Read group constituents while keeping source-selection out of services."""
+
+    def __init__(
+        self,
+        *,
+        feature_repo_factory: FeatureRepoFactory = SqlFeatureStoreRepository,
+        scan_repo_factory: ScanRepoFactory = SqlScanResultRepository,
+    ) -> None:
+        self._feature_repo_factory = feature_repo_factory
+        self._scan_repo_factory = scan_repo_factory
+
+    def get_constituents(
+        self,
+        db: Session,
+        industry_group: str,
+        *,
+        market: str = "US",
+        as_of_date: date | None = None,
+    ) -> list[dict[str, Any]]:
+        latest_feature_scan = self._get_latest_feature_scan_for_market(
+            db,
+            market=market,
+            as_of_date=as_of_date,
+        )
+        if latest_feature_scan and latest_feature_scan.feature_run_id is not None:
+            peers = self._feature_repo_factory(db).get_peers_by_industry_for_run(
+                latest_feature_scan.feature_run_id,
+                industry_group,
+                include_sparklines=True,
+            )
+            stocks = constituent_stock_payloads_from_scan_items(peers)
+            logger.info(
+                "Found %d feature-run stocks for group %s (%s)",
+                len(stocks),
+                industry_group,
+                market,
+            )
+            return stocks
+
+        latest_scan = self._get_latest_legacy_scan_for_market(db, market=market)
+        if not latest_scan:
+            logger.warning("No completed scans found for constituent stocks")
+            return []
+
+        peers = self._scan_repo_factory(db).get_peers_by_industry(
+            latest_scan.scan_id,
+            industry_group,
+        )
+        stocks = constituent_stock_payloads_from_scan_items(peers)
+        logger.info(
+            "Found %d legacy scan stocks for group %s (%s)",
+            len(stocks),
+            industry_group,
+            market,
+        )
+        return stocks
+
+    @staticmethod
+    def _scan_market_filter(normalized_market: str):
+        if normalized_market == "US":
+            return or_(Scan.universe_market == "US", Scan.universe_market.is_(None))
+        return Scan.universe_market == normalized_market
+
+    def _get_latest_feature_scan_for_market(
+        self,
+        db: Session,
+        *,
+        market: str,
+        as_of_date: date | None,
+    ) -> Scan | None:
+        normalized_market = str(market or "US").strip().upper()
+        query = db.query(Scan).filter(
+            Scan.status == "completed",
+            self._scan_market_filter(normalized_market),
+        )
+        query = query.join(FeatureRun, Scan.feature_run_id == FeatureRun.id).filter(
+            Scan.feature_run_id.isnot(None),
+            FeatureRun.status == "published",
+        )
+        if as_of_date is not None:
+            query = query.filter(FeatureRun.as_of_date <= as_of_date)
+        return query.order_by(
+            desc(FeatureRun.as_of_date),
+            desc(Scan.completed_at),
+            desc(Scan.id),
+        ).first()
+
+    def _get_latest_legacy_scan_for_market(
+        self,
+        db: Session,
+        *,
+        market: str,
+    ) -> Scan | None:
+        normalized_market = str(market or "US").strip().upper()
+        query = db.query(Scan).filter(
+            Scan.status == "completed",
+            self._scan_market_filter(normalized_market),
+        )
+        return query.filter(
+            Scan.feature_run_id.is_(None),
+        ).order_by(
+            desc(Scan.completed_at),
+            desc(Scan.id),
+        ).first()

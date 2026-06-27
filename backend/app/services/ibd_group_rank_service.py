@@ -12,18 +12,14 @@ from typing import Any, Optional, Dict, List
 from datetime import datetime, date, timedelta
 import pandas as pd
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, desc, or_
+from sqlalchemy import and_, desc
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..config import settings
-from ..infra.db.models.feature_store import FeatureRun
-from ..infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
-from ..infra.db.repositories.scan_result_repo import SqlScanResultRepository
 from ..models.industry import IBDGroupRank
 from ..models.stock_universe import StockUniverse
-from ..models.scan_result import Scan
 from ..domain.providers.price_symbol_support import is_unsupported_yahoo_price_symbol
-from .group_constituents import scan_result_items_to_constituent_stocks
+from .group_constituent_source import GroupConstituentSource
 from .group_rank_cache_policy import GroupRankCacheRequirement
 from .ibd_industry_service import IBDIndustryService
 from .price_cache_service import PriceCacheService
@@ -88,11 +84,15 @@ class IBDGroupRankService:
         price_cache: PriceCacheService,
         benchmark_cache: BenchmarkCacheService,
         rs_calculator: RelativeStrengthCalculator | None = None,
+        group_constituent_source: GroupConstituentSource | None = None,
     ):
         """Initialize the service."""
         self.price_cache = price_cache
         self.benchmark_cache = benchmark_cache
         self.rs_calculator = rs_calculator or RelativeStrengthCalculator()
+        self.group_constituent_source = (
+            group_constituent_source or GroupConstituentSource()
+        )
 
     def calculate_group_rankings(
         self,
@@ -767,126 +767,15 @@ class IBDGroupRankService:
             List of stocks with RS, earnings, and sales metrics
         """
         try:
-            latest_feature_scan = self._get_latest_feature_scan_for_market(
+            return self.group_constituent_source.get_constituents(
                 db,
+                industry_group,
                 market=market,
                 as_of_date=as_of_date,
             )
-            if latest_feature_scan and latest_feature_scan.feature_run_id is not None:
-                stocks = self._get_feature_run_constituent_stocks(
-                    db,
-                    run_id=latest_feature_scan.feature_run_id,
-                    industry_group=industry_group,
-                )
-                logger.info(
-                    "Found %d feature-run stocks for group %s (%s)",
-                    len(stocks),
-                    industry_group,
-                    market,
-                )
-                return stocks
-
-            latest_scan = self._get_latest_legacy_scan_for_market(
-                db,
-                market=market,
-            )
-
-            if not latest_scan:
-                logger.warning("No completed scans found for constituent stocks")
-                return []
-
-            stocks = self._get_legacy_constituent_stocks(
-                db,
-                scan_id=latest_scan.scan_id,
-                industry_group=industry_group,
-            )
-
-            logger.info(
-                "Found %d legacy scan stocks for group %s (%s)",
-                len(stocks),
-                industry_group,
-                market,
-            )
-            return stocks
-
         except Exception as e:
             logger.error("Error fetching constituent stocks: %s", e, exc_info=True)
             return []
-
-    @staticmethod
-    def _scan_market_filter(normalized_market: str):
-        if normalized_market == "US":
-            return or_(Scan.universe_market == "US", Scan.universe_market.is_(None))
-        return Scan.universe_market == normalized_market
-
-    def _get_latest_feature_scan_for_market(
-        self,
-        db: Session,
-        *,
-        market: str,
-        as_of_date: date | None,
-    ) -> Scan | None:
-        normalized_market = str(market or "US").strip().upper()
-        query = db.query(Scan).filter(
-            Scan.status == "completed",
-            self._scan_market_filter(normalized_market),
-        )
-        query = query.join(FeatureRun, Scan.feature_run_id == FeatureRun.id).filter(
-            Scan.feature_run_id.isnot(None),
-            FeatureRun.status == "published",
-        )
-        if as_of_date is not None:
-            query = query.filter(FeatureRun.as_of_date <= as_of_date)
-        return query.order_by(
-            desc(FeatureRun.as_of_date),
-            desc(Scan.completed_at),
-            desc(Scan.id),
-        ).first()
-
-    def _get_latest_legacy_scan_for_market(
-        self,
-        db: Session,
-        *,
-        market: str,
-    ) -> Scan | None:
-        normalized_market = str(market or "US").strip().upper()
-        query = db.query(Scan).filter(
-            Scan.status == "completed",
-            self._scan_market_filter(normalized_market),
-        )
-        return query.filter(
-            Scan.feature_run_id.is_(None),
-        ).order_by(
-            desc(Scan.completed_at),
-            desc(Scan.id),
-        ).first()
-
-    def _get_feature_run_constituent_stocks(
-        self,
-        db: Session,
-        *,
-        run_id: int,
-        industry_group: str,
-    ) -> List[Dict]:
-        peers = SqlFeatureStoreRepository(db).get_peers_by_industry_for_run(
-            run_id,
-            industry_group,
-            include_sparklines=True,
-        )
-        return scan_result_items_to_constituent_stocks(peers)
-
-    def _get_legacy_constituent_stocks(
-        self,
-        db: Session,
-        *,
-        scan_id: str,
-        industry_group: str,
-    ) -> List[Dict]:
-        peers = SqlScanResultRepository(db).get_peers_by_industry(
-            scan_id,
-            industry_group,
-        )
-        return scan_result_items_to_constituent_stocks(peers)
 
     def get_rank_movers(
         self,
