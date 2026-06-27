@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from inspect import signature
+from importlib import import_module
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -14,7 +15,6 @@ from app.services.group_ranking_history import (
     apply_group_rank_changes,
     build_group_detail_payload,
     build_group_details,
-    feature_run_market,
     select_group_history_runs,
     select_market_run_series,
 )
@@ -59,6 +59,13 @@ def test_select_market_run_series_filters_market_dedupes_dates_and_honors_min_ru
         assert [run.id for run in runs] == [5, 4, 1]
     finally:
         engine.dispose()
+
+
+def test_feature_run_market_is_not_owned_by_group_history_module():
+    module = import_module("app.domain.feature_store.run_metadata")
+
+    assert not hasattr(history_module, "feature_run_market")
+    assert module.feature_run_market(_run(1, date(2026, 4, 4), "HK")) == "HK"
 
 
 def test_select_group_history_runs_includes_visible_history_and_change_offsets():
@@ -165,7 +172,8 @@ def test_build_group_detail_payload_uses_shared_schema_history_and_stock_sorting
         {"date": "2026-04-09", "rank": 5, "avg_rs_rating": 88.0, "num_stocks": 2},
     ]
     assert [stock["symbol"] for stock in payload["stocks"]] == ["AAA", "BBB"]
-    assert feature_run_market(current) == "HK"
+    module = import_module("app.domain.feature_store.run_metadata")
+    assert module.feature_run_market(current) == "HK"
 
 
 def test_build_group_details_indexes_history_once_per_run(monkeypatch):

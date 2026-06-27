@@ -283,7 +283,7 @@ def test_get_group_history_loads_historical_rows_without_sparklines(monkeypatch)
     )
 
     assert detail["current_rank"] == 1
-    assert load_calls == [(3, True), (3, False), (2, False)]
+    assert load_calls == [(3, True), (2, False)]
 
 
 def test_market_group_ranking_service_loads_rrg_runs_once_and_returns_ascending_series(monkeypatch):

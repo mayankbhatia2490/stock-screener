@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis.patterns.rs_line import blue_dot_series, compute_rs_line
 from app.domain.common.query import FilterSpec, SortOrder, SortSpec
+from app.domain.feature_store.run_metadata import feature_run_market
 from app.domain.markets.catalog import get_market_catalog
 from app.domain.markets.key_markets import key_market_instruments
 from app.domain.scanning.default_filters import (
@@ -34,7 +35,6 @@ from app.services.group_ranking_history import (
     GROUP_RANK_CHANGE_OFFSETS,
     apply_group_rank_changes,
     build_group_details,
-    feature_run_market,
     select_group_history_runs,
     select_market_run_series,
 )
@@ -1137,13 +1137,14 @@ class StaticSiteExportService:
             history_runs=STATIC_GROUP_HISTORY_RUNS,
             offsets=GROUP_RANK_CHANGE_OFFSETS,
         )
-        historical_rankings = {
-            run.id: self._compute_group_rankings_from_rows(
+        historical_rankings = {latest_run.id: rankings}
+        for run in history_runs:
+            if run.id in historical_rankings:
+                continue
+            historical_rankings[run.id] = self._compute_group_rankings_from_rows(
                 self._load_scan_export_rows(db, run, include_sparklines=False),
                 ranking_date=run.as_of_date,
             )
-            for run in history_runs
-        }
         apply_group_rank_changes(
             rankings,
             market_runs,

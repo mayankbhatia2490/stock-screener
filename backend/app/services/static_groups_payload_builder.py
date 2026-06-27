@@ -14,7 +14,7 @@ class StaticGroupsSnapshot:
     rankings: list[dict[str, Any]]
     movers: dict[str, Any]
     group_details: dict[str, Any]
-    market: str | None = None
+    market: str
 
 
 def build_static_groups_payload(
@@ -48,6 +48,5 @@ def build_static_groups_payload(
             "group_details": snapshot.group_details,
         },
     }
-    if snapshot.market is not None:
-        payload["market"] = snapshot.market
+    payload["market"] = snapshot.market
     return payload

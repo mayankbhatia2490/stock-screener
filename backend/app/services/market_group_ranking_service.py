@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.domain.common.query import FilterSpec, SortOrder, SortSpec
+from app.domain.feature_store.run_metadata import feature_run_market
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
 from app.services.group_detail_payloads import scan_result_item_to_group_row
@@ -24,7 +25,6 @@ from app.services.group_ranking_history import (
     GROUP_RANK_CHANGE_OFFSETS,
     apply_group_rank_changes,
     build_group_detail_payload,
-    feature_run_market,
     group_rank_map,
     select_group_history_runs,
     select_market_run_series,
@@ -323,13 +323,14 @@ class MarketGroupRankingService:
             cutoff_date=cutoff_date,
             min_runs=max(GROUP_RANK_CHANGE_OFFSETS.values()) + 1,
         )
-        historical_rankings = {
-            run.id: self.compute_group_rankings_from_rows(
+        historical_rankings = {latest_run.id: rankings}
+        for run in market_runs:
+            if run.id in historical_rankings:
+                continue
+            historical_rankings[run.id] = self.compute_group_rankings_from_rows(
                 self._load_run_rows(db, run.id, include_sparklines=False),
                 ranking_date=run.as_of_date,
             )
-            for run in market_runs
-        }
         apply_group_rank_changes(
             [current],
             market_runs,

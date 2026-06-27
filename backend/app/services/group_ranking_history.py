@@ -9,6 +9,9 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.domain.feature_store.run_metadata import (
+    feature_run_market as _feature_run_market,
+)
 from app.infra.db.models.feature_store import FeatureRun
 from app.schemas.groups import GroupDetailResponse, HistoricalDataPoint
 from app.services.group_detail_payloads import constituent_stock_payloads_from_group_rows
@@ -19,18 +22,6 @@ GROUP_RANK_CHANGE_OFFSETS = {
     "3m": 63,
     "6m": 126,
 }
-
-
-def feature_run_market(run: FeatureRun) -> str | None:
-    config = run.config_json or {}
-    if not isinstance(config, dict):
-        return None
-    universe = config.get("universe")
-    if isinstance(universe, dict):
-        market = universe.get("market")
-        if market:
-            return str(market).upper()
-    return None
 
 
 def group_rank_map(rankings: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
@@ -68,7 +59,7 @@ def select_market_run_series(
     for run in query.all():
         if max_runs is not None and len(market_runs) >= max_runs:
             break
-        if feature_run_market(run) != normalized_market:
+        if _feature_run_market(run) != normalized_market:
             continue
         if run.as_of_date in seen_dates:
             continue

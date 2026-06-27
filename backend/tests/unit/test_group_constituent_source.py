@@ -46,7 +46,7 @@ def _add_scan(
     )
 
 
-def _add_feature_run(session, *, run_id: int, as_of_date: date):
+def _add_feature_run(session, *, run_id: int, as_of_date: date, market: str = "US"):
     session.add(
         FeatureRun(
             id=run_id,
@@ -54,7 +54,7 @@ def _add_feature_run(session, *, run_id: int, as_of_date: date):
             run_type="daily_snapshot",
             status="published",
             published_at=datetime.combine(as_of_date, datetime.min.time()),
-            config_json={"universe": {"market": "US"}},
+            config_json={"universe": {"market": market}},
         )
     )
 
@@ -104,19 +104,12 @@ def _add_legacy_scan_result(
     )
 
 
-def test_feature_scan_with_empty_group_does_not_fallback_to_legacy():
+def test_feature_run_with_empty_group_does_not_fallback_to_legacy():
     db = _make_session()
     group = "Software"
     as_of_date = date(2026, 6, 24)
     try:
         _add_feature_run(db, run_id=88, as_of_date=as_of_date)
-        _add_scan(
-            db,
-            scan_id="feature-us-scan-empty-group",
-            market="US",
-            completed_at=datetime(2026, 6, 24, 22, 0, 0),
-            feature_run_id=88,
-        )
         _add_feature_row(
             db,
             run_id=88,
@@ -146,6 +139,53 @@ def test_feature_scan_with_empty_group_does_not_fallback_to_legacy():
         )
 
         assert items == ()
+    finally:
+        db.rollback()
+        db.close()
+
+
+def test_feature_run_market_metadata_controls_feature_constituent_source():
+    db = _make_session()
+    group = "Software"
+    as_of_date = date(2026, 6, 24)
+    try:
+        _add_feature_run(db, run_id=88, as_of_date=as_of_date, market="HK")
+        _add_scan(
+            db,
+            scan_id="mismatched-feature-scan",
+            market="US",
+            completed_at=datetime(2026, 6, 24, 22, 0, 0),
+            feature_run_id=88,
+        )
+        _add_feature_row(
+            db,
+            run_id=88,
+            symbol="HKROW",
+            as_of_date=as_of_date,
+            industry_group=group,
+        )
+        _add_scan(
+            db,
+            scan_id="legacy-us-scan",
+            market="US",
+            completed_at=datetime(2026, 6, 23, 22, 0, 0),
+        )
+        _add_legacy_scan_result(
+            db,
+            scan_id="legacy-us-scan",
+            symbol="LEGACY",
+            industry_group=group,
+        )
+        db.commit()
+
+        items = GroupConstituentSource().get_constituent_items(
+            db,
+            group,
+            market="US",
+            as_of_date=as_of_date,
+        )
+
+        assert [item.symbol for item in items] == ["LEGACY"]
     finally:
         db.rollback()
         db.close()

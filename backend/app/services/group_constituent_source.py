@@ -9,6 +9,7 @@ from typing import Callable
 from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
+from app.domain.feature_store.run_metadata import feature_run_market
 from app.domain.scanning.models import ScanResultItemDomain
 from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
@@ -41,14 +42,14 @@ class GroupConstituentSource:
         market: str = "US",
         as_of_date: date | None = None,
     ) -> tuple[ScanResultItemDomain, ...]:
-        latest_feature_scan = self._get_latest_feature_scan_for_market(
+        latest_feature_run = self._get_latest_feature_run_for_market(
             db,
             market=market,
             as_of_date=as_of_date,
         )
-        if latest_feature_scan and latest_feature_scan.feature_run_id is not None:
+        if latest_feature_run is not None:
             peers = self._feature_repo_factory(db).get_peers_by_industry_for_run(
-                latest_feature_scan.feature_run_id,
+                latest_feature_run.id,
                 industry_group,
                 include_sparklines=True,
             )
@@ -87,29 +88,29 @@ class GroupConstituentSource:
             return or_(Scan.universe_market == "US", Scan.universe_market.is_(None))
         return Scan.universe_market == normalized_market
 
-    def _get_latest_feature_scan_for_market(
+    def _get_latest_feature_run_for_market(
         self,
         db: Session,
         *,
         market: str,
         as_of_date: date | None,
-    ) -> Scan | None:
+    ) -> FeatureRun | None:
         normalized_market = str(market or "US").strip().upper()
-        query = db.query(Scan).filter(
-            Scan.status == "completed",
-            self._scan_market_filter(normalized_market),
-        )
-        query = query.join(FeatureRun, Scan.feature_run_id == FeatureRun.id).filter(
-            Scan.feature_run_id.isnot(None),
-            FeatureRun.status == "published",
+        query = (
+            db.query(FeatureRun)
+            .filter(FeatureRun.status == "published")
+            .order_by(
+                desc(FeatureRun.as_of_date),
+                desc(FeatureRun.published_at),
+                desc(FeatureRun.id),
+            )
         )
         if as_of_date is not None:
             query = query.filter(FeatureRun.as_of_date <= as_of_date)
-        return query.order_by(
-            desc(FeatureRun.as_of_date),
-            desc(Scan.completed_at),
-            desc(Scan.id),
-        ).first()
+        for run in query.all():
+            if feature_run_market(run) == normalized_market:
+                return run
+        return None
 
     def _get_latest_legacy_scan_for_market(
         self,

@@ -2754,7 +2754,7 @@ def test_build_groups_payload_loads_static_history_rows_without_sparklines(
         )
 
     assert payload["available"] is True
-    assert query_calls == [(3, False), (2, False)]
+    assert query_calls == [(2, False)]
     assert filter_options_calls == []
     assert apply_rank_change_calls == [(["Internet Services"], [3, 2])]
     assert table_fallback_calls == [

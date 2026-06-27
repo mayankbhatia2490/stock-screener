@@ -61,3 +61,16 @@ def test_build_static_groups_payload_emits_the_response_envelope_once():
     assert payload["payload"]["group_details"] == {
         "Semiconductors": {"industry_group": "Semiconductors"}
     }
+
+
+def test_static_groups_snapshot_requires_market():
+    module = import_module("app.services.static_groups_payload_builder")
+    StaticGroupsSnapshot = module.StaticGroupsSnapshot
+
+    with pytest.raises(TypeError):
+        StaticGroupsSnapshot(
+            date="2026-04-04",
+            rankings=[],
+            movers={"period": "1w", "gainers": [], "losers": []},
+            group_details={},
+        )

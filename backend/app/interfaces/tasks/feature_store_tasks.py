@@ -247,7 +247,7 @@ def _enrich_feature_run_with_ibd_metadata(
     from app.database import SessionLocal
     from app.infra.db.models.feature_store import FeatureRun, StockFeatureDaily
     from app.models.industry import IBDGroupRank, IBDIndustryGroup
-    from app.services.group_ranking_history import feature_run_market
+    from app.domain.feature_store.run_metadata import feature_run_market
     from app.services.group_ranking_payloads import compute_group_rankings_from_serialized_rows
     from app.services.market_taxonomy_service import get_market_taxonomy_service
     from sqlalchemy import func
@@ -429,8 +429,8 @@ def _enrich_feature_run_with_ibd_metadata(
         db.close()
 
 def _resolve_latest_published_run_for_market(*, db, market: str) -> int | None:
+    from app.domain.feature_store.run_metadata import feature_run_market
     from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
-    from app.services.group_ranking_history import feature_run_market
 
     normalized_market = market.upper()
     pointer_key = f"latest_published_market:{normalized_market}"
