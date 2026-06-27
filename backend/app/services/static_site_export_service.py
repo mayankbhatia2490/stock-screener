@@ -82,7 +82,6 @@ STATIC_DEFAULT_SCAN_FILTERS_FALLBACK = DEFAULT_SCAN_FILTERS_FALLBACK
 
 STATIC_CHART_PRESET_TOP_N = 200
 STATIC_CHART_TOP_N_GROUPS = 50
-STATIC_GROUP_DETAIL_HISTORY_DAYS = 100
 STATIC_BREADTH_HISTORY_LOOKBACK_DAYS = 90
 STATIC_BREADTH_ATTRIBUTION_LOOKBACK_DAYS = 10
 STATIC_BREADTH_ATTRIBUTION_MARKETS = ("US",)
@@ -305,7 +304,6 @@ class StaticSiteExportService:
                 expected_as_of_date=latest_run.as_of_date,
                 market=market,
                 latest_run=latest_run,
-                current_rows=scan_rows,
                 serialized_rows=serialized_rows,
             ),
         )
@@ -1111,65 +1109,10 @@ class StaticSiteExportService:
         db: Session,
         generated_at: str,
         expected_as_of_date: date,
-        market: str | None = None,
-        latest_run: FeatureRun | None = None,
-        current_rows: list[Any] | None = None,
-        serialized_rows: list[dict[str, Any]] | None = None,
+        market: str,
+        latest_run: FeatureRun,
+        serialized_rows: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if market is None or latest_run is None or serialized_rows is None:
-            service = get_group_rank_service()
-            rankings = service.get_current_rankings(
-                db,
-                limit=197,
-                calculation_date=expected_as_of_date,
-            )
-            if not rankings:
-                raise StaticSiteSectionUnavailableError(
-                    section="groups",
-                    reason=(
-                        "No group rankings are available for static-site export date "
-                        f"{expected_as_of_date.isoformat()}."
-                    ),
-                )
-            movers = service.get_rank_movers(
-                db,
-                period="1w",
-                limit=10,
-                calculation_date=expected_as_of_date,
-            )
-            ranking_date = rankings[0]["date"]
-            if ranking_date != expected_as_of_date.isoformat():
-                raise StaticSiteSectionUnavailableError(
-                    section="groups",
-                    reason=(
-                        "Group rankings are stale for static-site export date "
-                        f"{expected_as_of_date.isoformat()} (latest ranking date: {ranking_date})."
-                    ),
-                )
-            group_details: dict[str, Any] = {}
-            for row in rankings:
-                group_name = row["industry_group"]
-                try:
-                    group_details[group_name] = service.get_group_history(
-                        db,
-                        group_name,
-                        days=STATIC_GROUP_DETAIL_HISTORY_DAYS,
-                    )
-                except Exception:
-                    logger.warning("Failed to export detail for group %s", group_name, exc_info=True)
-                    db.rollback()
-
-            return build_static_groups_payload(
-                StaticGroupsSnapshot(
-                    date=ranking_date,
-                    rankings=rankings,
-                    movers=movers,
-                    group_details=group_details,
-                ),
-                generated_at=generated_at,
-                schema_version=STATIC_SITE_SCHEMA_VERSION,
-            )
-
         rankings = compute_group_rankings_from_serialized_rows(
             serialized_rows,
             ranking_date=expected_as_of_date,

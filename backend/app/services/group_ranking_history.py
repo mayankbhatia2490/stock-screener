@@ -121,18 +121,18 @@ def apply_group_rank_changes(
             )
 
 
-def group_history_points(
+def _group_history_points_from_maps(
     industry_group: str,
     *,
     market_runs: Iterable[FeatureRun],
-    historical_rankings: Mapping[int, list[dict[str, Any]]],
+    ranking_maps: Mapping[int, Mapping[str, Mapping[str, Any]]],
     cutoff_date: date | None = None,
 ) -> list[dict[str, Any]]:
     history: list[dict[str, Any]] = []
     for run in market_runs:
         if cutoff_date is not None and run.as_of_date < cutoff_date:
             continue
-        historical = group_rank_map(historical_rankings.get(run.id, [])).get(industry_group)
+        historical = ranking_maps.get(run.id, {}).get(industry_group)
         if historical is None:
             continue
         history.append(
@@ -144,6 +144,26 @@ def group_history_points(
             ).model_dump(mode="json")
         )
     return history
+
+
+def group_history_points(
+    industry_group: str,
+    *,
+    market_runs: Iterable[FeatureRun],
+    historical_rankings: Mapping[int, list[dict[str, Any]]],
+    cutoff_date: date | None = None,
+) -> list[dict[str, Any]]:
+    runs = list(market_runs)
+    ranking_maps = {
+        run.id: group_rank_map(historical_rankings.get(run.id, []))
+        for run in runs
+    }
+    return _group_history_points_from_maps(
+        industry_group,
+        market_runs=runs,
+        ranking_maps=ranking_maps,
+        cutoff_date=cutoff_date,
+    )
 
 
 def build_group_detail_payload(
@@ -215,15 +235,24 @@ def build_group_details(
         if group_name:
             current_rows_by_group[str(group_name)].append(row)
 
+    history_runs = market_runs[:history_limit]
+    ranking_maps = {
+        run.id: group_rank_map(historical_rankings.get(run.id, []))
+        for run in history_runs
+    }
     details: dict[str, Any] = {}
     for ranking in rankings:
         group_name = str(ranking["industry_group"])
-        details[group_name] = build_group_detail_payload(
+        details[group_name] = build_group_detail_payload_from_parts(
             group_name,
             ranking=ranking,
-            current_rows=current_rows_by_group.get(group_name, []),
-            market_runs=market_runs,
-            historical_rankings=historical_rankings,
-            history_limit=history_limit,
+            history=_group_history_points_from_maps(
+                group_name,
+                market_runs=history_runs,
+                ranking_maps=ranking_maps,
+            ),
+            stocks=constituent_stock_payloads_from_group_rows(
+                current_rows_by_group.get(group_name, [])
+            ),
         )
     return details

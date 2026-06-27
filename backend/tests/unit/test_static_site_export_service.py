@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from inspect import Parameter, signature
 import json
 from types import SimpleNamespace
 
@@ -1687,26 +1688,15 @@ def test_compute_breadth_metrics_uses_full_history_for_shifted_ranges(service_an
     assert metrics[oldest_history_date]["stocks_up_25pct_month"] == 1
 
 
-def test_build_groups_payload_requires_target_date(service_and_session_factory, monkeypatch):
-    service, session_factory = service_and_session_factory
+def test_build_groups_payload_has_explicit_feature_run_contract(service_and_session_factory):
+    service, _session_factory = service_and_session_factory
 
-    rankings_calls: list[tuple[int, date | None]] = []
-    movers_calls: list[tuple[str, int, date | None]] = []
-    fake_service = SimpleNamespace(
-        get_current_rankings=lambda db, limit=197, calculation_date=None: rankings_calls.append((limit, calculation_date)) or [],
-        get_rank_movers=lambda db, period="1w", limit=10, calculation_date=None: movers_calls.append((period, limit, calculation_date)) or {"period": period, "gainers": [], "losers": []},
-    )
-    monkeypatch.setattr(export_module, "get_group_rank_service", lambda: fake_service)
+    params = signature(service._build_groups_payload).parameters  # noqa: SLF001 - intentional contract coverage
 
-    with session_factory() as db, pytest.raises(StaticSiteSectionUnavailableError, match="No group rankings are available"):
-        service._build_groups_payload(  # noqa: SLF001 - intentional unit coverage
-            db=db,
-            generated_at="2026-04-02T22:00:00Z",
-            expected_as_of_date=date(2026, 4, 2),
-        )
-
-    assert rankings_calls == [(197, date(2026, 4, 2))]
-    assert movers_calls == []
+    assert "current_rows" not in params
+    assert params["market"].default is Parameter.empty
+    assert params["latest_run"].default is Parameter.empty
+    assert params["serialized_rows"].default is Parameter.empty
 
 
 def test_build_groups_rrg_payload_emits_available_scopes(service_and_session_factory, monkeypatch):

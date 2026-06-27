@@ -13,6 +13,7 @@ from app.services.group_ranking_history import (
     GROUP_RANK_CHANGE_OFFSETS,
     apply_group_rank_changes,
     build_group_detail_payload,
+    build_group_details,
     feature_run_market,
     select_group_history_runs,
     select_market_run_series,
@@ -165,6 +166,85 @@ def test_build_group_detail_payload_uses_shared_schema_history_and_stock_sorting
     ]
     assert [stock["symbol"] for stock in payload["stocks"]] == ["AAA", "BBB"]
     assert feature_run_market(current) == "HK"
+
+
+def test_build_group_details_indexes_history_once_per_run(monkeypatch):
+    runs = [
+        _run(10, date(2026, 4, 10), "HK"),
+        _run(9, date(2026, 4, 9), "HK"),
+    ]
+    rankings = [
+        {
+            "industry_group": "Semiconductors",
+            "rank": 1,
+            "avg_rs_rating": 95.0,
+            "num_stocks": 1,
+        },
+        {
+            "industry_group": "Software",
+            "rank": 2,
+            "avg_rs_rating": 90.0,
+            "num_stocks": 1,
+        },
+    ]
+    historical_rankings = {
+        10: [
+            {
+                "industry_group": "Semiconductors",
+                "date": "2026-04-10",
+                "rank": 1,
+                "avg_rs_rating": 95.0,
+                "num_stocks": 1,
+            },
+            {
+                "industry_group": "Software",
+                "date": "2026-04-10",
+                "rank": 2,
+                "avg_rs_rating": 90.0,
+                "num_stocks": 1,
+            },
+        ],
+        9: [
+            {
+                "industry_group": "Semiconductors",
+                "date": "2026-04-09",
+                "rank": 2,
+                "avg_rs_rating": 85.0,
+                "num_stocks": 1,
+            },
+            {
+                "industry_group": "Software",
+                "date": "2026-04-09",
+                "rank": 1,
+                "avg_rs_rating": 96.0,
+                "num_stocks": 1,
+            },
+        ],
+    }
+    original_group_rank_map = history_module.group_rank_map
+    calls = 0
+
+    def counting_group_rank_map(rows):
+        nonlocal calls
+        calls += 1
+        return original_group_rank_map(rows)
+
+    monkeypatch.setattr(history_module, "group_rank_map", counting_group_rank_map)
+
+    details = build_group_details(
+        rankings,
+        serialized_rows=[
+            {"symbol": "AAA", "ibd_industry_group": "Semiconductors", "rs_rating": 95},
+            {"symbol": "BBB", "ibd_industry_group": "Software", "rs_rating": 90},
+        ],
+        market_runs=runs,
+        historical_rankings=historical_rankings,
+        history_limit=2,
+    )
+
+    assert calls == len(runs)
+    assert details["Semiconductors"]["history"][1]["rank"] == 2
+    assert details["Software"]["history"][1]["rank"] == 1
 
 
 def test_build_group_detail_payload_from_parts_uses_the_shared_response_shape():
