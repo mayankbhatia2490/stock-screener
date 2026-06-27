@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from inspect import signature
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.infra.db.models.feature_store import FeatureRun
+from app.services import group_ranking_history as history_module
 from app.services.group_ranking_history import (
     GROUP_RANK_CHANGE_OFFSETS,
     apply_group_rank_changes,
@@ -75,7 +77,11 @@ def test_select_group_history_runs_includes_visible_history_and_change_offsets()
     assert set(GROUP_RANK_CHANGE_OFFSETS.values()).issubset(selected_indexes)
 
 
-def test_apply_group_rank_changes_allows_explicit_static_fallback():
+def test_apply_group_rank_changes_has_no_caller_specific_fallback_hook():
+    assert "fallback" not in signature(apply_group_rank_changes).parameters
+
+
+def test_apply_group_rank_changes_only_uses_supplied_feature_run_history():
     rankings = [
         {
             "industry_group": "Semiconductors",
@@ -92,19 +98,15 @@ def test_apply_group_rank_changes_allows_explicit_static_fallback():
         9: [{"industry_group": "Semiconductors", "rank": 7}],
     }
 
-    def fallback(updated_rankings):
-        updated_rankings[0]["rank_change_1m"] = 2
-
     apply_group_rank_changes(
         rankings,
         market_runs,
         historical_rankings,
         offsets={"1w": 1, "1m": 2},
-        fallback=fallback,
     )
 
     assert rankings[0]["rank_change_1w"] == 4
-    assert rankings[0]["rank_change_1m"] == 2
+    assert rankings[0]["rank_change_1m"] is None
 
 
 def test_build_group_detail_payload_uses_shared_schema_history_and_stock_sorting():
@@ -163,3 +165,41 @@ def test_build_group_detail_payload_uses_shared_schema_history_and_stock_sorting
     ]
     assert [stock["symbol"] for stock in payload["stocks"]] == ["AAA", "BBB"]
     assert feature_run_market(current) == "HK"
+
+
+def test_build_group_detail_payload_from_parts_uses_the_shared_response_shape():
+    builder = getattr(history_module, "build_group_detail_payload_from_parts", None)
+    assert builder is not None, "shared detail builder should accept prebuilt history/stocks"
+
+    payload = builder(
+        "Semiconductors",
+        ranking={
+            "industry_group": "Semiconductors",
+            "rank": 4,
+            "avg_rs_rating": 82.5,
+            "median_rs_rating": 81.0,
+            "weighted_avg_rs_rating": 83.0,
+            "rs_std_dev": 4.0,
+            "num_stocks": 3,
+            "pct_rs_above_80": 66.7,
+            "top_symbol": "AAA",
+            "top_symbol_name": "AAA Corp",
+            "top_rs_rating": 95,
+            "rank_change_1w": 2,
+            "rank_change_1m": None,
+            "rank_change_3m": None,
+            "rank_change_6m": None,
+        },
+        history=[
+            {"date": "2026-04-10", "rank": 4, "avg_rs_rating": 82.5, "num_stocks": 3}
+        ],
+        stocks=[{"symbol": "AAA", "rs_rating": 95}],
+    )
+
+    assert payload["industry_group"] == "Semiconductors"
+    assert payload["current_rank"] == 4
+    assert payload["history"] == [
+        {"date": "2026-04-10", "rank": 4, "avg_rs_rating": 82.5, "num_stocks": 3}
+    ]
+    assert payload["stocks"][0]["symbol"] == "AAA"
+    assert payload["stocks"][0]["rs_rating"] == 95

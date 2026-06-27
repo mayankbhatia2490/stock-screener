@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date
 from typing import Any
 
@@ -19,8 +19,6 @@ GROUP_RANK_CHANGE_OFFSETS = {
     "3m": 63,
     "6m": 126,
 }
-
-GroupRankChangeFallback = Callable[[list[dict[str, Any]]], None]
 
 
 def feature_run_market(run: FeatureRun) -> str | None:
@@ -105,7 +103,6 @@ def apply_group_rank_changes(
     historical_rankings: Mapping[int, list[dict[str, Any]]],
     *,
     offsets: Mapping[str, int] = GROUP_RANK_CHANGE_OFFSETS,
-    fallback: GroupRankChangeFallback | None = None,
 ) -> None:
     for period, offset in offsets.items():
         key = f"rank_change_{period}"
@@ -122,9 +119,6 @@ def apply_group_rank_changes(
                 if historical is not None
                 else None
             )
-
-    if fallback is not None:
-        fallback(rankings)
 
 
 def group_history_points(
@@ -163,6 +157,26 @@ def build_group_detail_payload(
     history_limit: int | None = None,
 ) -> dict[str, Any]:
     history_runs = market_runs if history_limit is None else market_runs[:history_limit]
+    return build_group_detail_payload_from_parts(
+        industry_group,
+        ranking=ranking,
+        history=group_history_points(
+            industry_group,
+            market_runs=history_runs,
+            historical_rankings=historical_rankings,
+            cutoff_date=history_cutoff_date,
+        ),
+        stocks=constituent_stock_payloads_from_group_rows(current_rows),
+    )
+
+
+def build_group_detail_payload_from_parts(
+    industry_group: str,
+    *,
+    ranking: Mapping[str, Any],
+    history: Iterable[Mapping[str, Any]],
+    stocks: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
     return GroupDetailResponse(
         industry_group=industry_group,
         current_rank=ranking["rank"],
@@ -179,13 +193,11 @@ def build_group_detail_payload(
         rank_change_1m=ranking.get("rank_change_1m"),
         rank_change_3m=ranking.get("rank_change_3m"),
         rank_change_6m=ranking.get("rank_change_6m"),
-        history=group_history_points(
-            industry_group,
-            market_runs=history_runs,
-            historical_rankings=historical_rankings,
-            cutoff_date=history_cutoff_date,
-        ),
-        stocks=constituent_stock_payloads_from_group_rows(current_rows),
+        history=[
+            HistoricalDataPoint(**point).model_dump(mode="json")
+            for point in history
+        ],
+        stocks=list(stocks),
     ).model_dump(mode="json")
 
 

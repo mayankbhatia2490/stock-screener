@@ -61,7 +61,9 @@ describe('GroupChartsGrid', () => {
     const chartGrid = screen.getByTestId('group-charts-grid');
     expect(chartGrid).toHaveStyle({
       display: 'grid',
-      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     });
+    const generatedCss = document.head.textContent.replace(/\s/g, '');
+    expect(generatedCss).toContain('grid-template-columns:1fr');
+    expect(generatedCss).toContain('grid-template-columns:repeat(2,minmax(0,1fr))');
   });
 });

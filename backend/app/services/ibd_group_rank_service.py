@@ -21,6 +21,10 @@ from ..models.stock_universe import StockUniverse
 from ..domain.providers.price_symbol_support import is_unsupported_yahoo_price_symbol
 from .group_constituent_source import GroupConstituentSource
 from .group_detail_payloads import constituent_stock_payloads_from_scan_items
+from .group_ranking_history import (
+    GROUP_RANK_CHANGE_OFFSETS,
+    build_group_detail_payload_from_parts,
+)
 from .group_rank_cache_policy import GroupRankCacheRequirement
 from .ibd_industry_service import IBDIndustryService
 from .price_cache_service import PriceCacheService
@@ -494,12 +498,7 @@ class IBDGroupRankService:
         # Calendar-day target offsets for rank changes. The lookup below picks
         # the closest stored ranking within a small window; these are not exact
         # trading-session offsets.
-        period_days = {
-            '1w': 5,
-            '1m': 21,
-            '3m': 63,
-            '6m': 126,
-        }
+        period_days = dict(GROUP_RANK_CHANGE_OFFSETS)
 
         # Batch fetch all historical ranks in ONE query instead of 197*4=788 queries
         group_names = [r.industry_group for r in rankings]
@@ -514,20 +513,10 @@ class IBDGroupRankService:
             pct_above_80 = self._calculate_pct_above_80(
                 ranking.num_stocks_rs_above_80, ranking.num_stocks
             )
-            item = {
-                'industry_group': ranking.industry_group,
-                'date': ranking.date.isoformat(),
-                'rank': ranking.rank,
-                'avg_rs_rating': ranking.avg_rs_rating,
-                'median_rs_rating': ranking.median_rs_rating,
-                'weighted_avg_rs_rating': ranking.weighted_avg_rs_rating,
-                'rs_std_dev': ranking.rs_std_dev,
-                'num_stocks': ranking.num_stocks,
-                'num_stocks_rs_above_80': ranking.num_stocks_rs_above_80,
-                'pct_rs_above_80': pct_above_80,
-                'top_symbol': ranking.top_symbol,
-                'top_rs_rating': ranking.top_rs_rating,
-            }
+            item = self._rank_record_payload(
+                ranking,
+                pct_rs_above_80=pct_above_80,
+            )
 
             # Get pre-computed historical ranks from batch lookup
             for period_name in period_days.keys():
@@ -544,6 +533,33 @@ class IBDGroupRankService:
 
         self._annotate_top_symbol_names(db, result)
         return result
+
+    @staticmethod
+    def _rank_record_payload(
+        ranking: IBDGroupRank,
+        *,
+        pct_rs_above_80: float | None,
+        top_symbol_name: str | None = None,
+    ) -> Dict:
+        return {
+            'industry_group': ranking.industry_group,
+            'date': ranking.date.isoformat(),
+            'rank': ranking.rank,
+            'avg_rs_rating': ranking.avg_rs_rating,
+            'median_rs_rating': ranking.median_rs_rating,
+            'weighted_avg_rs_rating': ranking.weighted_avg_rs_rating,
+            'rs_std_dev': ranking.rs_std_dev,
+            'num_stocks': ranking.num_stocks,
+            'num_stocks_rs_above_80': ranking.num_stocks_rs_above_80,
+            'pct_rs_above_80': pct_rs_above_80,
+            'top_symbol': ranking.top_symbol,
+            'top_symbol_name': top_symbol_name,
+            'top_rs_rating': ranking.top_rs_rating,
+            'rank_change_1w': None,
+            'rank_change_1m': None,
+            'rank_change_3m': None,
+            'rank_change_6m': None,
+        }
 
     @staticmethod
     def _annotate_top_symbol_names(db: Session, rows: List[Dict]) -> None:
@@ -689,7 +705,7 @@ class IBDGroupRankService:
         current = records[0]
 
         # Get rank changes using calendar-day target offsets with closest-record matching.
-        period_days = {'1w': 5, '1m': 21, '3m': 63, '6m': 126}
+        period_days = dict(GROUP_RANK_CHANGE_OFFSETS)
         rank_changes = {}
 
         historical_ranks = self._get_historical_ranks_batch(
@@ -729,23 +745,19 @@ class IBDGroupRankService:
         top_symbol_name = self._get_symbol_name_map(db, [current.top_symbol]).get(
             current.top_symbol
         )
+        ranking_payload = self._rank_record_payload(
+            current,
+            pct_rs_above_80=pct_above_80,
+            top_symbol_name=top_symbol_name,
+        )
+        ranking_payload.update(rank_changes)
 
-        return {
-            'industry_group': industry_group,
-            'current_rank': current.rank,
-            'current_avg_rs': current.avg_rs_rating,
-            'current_median_rs': current.median_rs_rating,
-            'current_weighted_avg_rs': current.weighted_avg_rs_rating,
-            'current_rs_std_dev': current.rs_std_dev,
-            'num_stocks': current.num_stocks,
-            'pct_rs_above_80': pct_above_80,
-            'top_symbol': current.top_symbol,
-            'top_symbol_name': top_symbol_name,
-            'top_rs_rating': current.top_rs_rating,
-            **rank_changes,
-            'history': history,
-            'stocks': stocks,
-        }
+        return build_group_detail_payload_from_parts(
+            industry_group,
+            ranking=ranking_payload,
+            history=history,
+            stocks=stocks,
+        )
 
     def _get_constituent_stocks(
         self,
@@ -785,15 +797,6 @@ class IBDGroupRankService:
         market: str = "US",
     ) -> Dict:
         """Get groups with biggest rank changes over a period, scoped by market."""
-        period_days_map = {
-            '1w': 5,
-            '1m': 21,
-            '3m': 63,
-            '6m': 126,
-        }
-
-        days = period_days_map.get(period, 5)
-
         current_rankings = self.get_current_rankings(
             db,
             limit=197,

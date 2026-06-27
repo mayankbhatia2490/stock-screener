@@ -173,6 +173,51 @@ def test_get_group_history_uses_universe_lookup_for_top_symbol_name(monkeypatch)
         db_session.close()
 
 
+def test_get_group_history_uses_shared_rank_change_offsets(monkeypatch):
+    service = _make_group_rank_service()
+    db_session = _make_session()
+    group = f"TEST_GROUP_UNIT_{uuid4().hex}"
+    current_date = date.today()
+    captured_period_days: list[dict[str, int]] = []
+
+    try:
+        db_session.add(
+            IBDGroupRank(
+                market="US",
+                industry_group=group,
+                date=current_date,
+                rank=4,
+                avg_rs_rating=88.0,
+                median_rs_rating=87.0,
+                weighted_avg_rs_rating=89.0,
+                rs_std_dev=2.0,
+                num_stocks=5,
+                num_stocks_rs_above_80=3,
+                top_symbol="AAPL",
+                top_rs_rating=96.0,
+            )
+        )
+        db_session.commit()
+
+        monkeypatch.setattr(group_rank_module, "GROUP_RANK_CHANGE_OFFSETS", {"1w": 1})
+
+        def fake_historical_batch(db, group_names, current, period_days, *, market):  # noqa: ANN001
+            captured_period_days.append(dict(period_days))
+            return {(group, "1w"): 6}
+
+        monkeypatch.setattr(service, "_get_historical_ranks_batch", fake_historical_batch)
+        monkeypatch.setattr(service, "_get_constituent_stocks", lambda *_args, **_kwargs: [])
+
+        result = service.get_group_history(db_session, group, days=30, market="US")
+
+        assert captured_period_days == [{"1w": 1}]
+        assert result["rank_change_1w"] == 2
+        assert result["rank_change_1m"] is None
+    finally:
+        db_session.rollback()
+        db_session.close()
+
+
 def test_get_group_history_propagates_constituent_source_failures(monkeypatch):
     service = IBDGroupRankService(
         price_cache=Mock(),

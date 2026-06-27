@@ -1,8 +1,18 @@
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import GroupChartsLayout, { GroupChartCell } from './GroupChartsLayout';
+
+const useMediaQuerySpy = vi.hoisted(() => vi.fn(() => true));
+
+vi.mock('@mui/material', async () => {
+  const actual = await vi.importActual('@mui/material');
+  return {
+    ...actual,
+    useMediaQuery: (...args) => useMediaQuerySpy(...args),
+  };
+});
 
 describe('GroupChartsLayout', () => {
   it('provides the shared two-column desktop chart grid contract', () => {
@@ -18,8 +28,23 @@ describe('GroupChartsLayout', () => {
     const layout = screen.getByTestId('shared-group-charts-layout');
     expect(layout).toHaveStyle({
       display: 'grid',
-      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     });
+    const generatedCss = document.head.textContent.replace(/\s/g, '');
+    expect(generatedCss).toContain('grid-template-columns:1fr');
+    expect(generatedCss).toContain('grid-template-columns:repeat(2,minmax(0,1fr))');
     expect(screen.getByTestId('shared-group-chart-cell')).toHaveStyle({ minWidth: '0' });
+  });
+
+  it('keeps the responsive contract in CSS instead of JS media-query state', () => {
+    render(
+      <ThemeProvider theme={createTheme()}>
+        <GroupChartsLayout data-testid="shared-group-charts-layout-css-only">
+          <GroupChartCell>AAA</GroupChartCell>
+        </GroupChartsLayout>
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByTestId('shared-group-charts-layout-css-only')).toBeInTheDocument();
+    expect(useMediaQuerySpy).not.toHaveBeenCalled();
   });
 });

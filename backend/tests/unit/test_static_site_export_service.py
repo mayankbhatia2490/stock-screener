@@ -2596,7 +2596,10 @@ def test_apply_group_rank_changes_from_table_fills_missing_periods(
     assert captured["market"] == "HK"
     assert captured["current_date"] == date(2026, 4, 28)
     assert captured["group_names"] == ["Semiconductors", "Software"]
-    assert captured["period_days"] == {"1w": 5, "1m": 21, "3m": 63}
+    assert captured["period_days"] == {
+        period: export_module.GROUP_RANK_CHANGE_OFFSETS[period]
+        for period in ("1w", "1m", "3m")
+    }
 
     semis, software = rankings
     assert semis["rank_change_1w"] == 5
@@ -2663,6 +2666,8 @@ def test_build_groups_payload_loads_static_history_rows_without_sparklines(
     )
     query_calls: list[tuple[int, bool]] = []
     filter_options_calls: list[int] = []
+    apply_rank_change_calls: list[tuple[list[str], list[int]]] = []
+    table_fallback_calls: list[tuple[list[str], str, date]] = []
 
     monkeypatch.setattr(
         export_module,
@@ -2674,10 +2679,34 @@ def test_build_groups_payload_loads_static_history_rows_without_sparklines(
         "select_group_history_runs",
         lambda runs, *, history_runs, offsets: runs,  # noqa: ARG005
     )
+
+    def fake_apply_rank_changes(rankings, market_runs, historical_rankings, *, offsets):  # noqa: ANN001
+        apply_rank_change_calls.append(
+            (
+                [row["industry_group"] for row in rankings],
+                [run.id for run in market_runs],
+            )
+        )
+
+    monkeypatch.setattr(
+        export_module,
+        "apply_group_rank_changes",
+        fake_apply_rank_changes,
+    )
+
+    def fake_table_fallback(db, rankings, *, market, calculation_date):  # noqa: ANN001, ARG001
+        table_fallback_calls.append(
+            (
+                [row["industry_group"] for row in rankings],
+                market,
+                calculation_date,
+            )
+        )
+
     monkeypatch.setattr(
         service,
         "_apply_group_rank_changes_from_table",
-        lambda *_args, **_kwargs: None,
+        fake_table_fallback,
     )
 
     def _history_row(run_id: int) -> ScanResultItemDomain:
@@ -2737,3 +2766,7 @@ def test_build_groups_payload_loads_static_history_rows_without_sparklines(
     assert payload["available"] is True
     assert query_calls == [(3, False), (2, False)]
     assert filter_options_calls == []
+    assert apply_rank_change_calls == [(["Internet Services"], [3, 2])]
+    assert table_fallback_calls == [
+        (["Internet Services"], "HK", date(2026, 4, 4))
+    ]

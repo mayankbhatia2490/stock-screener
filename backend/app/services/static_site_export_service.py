@@ -27,11 +27,6 @@ from app.domain.scanning.default_filters import (
 )
 from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 from app.infra.db.repositories.feature_store_repo import SqlFeatureStoreRepository
-from app.schemas.groups import (
-    GroupRankResponse,
-    GroupRankingsResponse,
-    MoversResponse,
-)
 from app.schemas.scanning import FilterOptionsResponse, ScanResultItem
 from app.services.breadth_attribution_service import BreadthAttributionService
 from app.services.group_detail_payloads import scan_result_item_to_group_row
@@ -55,6 +50,10 @@ from app.services.preset_screens import (
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGUnavailableError,
     StaticGroupsRRGPayloadBuilder,
+)
+from app.services.static_groups_payload_builder import (
+    StaticGroupsSnapshot,
+    build_static_groups_payload,
 )
 from app.services.ui_snapshot_service import UISnapshotService
 from app.wiring.bootstrap import (
@@ -1160,25 +1159,16 @@ class StaticSiteExportService:
                     logger.warning("Failed to export detail for group %s", group_name, exc_info=True)
                     db.rollback()
 
-            return {
-                "schema_version": STATIC_SITE_SCHEMA_VERSION,
-                "generated_at": generated_at,
-                "available": True,
-                "payload": {
-                    "rankings": GroupRankingsResponse(
-                        date=ranking_date,
-                        total_groups=len(rankings),
-                        rankings=[GroupRankResponse(**row) for row in rankings],
-                    ).model_dump(mode="json"),
-                    "movers_period": "1w",
-                    "movers": MoversResponse(
-                        period=movers["period"],
-                        gainers=[GroupRankResponse(**row) for row in movers.get("gainers", [])],
-                        losers=[GroupRankResponse(**row) for row in movers.get("losers", [])],
-                    ).model_dump(mode="json"),
-                    "group_details": group_details,
-                },
-            }
+            return build_static_groups_payload(
+                StaticGroupsSnapshot(
+                    date=ranking_date,
+                    rankings=rankings,
+                    movers=movers,
+                    group_details=group_details,
+                ),
+                generated_at=generated_at,
+                schema_version=STATIC_SITE_SCHEMA_VERSION,
+            )
 
         rankings = compute_group_rankings_from_serialized_rows(
             serialized_rows,
@@ -1216,12 +1206,12 @@ class StaticSiteExportService:
             market_runs,
             historical_rankings,
             offsets=GROUP_RANK_CHANGE_OFFSETS,
-            fallback=lambda updated_rankings: self._apply_group_rank_changes_from_table(
-                db,
-                updated_rankings,
-                market=market,
-                calculation_date=expected_as_of_date,
-            ),
+        )
+        self._apply_group_rank_changes_from_table(
+            db,
+            rankings,
+            market=market,
+            calculation_date=expected_as_of_date,
         )
         group_details = build_group_details(
             rankings=rankings,
@@ -1232,26 +1222,17 @@ class StaticSiteExportService:
         )
         movers = self._build_group_movers(rankings)
 
-        return {
-            "schema_version": STATIC_SITE_SCHEMA_VERSION,
-            "generated_at": generated_at,
-            "available": True,
-            "market": market,
-            "payload": {
-                "rankings": GroupRankingsResponse(
-                    date=expected_as_of_date.isoformat(),
-                    total_groups=len(rankings),
-                    rankings=[GroupRankResponse(**row) for row in rankings],
-                ).model_dump(mode="json"),
-                "movers_period": "1w",
-                "movers": MoversResponse(
-                    period=movers["period"],
-                    gainers=[GroupRankResponse(**row) for row in movers.get("gainers", [])],
-                    losers=[GroupRankResponse(**row) for row in movers.get("losers", [])],
-                ).model_dump(mode="json"),
-                "group_details": group_details,
-            },
-        }
+        return build_static_groups_payload(
+            StaticGroupsSnapshot(
+                date=expected_as_of_date.isoformat(),
+                rankings=rankings,
+                movers=movers,
+                group_details=group_details,
+                market=market,
+            ),
+            generated_at=generated_at,
+            schema_version=STATIC_SITE_SCHEMA_VERSION,
+        )
 
     def _build_home_payload(
         self,

@@ -1,4 +1,4 @@
-import { Box, useMediaQuery, useTheme } from '@mui/material';
+import { Box } from '@mui/material';
 
 const TWO_COLUMN_TEMPLATE = 'repeat(2, minmax(0, 1fr))';
 
@@ -9,16 +9,16 @@ const mergeSx = (base, sx) => (
 );
 
 function GroupChartsLayout({ children, gap = 1, sx, ...props }) {
-  const theme = useTheme();
-  const isDesktop = useMediaQuery(theme.breakpoints.up('md'), { defaultMatches: true });
-
   return (
     <Box
       {...props}
       sx={mergeSx(
         {
           display: 'grid',
-          gridTemplateColumns: isDesktop ? TWO_COLUMN_TEMPLATE : '1fr',
+          gridTemplateColumns: {
+            xs: '1fr',
+            md: TWO_COLUMN_TEMPLATE,
+          },
           gap,
         },
         sx,
