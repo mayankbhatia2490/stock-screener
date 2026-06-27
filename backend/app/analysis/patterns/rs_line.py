@@ -4,9 +4,8 @@ The RS line is ``stock_close / benchmark_close``. A "blue dot" (DeepVue/O'Neil
 leadership signal) fires when the RS line makes a new trailing-``lookback`` high
 **before** price does — the RS line is at a new high while price is not.
 
-These helpers produce *series* for chart overlay. The single-point flags used by
-the per-scan Setup Engine field are computed in ``readiness.py`` directly from the
-same ``technicals.at_new_high`` primitive.
+These helpers produce *series* for chart overlay and single-point snapshots for
+scanner/filter rows.
 """
 
 from __future__ import annotations
@@ -56,3 +55,53 @@ def blue_dot_series(
     rs_new_high = rolling_at_new_high(frame["rs"], window=lookback)
     price_new_high = rolling_at_new_high(frame["price"], window=lookback)
     return rs_new_high & (~price_new_high)
+
+
+def _empty_leadership_snapshot() -> dict[str, bool | str | None]:
+    return {
+        "rs_line_new_high": False,
+        "rs_line_new_high_before_price": False,
+        "rs_line_blue_dot_recent": False,
+        "rs_line_new_high_date": None,
+    }
+
+
+def _date_string(value: object) -> str:
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def rs_line_leadership_snapshot(
+    stock_close: pd.Series,
+    benchmark_close: pd.Series,
+    *,
+    lookback: int = DEFAULT_LOOKBACK,
+    recent_days: int = 5,
+) -> dict[str, bool | str | None]:
+    """Latest RS leadership flags for scanner/filter rows."""
+    if lookback < 1:
+        raise ValueError("lookback must be >= 1")
+    if recent_days < 1:
+        raise ValueError("recent_days must be >= 1")
+
+    rs = _aligned_ratio(stock_close, benchmark_close)
+    frame = pd.DataFrame({"rs": rs, "price": stock_close.astype(float)}).dropna()
+    if frame.empty:
+        return _empty_leadership_snapshot()
+
+    rs_new_high = rolling_at_new_high(frame["rs"], window=lookback)
+    price_new_high = rolling_at_new_high(frame["price"], window=lookback)
+    blue_dot = rs_new_high & (~price_new_high)
+
+    new_high_dates = frame.index[rs_new_high]
+    latest_new_high_date = (
+        _date_string(new_high_dates[-1]) if len(new_high_dates) > 0 else None
+    )
+
+    return {
+        "rs_line_new_high": bool(rs_new_high.iloc[-1]),
+        "rs_line_new_high_before_price": bool(blue_dot.iloc[-1]),
+        "rs_line_blue_dot_recent": bool(blue_dot.tail(recent_days).any()),
+        "rs_line_new_high_date": latest_new_high_date,
+    }

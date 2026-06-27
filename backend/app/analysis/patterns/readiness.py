@@ -11,8 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from app.analysis.patterns.rs_line import rs_line_leadership_snapshot
 from app.analysis.patterns.technicals import (
-    at_new_high,
     average_true_range,
     bollinger_bands,
     rolling_percentile_rank,
@@ -231,11 +231,14 @@ def _compute_readiness_core(
         aligned = pd.DataFrame({"rs": rs_series, "price": close}).dropna()
         rs_tail = aligned["rs"].tail(rs_lookback)
         if not rs_tail.empty:
-            rs_line_new_high = at_new_high(aligned["rs"], window=rs_lookback)
-            # Blue dot: RS line leads price — RS at a new high while price is not.
-            rs_line_blue_dot = bool(
-                rs_line_new_high and not at_new_high(aligned["price"], window=rs_lookback)
+            snapshot = rs_line_leadership_snapshot(
+                close,
+                aligned_benchmark,
+                lookback=rs_lookback,
+                recent_days=1,
             )
+            rs_line_new_high = bool(snapshot["rs_line_new_high"])
+            rs_line_blue_dot = bool(snapshot["rs_line_new_high_before_price"])
             rs_252_max = float(rs_tail.max())
 
         # Capture rs value from 65 days ago for trace.
