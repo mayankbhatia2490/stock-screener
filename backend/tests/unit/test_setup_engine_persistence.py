@@ -310,6 +310,25 @@ class TestScanResultRoundTrip:
         ).fetchone()
         assert row[0] == 1
 
+    def test_rs_line_leadership_fields_map_to_columns_and_details(self):
+        result_dict = _call_combine_results({"setup_engine": _make_se_screener_result()})
+        result_dict.update(
+            {
+                "rs_line_new_high": True,
+                "rs_line_new_high_before_price": True,
+                "rs_line_blue_dot_recent": True,
+                "rs_line_new_high_date": "2026-01-06",
+            }
+        )
+
+        mapped = _map_orchestrator_result("scan-1", "AAPL", result_dict)
+
+        assert mapped["rs_line_new_high"] is True
+        assert mapped["rs_line_new_high_before_price"] is True
+        assert mapped["rs_line_blue_dot_recent"] is True
+        assert mapped["rs_line_new_high_date"] == "2026-01-06"
+        assert mapped["details"]["rs_line_blue_dot_recent"] is True
+
     def test_string_fields_roundtrip(self, sr_db_session):
         result_dict = _call_combine_results({"setup_engine": _make_se_screener_result()})
         _insert_sr_row(sr_db_session, "AAPL", result_dict)

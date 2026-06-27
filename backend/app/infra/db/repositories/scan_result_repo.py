@@ -209,6 +209,10 @@ def _map_orchestrator_result(scan_id: str, symbol: str, raw: dict) -> dict:
     # Sparklines
     r["rs_sparkline_data"] = raw.get("rs_sparkline_data")
     r["rs_trend"] = raw.get("rs_trend")
+    r["rs_line_new_high"] = raw.get("rs_line_new_high")
+    r["rs_line_new_high_before_price"] = raw.get("rs_line_new_high_before_price")
+    r["rs_line_blue_dot_recent"] = raw.get("rs_line_blue_dot_recent")
+    r["rs_line_new_high_date"] = raw.get("rs_line_new_high_date")
     r["price_sparkline_data"] = raw.get("price_sparkline_data")
     r["price_change_1d"] = raw.get("price_change_1d")
     r["price_trend"] = raw.get("price_trend")
@@ -841,6 +845,10 @@ def _map_row_to_domain(
         "gics_industry": result.gics_industry,
         "rs_sparkline_data": result.rs_sparkline_data if include_sparklines else None,
         "rs_trend": result.rs_trend,
+        "rs_line_new_high": result.rs_line_new_high,
+        "rs_line_new_high_before_price": result.rs_line_new_high_before_price,
+        "rs_line_blue_dot_recent": result.rs_line_blue_dot_recent,
+        "rs_line_new_high_date": result.rs_line_new_high_date,
         "price_sparkline_data": result.price_sparkline_data if include_sparklines else None,
         "price_change_1d": result.price_change_1d,
         "price_trend": result.price_trend,

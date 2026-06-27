@@ -13,7 +13,7 @@ Tables:
     feature_run_pointers      — Atomic publish pointers (e.g. 'latest_published')
 """
 from sqlalchemy import (
-    Column, Integer, Float, Text, Date, DateTime, JSON,
+    Boolean, Column, Integer, Float, Text, Date, DateTime, JSON,
     ForeignKey, Index,
 )
 from sqlalchemy.sql import func
@@ -100,6 +100,10 @@ class StockFeatureDaily(Base):
     composite_score = Column(Float, nullable=True, index=True)
     overall_rating = Column(Integer, nullable=True, index=True)
     passes_count = Column(Integer, nullable=True)
+    rs_line_new_high = Column(Boolean, nullable=True, index=True)
+    rs_line_new_high_before_price = Column(Boolean, nullable=True, index=True)
+    rs_line_blue_dot_recent = Column(Boolean, nullable=True, index=True)
+    rs_line_new_high_date = Column(Text, nullable=True, index=True)
     details_json = Column(JSON, nullable=True)
 
     # Relationships
@@ -108,6 +112,10 @@ class StockFeatureDaily(Base):
     __table_args__ = (
         Index("ix_stock_feature_daily_run_score", "run_id", "composite_score"),
         Index("ix_stock_feature_daily_run_rating", "run_id", "overall_rating"),
+        Index("ix_sfd_run_rs_line_new_high", "run_id", "rs_line_new_high"),
+        Index("ix_sfd_run_rs_line_new_high_before_price", "run_id", "rs_line_new_high_before_price"),
+        Index("ix_sfd_run_rs_line_blue_dot_recent", "run_id", "rs_line_blue_dot_recent"),
+        Index("ix_sfd_run_rs_line_new_high_date", "run_id", "rs_line_new_high_date"),
     )
 
 
