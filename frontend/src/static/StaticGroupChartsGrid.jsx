@@ -9,6 +9,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 
 import CandlestickChart from '../components/Charts/CandlestickChart';
+import GroupChartsLayout, { GroupChartCell } from '../components/Charts/GroupChartsLayout';
 import { getGroupRankColor } from '../utils/colorUtils';
 import { fetchStaticChartPayload, staticChartKeys } from './chartClient';
 
@@ -246,22 +247,12 @@ function StaticGroupChartsGrid({ symbols = [], chartIndex = null }) {
           Showing first {truncatedSymbols.length} of {normalizedSymbols.length} stocks.
         </Typography>
       )}
-      <Box
-        data-testid="static-group-charts-grid"
-        sx={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-          gap: 2,
-          '@media (max-width:899.95px)': {
-            gridTemplateColumns: '1fr',
-          },
-        }}
-      >
+      <GroupChartsLayout data-testid="static-group-charts-grid" gap={2}>
         {truncatedSymbols.map((sym) => {
           const entry = entryBySymbol.get(sym);
           if (!entry) {
             return (
-              <Box key={sym} sx={{ minWidth: 0 }}>
+              <GroupChartCell key={sym}>
                 <Card variant="outlined">
                   <Box
                     sx={{
@@ -282,21 +273,21 @@ function StaticGroupChartsGrid({ symbols = [], chartIndex = null }) {
                     </Typography>
                   </Box>
                 </Card>
-              </Box>
+              </GroupChartCell>
             );
           }
           return (
-            <Box key={sym} sx={{ minWidth: 0 }}>
+            <GroupChartCell key={sym}>
               <StaticGroupChartCard
                 symbol={sym}
                 entry={entry}
                 isSelected={selectedSymbol === sym}
                 onSelect={setSelectedSymbol}
               />
-            </Box>
+            </GroupChartCell>
           );
         })}
-      </Box>
+      </GroupChartsLayout>
     </Box>
   );
 }

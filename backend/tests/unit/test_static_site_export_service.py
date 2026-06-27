@@ -19,6 +19,7 @@ from app.domain.scanning.models import ScanResultItemDomain
 from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 from app.models.market_exposure import MarketExposure
 from app.models.stock import StockPrice
+from app.services.group_ranking_history import select_market_run_series
 from app.services.static_groups_rrg_export import StaticGroupsRRGPayloadBuilder
 from app.services.static_site_export_service import (
     NoPublishedStaticMarketArtifact,
@@ -1589,8 +1590,8 @@ def test_serialize_history_bars_clamps_to_end_date_and_skips_nan_rows(service_an
     ]
 
 
-def test_get_market_run_series_normalizes_market_to_uppercase(service_and_session_factory):
-    service, session_factory = service_and_session_factory
+def test_select_market_run_series_normalizes_market_to_uppercase(service_and_session_factory):
+    _, session_factory = service_and_session_factory
     run_us_latest = FeatureRun(
         id=31,
         as_of_date=date(2026, 4, 3),
@@ -1618,17 +1619,18 @@ def test_get_market_run_series_normalizes_market_to_uppercase(service_and_sessio
     _insert_runs(session_factory, run_us_latest, run_us_previous, run_hk)
 
     with session_factory() as db:
-        market_runs = service._get_market_run_series(  # noqa: SLF001 - intentional unit test coverage
-            db=db,
+        market_runs = select_market_run_series(
+            db,
             market="us",
             latest_run=run_us_latest,
+            min_runs=2,
         )
 
     assert [run.id for run in market_runs] == [31, 30]
 
 
-def test_get_market_run_series_deduplicates_same_day_reruns(service_and_session_factory):
-    service, session_factory = service_and_session_factory
+def test_select_market_run_series_deduplicates_same_day_reruns(service_and_session_factory):
+    _, session_factory = service_and_session_factory
     latest_us_run = FeatureRun(
         id=41,
         as_of_date=date(2026, 4, 3),
@@ -1656,10 +1658,11 @@ def test_get_market_run_series_deduplicates_same_day_reruns(service_and_session_
     _insert_runs(session_factory, latest_us_run, rerun_same_day, previous_day)
 
     with session_factory() as db:
-        market_runs = service._get_market_run_series(  # noqa: SLF001 - intentional unit test coverage
-            db=db,
+        market_runs = select_market_run_series(
+            db,
             market="US",
             latest_run=latest_us_run,
+            min_runs=2,
         )
 
     assert [run.id for run in market_runs] == [41, 39]
@@ -2662,11 +2665,15 @@ def test_build_groups_payload_loads_static_history_rows_without_sparklines(
     filter_options_calls: list[int] = []
 
     monkeypatch.setattr(
-        service,
-        "_get_market_run_series",
-        lambda db, market, latest_run: [latest_run, prior_run],  # noqa: ARG005
+        export_module,
+        "select_market_run_series",
+        lambda db, *, market, latest_run, cutoff_date=None, min_runs=0, max_runs=None: [latest_run, prior_run],  # noqa: ARG005
     )
-    monkeypatch.setattr(service, "_select_group_history_runs", lambda runs: runs)
+    monkeypatch.setattr(
+        export_module,
+        "select_group_history_runs",
+        lambda runs, *, history_runs, offsets: runs,  # noqa: ARG005
+    )
     monkeypatch.setattr(
         service,
         "_apply_group_rank_changes_from_table",

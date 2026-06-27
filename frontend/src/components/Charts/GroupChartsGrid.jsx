@@ -12,6 +12,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 
 import CandlestickChart from './CandlestickChart';
+import GroupChartsLayout, { GroupChartCell } from './GroupChartsLayout';
 import {
   fetchPriceHistoryBatch,
   priceHistoryKeys,
@@ -110,24 +111,14 @@ function GroupChartsGrid({ symbols = [], period = '6mo', height = 200 }) {
           Showing first {truncatedSymbols.length} of {normalizedSymbols.length} stocks.
         </Typography>
       )}
-      <Box
-        data-testid="group-charts-grid"
-        sx={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-          gap: 1,
-          '@media (max-width:899.95px)': {
-            gridTemplateColumns: '1fr',
-          },
-        }}
-      >
+      <GroupChartsLayout data-testid="group-charts-grid" gap={1}>
         {truncatedSymbols.map((sym) => {
           const priceData = dataMap[sym];
           const isMissing = missingSet.has(sym) || !priceData || priceData.length === 0;
           const lastClose = priceData && priceData.length > 0 ? priceData[priceData.length - 1].close : null;
 
           return (
-            <Box key={sym} sx={{ minWidth: 0 }}>
+            <GroupChartCell key={sym}>
               <Card
                 variant="outlined"
                 sx={{
@@ -181,10 +172,10 @@ function GroupChartsGrid({ symbols = [], period = '6mo', height = 200 }) {
                   />
                 )}
               </Card>
-            </Box>
+            </GroupChartCell>
           );
         })}
-      </Box>
+      </GroupChartsLayout>
     </Box>
   );
 }

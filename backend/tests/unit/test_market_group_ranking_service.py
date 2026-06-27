@@ -12,6 +12,7 @@ from app.database import Base
 from app.domain.scanning.models import ScanResultItemDomain
 from app.infra.db.models.feature_store import FeatureRun
 from app.services.market_group_ranking_service import MarketGroupRankingService
+from app.services.group_ranking_history import select_market_run_series
 from app.services.rrg_history_provider import (
     MarketDispatchRRGHistoryProvider,
     build_rrg_history_provider,
@@ -53,10 +54,9 @@ def test_get_rank_movers_separates_gainers_and_losers(monkeypatch):
     assert [row["industry_group"] for row in movers["losers"]] == ["Negative B", "Negative A"]
 
 
-def test_get_market_run_series_honors_min_runs_without_cutoff():
+def test_select_market_run_series_honors_min_runs_without_cutoff():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine, tables=[FeatureRun.__table__])
-    service = MarketGroupRankingService()
 
     with Session(engine) as db:
         runs = [
@@ -96,7 +96,7 @@ def test_get_market_run_series_honors_min_runs_without_cutoff():
         db.add_all(runs)
         db.commit()
 
-        market_runs = service._get_market_run_series(  # noqa: SLF001
+        market_runs = select_market_run_series(
             db,
             market="HK",
             latest_run=runs[0],
@@ -133,8 +133,8 @@ def test_get_current_rank_map_skips_historical_rank_change_work(monkeypatch):
     def _unexpected_historical_call(*args, **kwargs):  # noqa: ANN002, ANN003
         raise AssertionError("historical rank-change work should be skipped")
 
-    monkeypatch.setattr(service, "_get_market_run_series", _unexpected_historical_call)
-    monkeypatch.setattr(service, "apply_group_rank_changes", _unexpected_historical_call)
+    monkeypatch.setattr(market_group_module, "select_market_run_series", _unexpected_historical_call)
+    monkeypatch.setattr(market_group_module, "apply_group_rank_changes", _unexpected_historical_call)
 
     rank_map = service.get_current_rank_map(Session(), market="HK")
 
@@ -179,7 +179,7 @@ def test_get_current_rank_snapshot_returns_rank_date_and_map(monkeypatch):
 
 
 def test_get_current_rankings_loads_rank_change_rows_without_sparklines(monkeypatch):
-    monkeypatch.setattr(market_group_module, "GROUP_CHANGE_OFFSETS", {"1w": 1})
+    monkeypatch.setattr(market_group_module, "GROUP_RANK_CHANGE_OFFSETS", {"1w": 1})
     service = MarketGroupRankingService()
     latest_run = SimpleNamespace(id=3, as_of_date=date(2026, 4, 4))
     prior_run = SimpleNamespace(id=2, as_of_date=date(2026, 4, 3))
@@ -191,8 +191,8 @@ def test_get_current_rankings_loads_rank_change_rows_without_sparklines(monkeypa
         lambda db, *, market, calculation_date=None: latest_run,  # noqa: ARG005
     )
     monkeypatch.setattr(
-        service,
-        "_get_market_run_series",
+        market_group_module,
+        "select_market_run_series",
         lambda db, *, market, latest_run, cutoff_date=None, min_runs=0: [latest_run, prior_run],  # noqa: ARG005
     )
 
@@ -236,8 +236,8 @@ def test_get_group_history_loads_historical_rows_without_sparklines(monkeypatch)
         lambda db, *, market: latest_run,  # noqa: ARG005
     )
     monkeypatch.setattr(
-        service,
-        "_get_market_run_series",
+        market_group_module,
+        "select_market_run_series",
         lambda db, *, market, latest_run, cutoff_date, min_runs=0: [latest_run, prior_run],  # noqa: ARG005
     )
 
@@ -300,8 +300,8 @@ def test_market_group_ranking_service_loads_rrg_runs_once_and_returns_ascending_
         lambda db, *, market, calculation_date=None: latest_run,  # noqa: ARG005
     )
     monkeypatch.setattr(
-        service,
-        "_get_market_run_series",
+        market_group_module,
+        "select_market_run_series",
         lambda db, *, market, latest_run, cutoff_date, min_runs=0: [  # noqa: ARG005
             latest_run,
             middle_run,
