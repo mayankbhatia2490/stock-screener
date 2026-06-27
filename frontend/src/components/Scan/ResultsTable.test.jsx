@@ -90,7 +90,7 @@ describe('ResultsTable', () => {
     });
 
     it('renders first-class RS blue dot with the new-high date tooltip', () => {
-      expect(screen.getByTitle('RS line new high: 2026-01-06')).toBeInTheDocument();
+      expect(screen.getByTitle('RS blue dot: latest RS high 2026-01-06')).toBeInTheDocument();
     });
   });
 
@@ -170,7 +170,7 @@ describe('ResultsTable', () => {
   describe('SE column headers', () => {
     it('renders all 7 SE header labels', () => {
       renderWithProviders(<ResultsTable {...defaultProps} />);
-      const headers = ['SE', 'Pat', 'Pvt%', 'Sqz', 'V50', 'RSH', 'BD', 'BD5', 'Pvt$'];
+      const headers = ['SE', 'Pat', 'Pvt%', 'Sqz', 'V50', 'RSH', 'SEBD', 'RSBD', 'Pvt$'];
       headers.forEach((label) => {
         expect(screen.getByText(label)).toBeInTheDocument();
       });

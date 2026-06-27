@@ -17,13 +17,16 @@ from .base_screener import (
     ScreenerResult,
     StockData,
 )
-from .criteria.adr_calculator import ADRCalculator
-from .criteria.price_sparkline import PriceSparklineCalculator
 from .criteria.relative_strength import RelativeStrengthCalculator
-from .criteria.rs_sparkline import RSSparklineCalculator
+from .partial_history_metrics import partial_history_metrics
 from .screener_registry import ScreenerRegistry
 
-from app.analysis.patterns.rs_line import rs_line_leadership_snapshot
+from app.analysis.patterns.rs_line import (
+    DEFAULT_BLUE_DOT_RECENT_DAYS,
+    DEFAULT_LOOKBACK,
+    RsLineLeadershipSnapshot,
+    rs_line_leadership_snapshot,
+)
 from app.config import settings
 from app.domain.scanning.models import CompositeMethod, ScreenerOutputDomain
 from app.domain.scanning.scoring import (
@@ -39,8 +42,6 @@ LISTING_ONLY_MIN_BARS = 30
 FULL_SCAN_MIN_BARS = 252
 IPO_BONUS_MIN_SCORE = 60.0
 IPO_BONUS_MAX = 15.0
-RS_LINE_LOOKBACK = 252
-RS_LINE_BLUE_DOT_RECENT_DAYS = 5
 _DEFAULT_SCREENER_MIN_BARS = 100
 _SCREENER_MIN_BARS: dict[str, int] = {
     "ipo": 30,
@@ -76,28 +77,6 @@ def _finite_float(value: object) -> float | None:
         return None
 
     return numeric if math.isfinite(numeric) else None
-
-
-def _empty_rs_line_leadership_metrics() -> dict[str, object]:
-    return {
-        "rs_line_new_high": False,
-        "rs_line_new_high_before_price": False,
-        "rs_line_blue_dot_recent": False,
-        "rs_line_new_high_date": None,
-    }
-
-
-def _rs_line_leadership_metrics_from_context(
-    context: PrecomputedScanContext | None,
-) -> dict[str, object]:
-    if context is None:
-        return _empty_rs_line_leadership_metrics()
-    return {
-        "rs_line_new_high": bool(context.rs_line_new_high),
-        "rs_line_new_high_before_price": bool(context.rs_line_new_high_before_price),
-        "rs_line_blue_dot_recent": bool(context.rs_line_blue_dot_recent),
-        "rs_line_new_high_date": context.rs_line_new_high_date,
-    }
 
 
 def _build_precomputed_scan_context(
@@ -152,13 +131,13 @@ def _build_precomputed_scan_context(
             stock_data.rs_universe_performances,
         )
 
-    rs_leadership = _empty_rs_line_leadership_metrics()
+    rs_leadership = RsLineLeadershipSnapshot.empty()
     if benchmark_close_indexed is not None and not benchmark_close_indexed.empty:
         rs_leadership = rs_line_leadership_snapshot(
             close_indexed,
             benchmark_close_indexed,
-            lookback=RS_LINE_LOOKBACK,
-            recent_days=RS_LINE_BLUE_DOT_RECENT_DAYS,
+            lookback=DEFAULT_LOOKBACK,
+            recent_days=DEFAULT_BLUE_DOT_RECENT_DAYS,
         )
 
     return PrecomputedScanContext(
@@ -179,10 +158,7 @@ def _build_precomputed_scan_context(
         high_52w=float(close_rev.max()) if not close_rev.empty else None,
         low_52w=float(close_rev.min()) if not close_rev.empty else None,
         rs_ratings=rs_ratings,
-        rs_line_new_high=bool(rs_leadership["rs_line_new_high"]),
-        rs_line_new_high_before_price=bool(rs_leadership["rs_line_new_high_before_price"]),
-        rs_line_blue_dot_recent=bool(rs_leadership["rs_line_blue_dot_recent"]),
-        rs_line_new_high_date=rs_leadership["rs_line_new_high_date"],
+        rs_line_leadership=rs_leadership,
     )
 
 
@@ -230,138 +206,6 @@ def _scan_mode_for_history(history_bars: int) -> str:
     if history_bars >= LISTING_ONLY_MIN_BARS:
         return "ipo_weighted"
     return "listing_only"
-
-
-def _calculate_price_change_1d(close_chrono) -> float | None:
-    if close_chrono is None or len(close_chrono) < 2:
-        return None
-    previous = close_chrono.iloc[-2]
-    current = close_chrono.iloc[-1]
-    if previous is None or previous == 0:
-        return None
-    try:
-        if previous != previous or current != current:
-            return None
-    except Exception:
-        pass
-    return round(float(((current - previous) / previous) * 100), 2)
-
-
-def _partial_history_metrics(stock_data: StockData) -> dict[str, object]:
-    """Calculate row fields that do not require a full scan history."""
-    price_data = stock_data.price_data
-    precomputed = stock_data.precomputed_scan_context
-    close_chrono = (
-        precomputed.close_chrono
-        if precomputed is not None and precomputed.close_chrono is not None
-        else price_data["Close"].reset_index(drop=True)
-        if price_data is not None and not price_data.empty and "Close" in price_data.columns
-        else None
-    )
-    close_rev = (
-        precomputed.close_rev
-        if precomputed is not None and precomputed.close_rev is not None
-        else close_chrono[::-1].reset_index(drop=True)
-        if close_chrono is not None
-        else None
-    )
-    benchmark_close_chrono = (
-        precomputed.benchmark_close_chrono
-        if precomputed is not None and precomputed.benchmark_close_chrono is not None
-        else stock_data.benchmark_data["Close"].reset_index(drop=True)
-        if (
-            stock_data.benchmark_data is not None
-            and not stock_data.benchmark_data.empty
-            and "Close" in stock_data.benchmark_data.columns
-        )
-        else None
-    )
-    benchmark_close_rev = (
-        precomputed.benchmark_close_rev
-        if precomputed is not None and precomputed.benchmark_close_rev is not None
-        else benchmark_close_chrono[::-1].reset_index(drop=True)
-        if benchmark_close_chrono is not None
-        else None
-    )
-
-    metrics: dict[str, object] = {
-        "rs_rating": None,
-        "rs_rating_1m": None,
-        "rs_rating_3m": None,
-        "rs_rating_12m": None,
-        "stage": None,
-        "ma_alignment": None,
-        "price_sparkline_data": None,
-        "price_trend": None,
-        "price_change_1d": None,
-        "rs_sparkline_data": None,
-        "rs_trend": None,
-        "adr_percent": None,
-        **_rs_line_leadership_metrics_from_context(precomputed),
-    }
-
-    if close_chrono is not None:
-        price_result = PriceSparklineCalculator().calculate_price_sparkline(close_chrono)
-        price_data_result = price_result.get("price_data")
-        metrics["price_sparkline_data"] = price_data_result
-        metrics["price_trend"] = (
-            price_result.get("price_trend") if price_data_result is not None else None
-        )
-        metrics["price_change_1d"] = (
-            price_result.get("price_change_1d")
-            if price_result.get("price_change_1d") is not None
-            else _calculate_price_change_1d(close_chrono)
-        )
-
-    if close_chrono is not None and benchmark_close_chrono is not None:
-        rs_result = RSSparklineCalculator().calculate_rs_sparkline(
-            close_chrono,
-            benchmark_close_chrono,
-        )
-        rs_data_result = rs_result.get("rs_data")
-        metrics["rs_sparkline_data"] = rs_data_result
-        metrics["rs_trend"] = (
-            rs_result.get("rs_trend") if rs_data_result is not None else None
-        )
-        if precomputed is None and price_data is not None and stock_data.benchmark_data is not None:
-            metrics.update(
-                rs_line_leadership_snapshot(
-                    price_data["Close"],
-                    stock_data.benchmark_data["Close"],
-                    lookback=RS_LINE_LOOKBACK,
-                    recent_days=RS_LINE_BLUE_DOT_RECENT_DAYS,
-                )
-            )
-
-    if (
-        close_rev is not None
-        and benchmark_close_rev is not None
-        and len(close_rev) >= 21
-        and len(benchmark_close_rev) >= 21
-    ):
-        rs_calc = RelativeStrengthCalculator()
-        stock_return = rs_calc.calculate_return(close_rev, 21)
-        benchmark_return = rs_calc.calculate_return(benchmark_close_rev, 21)
-        if stock_return is not None and benchmark_return is not None:
-            metrics["rs_rating_1m"] = rs_calc.calculate_period_rs_rating(
-                21,
-                close_rev,
-                benchmark_close_rev,
-                stock_data.rs_universe_performances.get(21)
-                if stock_data.rs_universe_performances
-                else None,
-            )
-
-    if price_data is not None and not price_data.empty:
-        # Young IPO rows have little history, so require a fully valid
-        # 20-session ADR window instead of the scanner-wide 80% tolerance.
-        metrics["adr_percent"] = ADRCalculator().calculate_adr_percent(
-            price_data,
-            period=20,
-            min_valid_rows=20,
-        )
-
-    return metrics
 
 
 def _insufficient_screener_reason(
@@ -637,7 +481,7 @@ class ScanOrchestrator:
                 field_completeness_score=completeness,
             )
             if data_status == "insufficient_history":
-                for key, value in _partial_history_metrics(stock_data).items():
+                for key, value in partial_history_metrics(stock_data).items():
                     combined_result.setdefault(key, value)
 
             return combined_result
@@ -724,8 +568,10 @@ class ScanOrchestrator:
         current_price = stock_data.get_current_price()
 
         # Build combined result
-        rs_line_leadership = _rs_line_leadership_metrics_from_context(
-            stock_data.precomputed_scan_context
+        rs_line_leadership = (
+            stock_data.precomputed_scan_context.rs_line_leadership
+            if stock_data.precomputed_scan_context is not None
+            else RsLineLeadershipSnapshot.empty()
         )
         result = {
             "symbol": symbol,
@@ -765,7 +611,7 @@ class ScanOrchestrator:
             "quality_downgrade_reason": quality_downgrade_reason,
 
             # RS-line leadership signal (DeepVue/O'Neil blue-dot family).
-            **rs_line_leadership,
+            **rs_line_leadership.as_scan_fields(),
 
             # Full details
             "details": {
@@ -1039,5 +885,5 @@ class ScanOrchestrator:
                 result["gics_sector"] = stock_data.fundamentals["sector"]
             if stock_data.fundamentals.get("industry"):
                 result["gics_industry"] = stock_data.fundamentals["industry"]
-        result.update(_partial_history_metrics(stock_data))
+        result.update(partial_history_metrics(stock_data))
         return result

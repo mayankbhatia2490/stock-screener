@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app.analysis.patterns.rs_line import RsLineLeadershipSnapshot
 from app.scanners.base_screener import BaseStockScreener, DataRequirements, ScreenerResult, StockData
 from app.scanners.canslim_scanner import CANSLIMScanner
 from app.scanners.criteria.relative_strength import RelativeStrengthCalculator
@@ -79,10 +80,7 @@ def _manual_precomputed_context(data: StockData) -> SimpleNamespace:
         high_52w=float(close_rev.max()),
         low_52w=float(close_rev.min()),
         rs_ratings=rs_ratings,
-        rs_line_new_high=False,
-        rs_line_new_high_before_price=False,
-        rs_line_blue_dot_recent=False,
-        rs_line_new_high_date=None,
+        rs_line_leadership=RsLineLeadershipSnapshot.empty(),
     )
 
 

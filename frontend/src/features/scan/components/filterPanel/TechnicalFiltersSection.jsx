@@ -91,7 +91,7 @@ function TechnicalFiltersSection({
         </Grid>
         <Grid item xs={6} sm={3} md={1}>
           <CompactCheckbox
-            label="BD <=5d"
+            label="RS Blue Dot"
             value={filters.rsLineBlueDotRecent}
             onChange={(value) => updateFilter('rsLineBlueDotRecent', value)}
           />

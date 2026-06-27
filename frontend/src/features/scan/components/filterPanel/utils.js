@@ -196,10 +196,10 @@ export function buildActiveFilters(filters) {
     active.push({ key: 'seRsLineNewHigh', label: `RS New Hi: ${filters.seRsLineNewHigh ? 'Yes' : 'No'}` });
   }
   if (filters.seRsLineBlueDot != null) {
-    active.push({ key: 'seRsLineBlueDot', label: `Blue Dot: ${filters.seRsLineBlueDot ? 'Yes' : 'No'}` });
+    active.push({ key: 'seRsLineBlueDot', label: `SE Blue Dot: ${filters.seRsLineBlueDot ? 'Yes' : 'No'}` });
   }
   if (filters.rsLineBlueDotRecent != null) {
-    active.push({ key: 'rsLineBlueDotRecent', label: `BD <=5d: ${filters.rsLineBlueDotRecent ? 'Yes' : 'No'}` });
+    active.push({ key: 'rsLineBlueDotRecent', label: `RS Blue Dot: ${filters.rsLineBlueDotRecent ? 'Yes' : 'No'}` });
   }
   if (filters.pocketPivot != null) {
     active.push({ key: 'pocketPivot', label: `Pocket Pivot: ${filters.pocketPivot ? 'Yes' : 'No'}` });

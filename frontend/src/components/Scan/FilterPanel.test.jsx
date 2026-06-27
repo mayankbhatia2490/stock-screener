@@ -101,9 +101,9 @@ describe('FilterPanel', () => {
       expect(screen.getByText('RS Hi')).toBeInTheDocument();
     });
 
-    it('renders BD <=5d checkbox', () => {
+    it('renders RS Blue Dot checkbox', () => {
       renderWithProviders(<FilterPanel {...makeProps()} />);
-      expect(screen.getByText('BD <=5d')).toBeInTheDocument();
+      expect(screen.getByText('RS Blue Dot')).toBeInTheDocument();
     });
   });
 
@@ -197,7 +197,7 @@ describe('FilterPanel', () => {
       );
 
       const user = userEvent.setup();
-      const bdLabel = screen.getByText('BD <=5d');
+      const bdLabel = screen.getByText('RS Blue Dot');
       const bdContainer = bdLabel.closest('[class*="MuiGrid-item"]');
       const yesBtn = within(bdContainer).getByText('Yes');
 
@@ -283,12 +283,12 @@ describe('FilterPanel', () => {
       expect(screen.getByText('RS New Hi: No')).toBeInTheDocument();
     });
 
-    it('shows "BD <=5d: Yes" chip when rsLineBlueDotRecent=true', () => {
+    it('shows "RS Blue Dot: Yes" chip when rsLineBlueDotRecent=true', () => {
       const filters = { ...defaultFilters(), rsLineBlueDotRecent: true };
       renderWithProviders(
         <FilterPanel {...makeProps({ filters })} />
       );
-      expect(screen.getByText('BD <=5d: Yes')).toBeInTheDocument();
+      expect(screen.getByText('RS Blue Dot: Yes')).toBeInTheDocument();
     });
 
     it('removes filter when chip delete is clicked', async () => {

@@ -6,8 +6,10 @@ import pandas as pd
 import pytest
 
 from app.analysis.patterns.rs_line import (
+    RsLineLeadershipSnapshot,
     blue_dot_series,
     compute_rs_line,
+    rs_line_leadership_series,
     rs_line_leadership_snapshot,
 )
 
@@ -63,7 +65,13 @@ def test_rs_line_leadership_snapshot_detects_current_blue_dot():
 
     snapshot = rs_line_leadership_snapshot(stock, benchmark, lookback=6, recent_days=5)
 
-    assert snapshot == {
+    assert snapshot == RsLineLeadershipSnapshot(
+        rs_line_new_high=True,
+        rs_line_new_high_before_price=True,
+        rs_line_blue_dot_recent=True,
+        rs_line_new_high_date="2026-01-06",
+    )
+    assert snapshot.as_scan_fields() == {
         "rs_line_new_high": True,
         "rs_line_new_high_before_price": True,
         "rs_line_blue_dot_recent": True,
@@ -78,10 +86,10 @@ def test_rs_line_leadership_snapshot_distinguishes_price_new_high():
 
     snapshot = rs_line_leadership_snapshot(stock, benchmark, lookback=6, recent_days=5)
 
-    assert snapshot["rs_line_new_high"] is True
-    assert snapshot["rs_line_new_high_before_price"] is False
-    assert snapshot["rs_line_blue_dot_recent"] is False
-    assert snapshot["rs_line_new_high_date"] == "2026-01-06"
+    assert snapshot.rs_line_new_high is True
+    assert snapshot.rs_line_new_high_before_price is False
+    assert snapshot.rs_line_blue_dot_recent is False
+    assert snapshot.rs_line_new_high_date == "2026-01-06"
 
 
 def test_rs_line_leadership_snapshot_keeps_recent_blue_dot_after_current_flag_fades():
@@ -91,10 +99,10 @@ def test_rs_line_leadership_snapshot_keeps_recent_blue_dot_after_current_flag_fa
 
     snapshot = rs_line_leadership_snapshot(stock, benchmark, lookback=8, recent_days=5)
 
-    assert snapshot["rs_line_new_high"] is False
-    assert snapshot["rs_line_new_high_before_price"] is False
-    assert snapshot["rs_line_blue_dot_recent"] is True
-    assert snapshot["rs_line_new_high_date"] == "2026-01-05"
+    assert snapshot.rs_line_new_high is False
+    assert snapshot.rs_line_new_high_before_price is False
+    assert snapshot.rs_line_blue_dot_recent is True
+    assert snapshot.rs_line_new_high_date == "2026-01-05"
 
 
 def test_rs_line_leadership_snapshot_empty_when_benchmark_missing():
@@ -103,9 +111,29 @@ def test_rs_line_leadership_snapshot_empty_when_benchmark_missing():
 
     snapshot = rs_line_leadership_snapshot(stock, benchmark)
 
-    assert snapshot == {
+    assert snapshot == RsLineLeadershipSnapshot.empty()
+    assert snapshot.as_scan_fields() == {
         "rs_line_new_high": False,
         "rs_line_new_high_before_price": False,
         "rs_line_blue_dot_recent": False,
         "rs_line_new_high_date": None,
     }
+
+
+def test_rs_line_leadership_snapshot_omits_non_date_index_label():
+    stock = pd.Series([10, 11, 12, 11], index=pd.RangeIndex(4))
+    benchmark = pd.Series([10, 10, 9, 7], index=pd.RangeIndex(4))
+
+    snapshot = rs_line_leadership_snapshot(stock, benchmark, lookback=4)
+
+    assert snapshot.rs_line_new_high is True
+    assert snapshot.rs_line_new_high_date is None
+
+
+def test_rs_line_leadership_series_is_canonical_for_blue_dot_series():
+    stock = _series([100.0, 110.0, 105.0, 108.0])
+    benchmark = _series([100.0, 110.0, 90.0, 95.0])
+
+    leadership = rs_line_leadership_series(stock, benchmark)
+
+    assert leadership.blue_dot.tolist() == blue_dot_series(stock, benchmark).tolist()
