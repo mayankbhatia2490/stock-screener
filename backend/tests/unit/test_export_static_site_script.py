@@ -24,6 +24,18 @@ def test_static_export_markets_match_market_registry():
     assert export_script.STATIC_EXPORT_MARKETS == market_registry.supported_market_codes()
 
 
+def _stub_static_market_exposure(monkeypatch):
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: {
+            "market": market,
+            "date": as_of_date.isoformat(),
+            "exposure_score": 50.0,
+        },
+    )
+
+
 def test_ensure_group_rank_history_uses_market_calendar_for_non_us_market(monkeypatch):
     query = MagicMock()
     query.filter.return_value = query
@@ -126,6 +138,7 @@ def test_run_daily_refresh_bootstraps_universe_before_other_tasks(monkeypatch):
         "_upsert_feature_run_pointer",
         lambda *, pointer_key, run_id: calls.append(f"pointer:{pointer_key}:{run_id}"),
     )
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -199,6 +212,7 @@ def test_run_daily_refresh_uses_resolved_tracked_ibd_csv_path(monkeypatch, tmp_p
         lambda db, csv_path=None: load_calls.append((db, csv_path)) or 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -209,6 +223,164 @@ def test_run_daily_refresh_uses_resolved_tracked_ibd_csv_path(monkeypatch, tmp_p
         "csv_path": str(resolved_csv),
         "loaded": 10105,
     }
+
+
+def test_run_daily_refresh_computes_market_exposure_before_snapshot(monkeypatch):
+    calls: list[str] = []
+
+    @contextmanager
+    def fake_session():
+        yield object()
+
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 6, 25),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}:{as_of_date.isoformat()}")
+        or {"task": "price_refresh"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: calls.append(f"exposure:{market}:{as_of_date.isoformat()}")
+        or {"market": market, "date": as_of_date.isoformat(), "exposure_score": 42.0},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **kwargs: calls.append(f"snapshot:{kwargs['market']}:{kwargs['as_of_date_str']}")
+            or {"run_id": 77, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda db, csv_path=None: 10105,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda *, as_of_date, market: {"status": "skipped", "market": market},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: {"status": "skipped"},
+    )
+    monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+
+    results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert warnings == []
+    assert calls == [
+        "price:US:2026-06-25",
+        "exposure:US:2026-06-25",
+        "snapshot:US:2026-06-25",
+    ]
+    assert results["market_exposure"] == {
+        "US": {"market": "US", "date": "2026-06-25", "exposure_score": 42.0}
+    }
+
+
+def test_run_daily_refresh_skips_snapshot_when_market_exposure_errors(monkeypatch):
+    calls: list[str] = []
+
+    @contextmanager
+    def fake_session():
+        yield object()
+
+    monkeypatch.setattr(export_script, "SessionLocal", fake_session)
+    monkeypatch.setattr(
+        export_script,
+        "_resolve_latest_completed_trading_date",
+        lambda _market: date(2026, 6, 25),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_refresh_static_daily_prices",
+        lambda *, as_of_date, market=None: calls.append(f"price:{market}:{as_of_date.isoformat()}")
+        or {"task": "price_refresh"},
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_compute_static_market_exposure",
+        lambda *, as_of_date, market: calls.append(f"exposure:{market}:{as_of_date.isoformat()}")
+        or {"market": market, "date": as_of_date.isoformat(), "error": "no_benchmark_data"},
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "build_daily_snapshot",
+        SimpleNamespace(
+            run=lambda **_kwargs: (_ for _ in ()).throw(
+                AssertionError("snapshot should not publish after exposure failure")
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        export_script.IBDIndustryService,
+        "load_from_csv",
+        lambda db, csv_path=None: 10105,
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_ensure_group_rank_history",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("group rank backfill should not run without a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        feature_store_tasks,
+        "_enrich_feature_run_with_ibd_metadata",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata enrichment should not run without a snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_upsert_feature_run_pointer",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default pointer should not update without a snapshot")
+        ),
+    )
+
+    results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+    )
+
+    assert calls == [
+        "price:US:2026-06-25",
+        "exposure:US:2026-06-25",
+    ]
+    assert results["feature_snapshots"] == {
+        "US": {
+            "status": "skipped",
+            "reason": "market_exposure_not_ready",
+            "market": "US",
+            "as_of_date": "2026-06-25",
+            "failure_diagnostics": {
+                "date": "2026-06-25",
+                "error": "no_benchmark_data",
+            },
+            "warnings": [
+                "Static export market US exposure not stored for 2026-06-25: no_benchmark_data."
+            ],
+        }
+    }
+    assert results["group_rank_history_backfill"]["US"]["reason"] == "snapshot_not_ready"
+    assert results["ibd_metadata_refresh"]["US"]["reason"] == "snapshot_not_ready"
+    assert "Static export market US exposure not stored for 2026-06-25: no_benchmark_data." in warnings
 
 
 def test_run_daily_refresh_can_hydrate_imported_snapshot_without_live_fundamentals(monkeypatch):
@@ -263,6 +435,7 @@ def test_run_daily_refresh_can_hydrate_imported_snapshot_without_live_fundamenta
         "_upsert_feature_run_pointer",
         lambda *, pointer_key, run_id: calls.append(f"pointer:{pointer_key}:{run_id}"),
     )
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
         skip_universe_refresh=True,
@@ -330,6 +503,7 @@ def test_run_daily_refresh_price_delta_mode_skips_snapshot_hydration(monkeypatch
         ),
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
         skip_universe_refresh=True,
@@ -383,6 +557,7 @@ def test_run_daily_refresh_warns_when_default_market_run_id_is_missing(monkeypat
         "_upsert_feature_run_pointer",
         lambda **_kwargs: calls.append("pointer"),
     )
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -430,6 +605,7 @@ def test_run_daily_refresh_does_not_repoint_default_pointer_for_unpublished_us_r
         "_upsert_feature_run_pointer",
         lambda **kwargs: pointer_calls.append(kwargs),
     )
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -492,6 +668,7 @@ def test_run_daily_refresh_disables_serialized_lock_during_export(monkeypatch):
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -528,6 +705,7 @@ def test_run_daily_refresh_limits_work_to_selected_market(monkeypatch):
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh(  # noqa: SLF001 - intentional unit test coverage
         market="HK",
@@ -605,6 +783,7 @@ def test_run_daily_refresh_uses_per_market_trading_date_for_in(monkeypatch):
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, _warnings = export_script._run_daily_refresh(market="IN")  # noqa: SLF001
 
@@ -650,6 +829,7 @@ def test_run_daily_refresh_uses_static_daily_mode_and_group_rank_bypass(monkeypa
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -720,6 +900,7 @@ def test_run_daily_refresh_reenriches_ibd_metadata_after_group_rank_backfill(mon
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, warnings = export_script._run_daily_refresh(market="US")  # noqa: SLF001 - intentional unit test coverage
 
@@ -796,6 +977,7 @@ def test_run_daily_refresh_skips_reenrich_when_group_rank_backfill_errored(monke
         lambda db, csv_path=None: 10105,
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, _warnings = export_script._run_daily_refresh(market="US")  # noqa: SLF001 - intentional unit test coverage
 
@@ -856,6 +1038,7 @@ def test_run_daily_refresh_skips_reenrich_when_snapshot_not_ready(monkeypatch):
         SimpleNamespace(run=lambda: {"task": "fundamentals_refresh"}),
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     results, _warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -908,6 +1091,7 @@ def test_run_daily_refresh_warns_when_non_default_market_snapshot_is_not_publish
         SimpleNamespace(run=lambda: {"task": "fundamentals_refresh"}),
     )
     monkeypatch.setattr(export_script, "_upsert_feature_run_pointer", lambda **_kwargs: None)
+    _stub_static_market_exposure(monkeypatch)
 
     _results, warnings = export_script._run_daily_refresh()  # noqa: SLF001 - intentional unit test coverage
 
@@ -1087,6 +1271,169 @@ def test_main_returns_skip_code_for_market_not_trading_day(monkeypatch, tmp_path
     assert "Static site export skipped for market TW because it is not a trading day." in captured.out
     assert export_calls == []
     assert not (output_dir / "diagnostics" / "tw" / "snapshot-failure.json").exists()
+
+
+def test_main_returns_no_current_artifact_code_for_selected_market_exposure_error(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    export_calls: list[object] = []
+    output_dir = tmp_path / "out"
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "market_exposure": {
+                    "IN": {
+                        "market": "IN",
+                        "date": "2026-06-25",
+                        "error": "no_benchmark_data",
+                    }
+                },
+                "feature_snapshots": {
+                    "IN": {
+                        "status": "published",
+                        "market": "IN",
+                        "run_id": 91,
+                    }
+                },
+            },
+            ["Static export market IN exposure not stored for 2026-06-25: no_benchmark_data."],
+        ),
+    )
+
+    class ExportShouldNotRun:
+        def __init__(self, *_args, **_kwargs):
+            export_calls.append("constructed")
+
+        def export(self, *_args, **_kwargs):
+            raise AssertionError("market export should not run when exposure is missing")
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportShouldNotRun)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+            "--market",
+            "IN",
+        ],
+    )
+
+    assert export_script.main() == export_script.STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+
+    diagnostics_path = output_dir / "diagnostics" / "in" / "snapshot-failure.json"
+    assert diagnostics_path.exists()
+    payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "market": "IN",
+        "status": "errored",
+        "reason": "market_exposure_not_ready",
+        "failed_symbols": [],
+        "row_count": None,
+        "warnings": ["Static export market IN exposure not stored for 2026-06-25: no_benchmark_data."],
+        "failure_diagnostics": {
+            "date": "2026-06-25",
+            "error": "no_benchmark_data",
+        },
+    }
+    captured = capsys.readouterr()
+    assert "exposure was not stored" in captured.out
+    assert "fallback" in captured.out
+    assert export_calls == []
+
+
+def test_main_returns_no_current_artifact_code_for_all_market_exposure_error(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    export_calls: list[object] = []
+    output_dir = tmp_path / "out"
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "market_exposure": {
+                    "US": {
+                        "market": "US",
+                        "date": "2026-06-25",
+                        "exposure_score": 75.0,
+                    },
+                    "IN": {
+                        "market": "IN",
+                        "date": "2026-06-25",
+                        "error": "no_benchmark_data",
+                    },
+                },
+                "feature_snapshots": {
+                    "US": {
+                        "status": "published",
+                        "market": "US",
+                        "run_id": 90,
+                    },
+                    "IN": {
+                        "status": "skipped",
+                        "reason": "market_exposure_not_ready",
+                        "market": "IN",
+                        "as_of_date": "2026-06-25",
+                    },
+                },
+            },
+            ["Static export market IN exposure not stored for 2026-06-25: no_benchmark_data."],
+        ),
+    )
+
+    class ExportShouldNotRun:
+        def __init__(self, *_args, **_kwargs):
+            export_calls.append("constructed")
+
+        def export(self, *_args, **_kwargs):
+            raise AssertionError("all-market export should not run when any exposure is missing")
+
+    monkeypatch.setattr(export_script, "StaticSiteExportService", ExportShouldNotRun)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+        ],
+    )
+
+    assert export_script.main() == export_script.STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
+
+    diagnostics_path = output_dir / "diagnostics" / "in" / "snapshot-failure.json"
+    assert diagnostics_path.exists()
+    payload = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "market": "IN",
+        "status": "errored",
+        "reason": "market_exposure_not_ready",
+        "failed_symbols": [],
+        "row_count": None,
+        "warnings": ["Static export market IN exposure not stored for 2026-06-25: no_benchmark_data."],
+        "failure_diagnostics": {
+            "date": "2026-06-25",
+            "error": "no_benchmark_data",
+        },
+    }
+    captured = capsys.readouterr()
+    assert "market IN" in captured.out
+    assert "exposure was not stored" in captured.out
+    assert export_calls == []
 
 
 def test_write_market_diagnostics_records_quarantined_snapshot(tmp_path):

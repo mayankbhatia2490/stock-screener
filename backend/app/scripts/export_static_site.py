@@ -86,6 +86,13 @@ def _upsert_feature_run_pointer(*, pointer_key: str, run_id: int) -> None:
         db.commit()
 
 
+def _compute_static_market_exposure(*, as_of_date: date, market: str) -> dict[str, Any]:
+    from app.services.market_exposure_service import refresh_market_exposure_for_date
+
+    with SessionLocal() as db:
+        return refresh_market_exposure_for_date(db, market, as_of_date)
+
+
 def _snapshot_publishable(snapshot: dict[str, Any]) -> bool:
     status = snapshot.get("status")
     if status == "published":
@@ -113,6 +120,43 @@ def _selected_market_non_publishable_snapshot(
     if not isinstance(snapshot, dict):
         return None
     return None if _snapshot_publishable(snapshot) else snapshot
+
+
+def _market_exposure_failures(
+    refresh_results: dict[str, Any],
+    market: str | None,
+    warnings: list[str],
+) -> dict[str, dict[str, Any]]:
+    exposure_by_market = refresh_results.get("market_exposure", {})
+    if not isinstance(exposure_by_market, dict):
+        return {}
+
+    failures: dict[str, dict[str, Any]] = {}
+    selected_markets = (market.upper(),) if market is not None else tuple(exposure_by_market)
+    for selected_market in selected_markets:
+        exposure = exposure_by_market.get(selected_market)
+        if not isinstance(exposure, dict) or not exposure.get("error"):
+            continue
+
+        market_warnings = [
+            warning for warning in warnings if f"market {selected_market} exposure" in warning
+        ]
+        if not market_warnings:
+            market_warnings = [
+                f"Static export market {selected_market} exposure not stored "
+                f"for {exposure.get('date') or 'unknown date'}: {exposure['error']}."
+            ]
+        failures[selected_market] = {
+            "status": "errored",
+            "reason": "market_exposure_not_ready",
+            "market": selected_market,
+            "warnings": market_warnings,
+            "failure_diagnostics": {
+                "date": exposure.get("date"),
+                "error": exposure["error"],
+            },
+        }
+    return failures
 
 
 def _snapshot_skipped_not_trading_day(snapshot: dict[str, Any] | None) -> bool:
@@ -390,9 +434,59 @@ def _run_daily_refresh(
             else price_refresh_results
         )
 
+        market_exposure: dict[str, Any] = {}
+        for selected_market in selected_markets:
+            market_as_of = as_of_by_market[selected_market]
+            try:
+                exposure_result = _compute_static_market_exposure(
+                    as_of_date=market_as_of,
+                    market=selected_market,
+                )
+            except Exception as exc:  # pragma: no cover - defensive diagnostics path
+                exposure_result = {
+                    "error": str(exc),
+                    "market": selected_market,
+                    "date": market_as_of.isoformat(),
+                }
+            market_exposure[selected_market] = exposure_result
+            if isinstance(exposure_result, dict) and exposure_result.get("error"):
+                warnings.append(
+                    f"Static export market {selected_market} exposure not stored "
+                    f"for {market_as_of.isoformat()}: {exposure_result['error']}."
+                )
+            history_seed = (
+                exposure_result.get("history_seed")
+                if isinstance(exposure_result, dict)
+                else None
+            )
+            if isinstance(history_seed, dict) and history_seed.get("error"):
+                warnings.append(
+                    f"Static export market {selected_market} exposure history seed skipped: "
+                    f"{history_seed['error']}."
+                )
+        results["market_exposure"] = market_exposure
+
         feature_snapshots: dict[str, Any] = {}
         for selected_market in selected_markets:
             market_as_of = as_of_by_market[selected_market]
+            exposure_result = market_exposure.get(selected_market)
+            if isinstance(exposure_result, dict) and exposure_result.get("error"):
+                exposure_warning = (
+                    f"Static export market {selected_market} exposure not stored "
+                    f"for {market_as_of.isoformat()}: {exposure_result['error']}."
+                )
+                feature_snapshots[selected_market] = {
+                    "status": "skipped",
+                    "reason": "market_exposure_not_ready",
+                    "market": selected_market,
+                    "as_of_date": market_as_of.isoformat(),
+                    "failure_diagnostics": {
+                        "date": exposure_result.get("date") or market_as_of.isoformat(),
+                        "error": exposure_result["error"],
+                    },
+                    "warnings": [exposure_warning],
+                }
+                continue
             market_result = build_daily_snapshot.run(
                 as_of_date_str=market_as_of.isoformat(),
                 static_daily_mode=True,
@@ -614,6 +708,26 @@ def main() -> int:
                     f"Static site export skipped for market {args.market} because it is not a trading day."
                 )
                 return STATIC_EXPORT_SKIPPED_EXIT_CODE
+            market_exposure_failures = _market_exposure_failures(
+                refresh_results,
+                args.market,
+                refresh_warnings,
+            )
+            if market_exposure_failures:
+                for failed_market, exposure_failure in market_exposure_failures.items():
+                    _write_market_diagnostics(
+                        Path(args.output_dir),
+                        failed_market,
+                        exposure_failure,
+                    )
+                failed_markets = ", ".join(market_exposure_failures)
+                market_label = args.market or failed_markets
+                print(
+                    f"Static site export skipped for market {market_label}; "
+                    "exposure was not stored, diagnostics were uploaded, "
+                    "and the combine job can use fallback artifacts."
+                )
+                return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
 
         service = StaticSiteExportService(SessionLocal)
         try:
