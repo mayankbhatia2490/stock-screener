@@ -72,6 +72,34 @@ def _make_stock_data(symbol: str = "TEST", n_days: int = 200) -> StockData:
     )
 
 
+def _make_rs_leadership_stock_data(symbol: str = "TEST") -> StockData:
+    """Build full-history data where RS breaks out before price."""
+    dates = pd.date_range(end="2026-01-06", periods=260, freq="B")
+    close = pd.Series(100.0, index=dates)
+    close.iloc[-40] = 120.0
+    close.iloc[-1] = 110.0
+    benchmark_close = pd.Series(100.0, index=dates)
+    benchmark_close.iloc[-1] = 80.0
+
+    price_data = pd.DataFrame(
+        {
+            "Open": close,
+            "High": close * 1.02,
+            "Low": close * 0.98,
+            "Close": close,
+            "Volume": 1_000_000,
+        },
+        index=dates,
+    )
+    benchmark_data = price_data.copy()
+    benchmark_data["Close"] = benchmark_close
+    return StockData(
+        symbol=symbol,
+        price_data=price_data,
+        benchmark_data=benchmark_data,
+    )
+
+
 def make_fake_screener_class(
     name: str, score: float, passes: bool
 ) -> type[BaseStockScreener]:
@@ -222,6 +250,20 @@ class TestScanOrchestratorScoring:
 
         # Falls back to weighted_average = (80 + 60) / 2 = 70
         assert result["composite_score"] == 70.0
+
+    def test_rs_line_leadership_metrics_are_promoted_to_result(self):
+        stock_data = _make_rs_leadership_stock_data()
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        result = orch.scan_stock_multi("TEST", ["alpha"], composite_method="weighted_average")
+
+        assert result["rs_line_new_high"] is True
+        assert result["rs_line_new_high_before_price"] is True
+        assert result["rs_line_blue_dot_recent"] is True
+        assert result["rs_line_new_high_date"] == "2026-01-06"
 
 
 class TestScanOrchestratorRating:

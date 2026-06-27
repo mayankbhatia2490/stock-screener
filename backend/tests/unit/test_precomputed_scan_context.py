@@ -79,6 +79,10 @@ def _manual_precomputed_context(data: StockData) -> SimpleNamespace:
         high_52w=float(close_rev.max()),
         low_52w=float(close_rev.min()),
         rs_ratings=rs_ratings,
+        rs_line_new_high=False,
+        rs_line_new_high_before_price=False,
+        rs_line_blue_dot_recent=False,
+        rs_line_new_high_date=None,
     )
 
 

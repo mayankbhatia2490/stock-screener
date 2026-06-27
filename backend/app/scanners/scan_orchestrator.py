@@ -23,6 +23,7 @@ from .criteria.relative_strength import RelativeStrengthCalculator
 from .criteria.rs_sparkline import RSSparklineCalculator
 from .screener_registry import ScreenerRegistry
 
+from app.analysis.patterns.rs_line import rs_line_leadership_snapshot
 from app.config import settings
 from app.domain.scanning.models import CompositeMethod, ScreenerOutputDomain
 from app.domain.scanning.scoring import (
@@ -38,6 +39,8 @@ LISTING_ONLY_MIN_BARS = 30
 FULL_SCAN_MIN_BARS = 252
 IPO_BONUS_MIN_SCORE = 60.0
 IPO_BONUS_MAX = 15.0
+RS_LINE_LOOKBACK = 252
+RS_LINE_BLUE_DOT_RECENT_DAYS = 5
 _DEFAULT_SCREENER_MIN_BARS = 100
 _SCREENER_MIN_BARS: dict[str, int] = {
     "ipo": 30,
@@ -75,6 +78,28 @@ def _finite_float(value: object) -> float | None:
     return numeric if math.isfinite(numeric) else None
 
 
+def _empty_rs_line_leadership_metrics() -> dict[str, object]:
+    return {
+        "rs_line_new_high": False,
+        "rs_line_new_high_before_price": False,
+        "rs_line_blue_dot_recent": False,
+        "rs_line_new_high_date": None,
+    }
+
+
+def _rs_line_leadership_metrics_from_context(
+    context: PrecomputedScanContext | None,
+) -> dict[str, object]:
+    if context is None:
+        return _empty_rs_line_leadership_metrics()
+    return {
+        "rs_line_new_high": bool(context.rs_line_new_high),
+        "rs_line_new_high_before_price": bool(context.rs_line_new_high_before_price),
+        "rs_line_blue_dot_recent": bool(context.rs_line_blue_dot_recent),
+        "rs_line_new_high_date": context.rs_line_new_high_date,
+    }
+
+
 def _build_precomputed_scan_context(
     stock_data: StockData,
 ) -> PrecomputedScanContext | None:
@@ -83,7 +108,8 @@ def _build_precomputed_scan_context(
     if price_data is None or price_data.empty or "Close" not in price_data.columns:
         return None
 
-    close_chrono = price_data["Close"].reset_index(drop=True)
+    close_indexed = price_data["Close"]
+    close_chrono = close_indexed.reset_index(drop=True)
     close_rev = close_chrono[::-1].reset_index(drop=True)
 
     volume_chrono = None
@@ -92,6 +118,7 @@ def _build_precomputed_scan_context(
         volume_chrono = price_data["Volume"].reset_index(drop=True)
         volume_rev = volume_chrono[::-1].reset_index(drop=True)
 
+    benchmark_close_indexed = None
     benchmark_close_chrono = None
     benchmark_close_rev = None
     if (
@@ -99,7 +126,8 @@ def _build_precomputed_scan_context(
         and not stock_data.benchmark_data.empty
         and "Close" in stock_data.benchmark_data.columns
     ):
-        benchmark_close_chrono = stock_data.benchmark_data["Close"].reset_index(drop=True)
+        benchmark_close_indexed = stock_data.benchmark_data["Close"]
+        benchmark_close_chrono = benchmark_close_indexed.reset_index(drop=True)
         benchmark_close_rev = benchmark_close_chrono[::-1].reset_index(drop=True)
 
     ma_50_series = close_chrono.rolling(window=50, min_periods=50).mean()
@@ -124,6 +152,15 @@ def _build_precomputed_scan_context(
             stock_data.rs_universe_performances,
         )
 
+    rs_leadership = _empty_rs_line_leadership_metrics()
+    if benchmark_close_indexed is not None and not benchmark_close_indexed.empty:
+        rs_leadership = rs_line_leadership_snapshot(
+            close_indexed,
+            benchmark_close_indexed,
+            lookback=RS_LINE_LOOKBACK,
+            recent_days=RS_LINE_BLUE_DOT_RECENT_DAYS,
+        )
+
     return PrecomputedScanContext(
         close_chrono=close_chrono,
         close_rev=close_rev,
@@ -142,6 +179,10 @@ def _build_precomputed_scan_context(
         high_52w=float(close_rev.max()) if not close_rev.empty else None,
         low_52w=float(close_rev.min()) if not close_rev.empty else None,
         rs_ratings=rs_ratings,
+        rs_line_new_high=bool(rs_leadership["rs_line_new_high"]),
+        rs_line_new_high_before_price=bool(rs_leadership["rs_line_new_high_before_price"]),
+        rs_line_blue_dot_recent=bool(rs_leadership["rs_line_blue_dot_recent"]),
+        rs_line_new_high_date=rs_leadership["rs_line_new_high_date"],
     )
 
 
@@ -256,6 +297,7 @@ def _partial_history_metrics(stock_data: StockData) -> dict[str, object]:
         "rs_sparkline_data": None,
         "rs_trend": None,
         "adr_percent": None,
+        **_rs_line_leadership_metrics_from_context(precomputed),
     }
 
     if close_chrono is not None:
@@ -281,6 +323,15 @@ def _partial_history_metrics(stock_data: StockData) -> dict[str, object]:
         metrics["rs_trend"] = (
             rs_result.get("rs_trend") if rs_data_result is not None else None
         )
+        if precomputed is None and price_data is not None and stock_data.benchmark_data is not None:
+            metrics.update(
+                rs_line_leadership_snapshot(
+                    price_data["Close"],
+                    stock_data.benchmark_data["Close"],
+                    lookback=RS_LINE_LOOKBACK,
+                    recent_days=RS_LINE_BLUE_DOT_RECENT_DAYS,
+                )
+            )
 
     if (
         close_rev is not None
@@ -673,6 +724,9 @@ class ScanOrchestrator:
         current_price = stock_data.get_current_price()
 
         # Build combined result
+        rs_line_leadership = _rs_line_leadership_metrics_from_context(
+            stock_data.precomputed_scan_context
+        )
         result = {
             "symbol": symbol,
             "composite_score": round(composite_score, 2),
@@ -709,6 +763,9 @@ class ScanOrchestrator:
             # sort key for tie-break (see scoring.py policy docstring).
             "field_completeness_score": field_completeness_score,
             "quality_downgrade_reason": quality_downgrade_reason,
+
+            # RS-line leadership signal (DeepVue/O'Neil blue-dot family).
+            **rs_line_leadership,
 
             # Full details
             "details": {

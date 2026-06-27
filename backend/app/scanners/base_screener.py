@@ -110,6 +110,10 @@ class PrecomputedScanContext:
     high_52w: Optional[float]
     low_52w: Optional[float]
     rs_ratings: Optional[Dict[str, float]] = None
+    rs_line_new_high: bool = False
+    rs_line_new_high_before_price: bool = False
+    rs_line_blue_dot_recent: bool = False
+    rs_line_new_high_date: Optional[str] = None
 
 
 @dataclass
