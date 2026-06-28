@@ -36,6 +36,10 @@ from .cache.price_cache_freshness import PriceCacheFreshnessPolicy
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
 from .cache.price_cache_warmup import PriceCacheWarmupStore
 from .errors import CacheRefreshError
+from .price_row_normalization import (
+    drop_non_finite_close_rows,
+    stock_price_row_from_ohlcv,
+)
 from .redis_pool import get_redis_client, get_bulk_redis_client, is_redis_enabled
 
 logger = logging.getLogger(__name__)
@@ -1397,16 +1401,13 @@ class PriceCacheService:
 
                 # Prepare row for bulk insert
                 try:
-                    price_dict = {
-                        'symbol': symbol,
-                        'date': row_date,
-                        'open': float(row.get('Open', 0)),
-                        'high': float(row.get('High', 0)),
-                        'low': float(row.get('Low', 0)),
-                        'close': float(row.get('Close', 0)),
-                        'volume': int(row.get('Volume', 0)) if pd.notna(row.get('Volume')) else 0,
-                        'adj_close': float(row.get('Adj Close', row.get('Close', 0))),
-                    }
+                    price_dict = stock_price_row_from_ohlcv(
+                        symbol=symbol,
+                        row_date=row_date,
+                        row=row,
+                    )
+                    if price_dict is None:
+                        continue
                     existing_id = existing_rows.get(row_date)
                     if existing_id is None:
                         rows_to_insert.append(price_dict)
@@ -1473,6 +1474,10 @@ class PriceCacheService:
         if data is None or data.empty:
             logger.warning(f"Cannot cache {symbol}: data is empty")
             return
+        data = drop_non_finite_close_rows(data)
+        if data is None or data.empty:
+            logger.warning(f"Cannot cache {symbol}: no finite close rows")
+            return
 
         try:
             # Store in Redis
@@ -1506,6 +1511,17 @@ class PriceCacheService:
         Returns:
             Number of symbols successfully cached
         """
+        if not batch_data:
+            return 0
+        cleaned_batch_data: Dict[str, pd.DataFrame] = {}
+        for symbol, data in batch_data.items():
+            if data is None or data.empty:
+                continue
+            cleaned = drop_non_finite_close_rows(data)
+            if cleaned is None or cleaned.empty:
+                continue
+            cleaned_batch_data[symbol] = cleaned
+        batch_data = cleaned_batch_data
         if not batch_data:
             return 0
 
@@ -1649,16 +1665,13 @@ class PriceCacheService:
                         row_date = row_date.date()
 
                     try:
-                        price_dict = {
-                            'symbol': symbol,
-                            'date': row_date,
-                            'open': float(row.get('Open', 0)),
-                            'high': float(row.get('High', 0)),
-                            'low': float(row.get('Low', 0)),
-                            'close': float(row.get('Close', 0)),
-                            'volume': int(row.get('Volume', 0)) if pd.notna(row.get('Volume')) else 0,
-                            'adj_close': float(row.get('Adj Close', row.get('Close', 0))),
-                        }
+                        price_dict = stock_price_row_from_ohlcv(
+                            symbol=symbol,
+                            row_date=row_date,
+                            row=row,
+                        )
+                        if price_dict is None:
+                            continue
                         existing_id = existing_pairs.get((symbol, row_date))
                         if existing_id is None:
                             rows_to_insert.append(price_dict)

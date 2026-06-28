@@ -25,6 +25,7 @@ from .redis_pool import get_redis_client, is_redis_enabled
 from .market_calendar_service import MarketCalendarService
 from .benchmark_registry_service import benchmark_registry
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
+from .price_row_normalization import drop_non_finite_close_rows, stock_price_row_from_ohlcv
 from ..utils.market_hours import get_eastern_now, get_last_trading_day, is_market_open, is_trading_day
 
 logger = logging.getLogger(__name__)
@@ -544,6 +545,10 @@ class BenchmarkCacheService:
 
         try:
             # Reset index to get Date as a column
+            data = drop_non_finite_close_rows(data)
+            if data is None or data.empty:
+                logger.warning("No finite benchmark %s close rows to persist", benchmark_symbol)
+                return
             df = data.reset_index()
 
             # Fetch all existing dates for benchmark upfront (avoid N+1 queries)
@@ -570,16 +575,13 @@ class BenchmarkCacheService:
 
                 # Prepare row for bulk insert
                 try:
-                    price_dict = {
-                        'symbol': benchmark_symbol,
-                        'date': row_date,
-                        'open': float(row.get('Open', 0)),
-                        'high': float(row.get('High', 0)),
-                        'low': float(row.get('Low', 0)),
-                        'close': float(row.get('Close', 0)),
-                        'volume': int(row.get('Volume', 0)) if pd.notna(row.get('Volume')) else 0,
-                        'adj_close': float(row.get('Close', 0))  # Use close as adj_close
-                    }
+                    price_dict = stock_price_row_from_ohlcv(
+                        symbol=benchmark_symbol,
+                        row_date=row_date,
+                        row=row,
+                    )
+                    if price_dict is None:
+                        continue
                     rows_to_insert.append(price_dict)
 
                 except Exception as e:

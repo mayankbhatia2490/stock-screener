@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.domain.markets.key_markets import key_market_instruments
 from app.models.stock import StockPrice
+from app.services.price_row_normalization import finite_float_or_none
 
 KEY_MARKET_HISTORY_POINTS = 30
 # Calendar window wide enough to cover 30 trading days across holidays.
@@ -44,7 +45,7 @@ def build_key_market_entries(
     history_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for symbol, row_date, close in rows:
         history_by_symbol[str(symbol).upper()].append(
-            {"date": row_date.isoformat(), "close": close}
+            {"date": row_date.isoformat(), "close": finite_float_or_none(close)}
         )
 
     entries: list[dict[str, Any]] = []

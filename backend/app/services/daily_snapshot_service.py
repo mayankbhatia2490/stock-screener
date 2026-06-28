@@ -8,9 +8,12 @@ leading groups, top groups, freshness dates) instead of ~14 round-trips.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from numbers import Integral, Real
 from time import monotonic
 from typing import Any, Callable
 
@@ -29,7 +32,7 @@ from app.use_cases.scanning.get_scan_results import GetScanResultsQuery
 
 logger = logging.getLogger(__name__)
 
-DAILY_SNAPSHOT_SCHEMA_VERSION = 1
+DAILY_SNAPSHOT_SCHEMA_VERSION = 2
 DAILY_SNAPSHOT_CACHE_TTL_SECONDS = 600
 DAILY_SNAPSHOT_TOP_RESULTS = 20
 LEADERS_MAX_GROUP_RANK = 40
@@ -57,6 +60,33 @@ def daily_snapshot_cache_key(market: str, scan_id: str | None) -> str:
 
 def daily_snapshot_etag(payload_json: str) -> str:
     return 'W/"{}"'.format(hashlib.sha1(payload_json.encode("utf-8")).hexdigest())
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert payload values into strict JSON-compatible primitives."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def serialize_daily_snapshot_payload(payload: dict[str, Any]) -> str:
+    """Serialize Daily Snapshot payloads as browser-parseable strict JSON."""
+    return json.dumps(
+        _json_safe(payload),
+        allow_nan=False,
+        separators=(",", ":"),
+    )
 
 
 def _prune_daily_snapshot_memory_cache(now: float) -> None:
