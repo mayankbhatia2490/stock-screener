@@ -11,8 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from app.analysis.patterns.rs_line import rs_line_leadership_series
 from app.analysis.patterns.technicals import (
-    at_new_high,
     average_true_range,
     bollinger_bands,
     rolling_percentile_rank,
@@ -225,17 +225,16 @@ def _compute_readiness_core(
             rolling_slope(rs_series, window=trend_lookback)
         )
 
-        # Evaluate both new-high predicates on one benchmark-aligned frame so RS
-        # and price share the same end date — a trailing-NaN benchmark must not let
-        # the RS window lead the price window and emit a false blue dot.
-        aligned = pd.DataFrame({"rs": rs_series, "price": close}).dropna()
-        rs_tail = aligned["rs"].tail(rs_lookback)
-        if not rs_tail.empty:
-            rs_line_new_high = at_new_high(aligned["rs"], window=rs_lookback)
-            # Blue dot: RS line leads price — RS at a new high while price is not.
-            rs_line_blue_dot = bool(
-                rs_line_new_high and not at_new_high(aligned["price"], window=rs_lookback)
-            )
+        leadership = rs_line_leadership_series(
+            close,
+            aligned_benchmark,
+            lookback=rs_lookback,
+        )
+        rs_tail = leadership.rs.tail(rs_lookback)
+        if not leadership.rs.empty:
+            snapshot = leadership.to_snapshot(recent_days=1)
+            rs_line_new_high = snapshot.rs_line_new_high
+            rs_line_blue_dot = snapshot.rs_line_new_high_before_price
             rs_252_max = float(rs_tail.max())
 
         # Capture rs value from 65 days ago for trace.

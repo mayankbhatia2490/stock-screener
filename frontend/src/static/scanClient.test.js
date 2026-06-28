@@ -119,6 +119,47 @@ describe('static scan client', () => {
     expect(filtered.map((row) => row.symbol)).toEqual(['NVDA']);
   });
 
+  it('filters by recent RS line blue-dot leadership', () => {
+    const testRows = [
+      { symbol: 'BDOT', rs_line_blue_dot_recent: true },
+      { symbol: 'NOPE', rs_line_blue_dot_recent: false },
+      { symbol: 'MISS', rs_line_blue_dot_recent: false },
+    ];
+    const filters = buildDefaultScanFilters();
+    filters.rsLineBlueDotRecent = true;
+
+    const filtered = filterStaticScanRows(testRows, filters);
+
+    expect(filtered.map((row) => row.symbol)).toEqual(['BDOT']);
+  });
+
+  it('treats missing static RS blue-dot values as false', () => {
+    const testRows = [
+      { symbol: 'BDOT', rs_line_blue_dot_recent: true },
+      { symbol: 'NOPE', rs_line_blue_dot_recent: false },
+      { symbol: 'LEGACY' },
+    ];
+    const filters = buildDefaultScanFilters();
+    filters.rsLineBlueDotRecent = false;
+
+    const filtered = filterStaticScanRows(testRows, filters);
+
+    expect(filtered.map((row) => row.symbol)).toEqual(['NOPE', 'LEGACY']);
+  });
+
+  it('keeps the legacy setup-engine blue-dot filter wired in static mode', () => {
+    const testRows = [
+      { symbol: 'SETUP', se_rs_line_blue_dot: true },
+      { symbol: 'RESTING', se_rs_line_blue_dot: false },
+    ];
+    const filters = buildDefaultScanFilters();
+    filters.seRsLineBlueDot = true;
+
+    const filtered = filterStaticScanRows(testRows, filters);
+
+    expect(filtered.map((row) => row.symbol)).toEqual(['SETUP']);
+  });
+
   it('supports exclude-mode categorical filters', () => {
     const filters = buildDefaultScanFilters();
     filters.ibdIndustries = { values: ['Semiconductors'], mode: 'exclude' };

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Any
 import pandas as pd
 
+from app.analysis.patterns.rs_line import RsLineLeadershipSnapshot
+
 
 @dataclass
 class DataRequirements:
@@ -110,6 +112,9 @@ class PrecomputedScanContext:
     high_52w: Optional[float]
     low_52w: Optional[float]
     rs_ratings: Optional[Dict[str, float]] = None
+    rs_line_leadership: RsLineLeadershipSnapshot = field(
+        default_factory=RsLineLeadershipSnapshot.empty
+    )
 
 
 @dataclass

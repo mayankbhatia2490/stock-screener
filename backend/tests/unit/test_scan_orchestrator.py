@@ -34,9 +34,11 @@ class FakeDataProvider(StockDataProvider):
     def __init__(self, stock_data_map: dict[str, StockData]):
         self._map = stock_data_map
         self.prepare_data_called = False
+        self.last_requirements = None
 
     def prepare_data(self, symbol: str, requirements: object) -> StockData:
         self.prepare_data_called = True
+        self.last_requirements = requirements
         return self._map[symbol]
 
     def prepare_data_bulk(
@@ -69,6 +71,34 @@ def _make_stock_data(symbol: str = "TEST", n_days: int = 200) -> StockData:
         symbol=symbol,
         price_data=df,
         benchmark_data=benchmark,
+    )
+
+
+def _make_rs_leadership_stock_data(symbol: str = "TEST") -> StockData:
+    """Build full-history data where RS breaks out before price."""
+    dates = pd.date_range(end="2026-01-06", periods=260, freq="B")
+    close = pd.Series(100.0, index=dates)
+    close.iloc[-40] = 120.0
+    close.iloc[-1] = 110.0
+    benchmark_close = pd.Series(100.0, index=dates)
+    benchmark_close.iloc[-1] = 80.0
+
+    price_data = pd.DataFrame(
+        {
+            "Open": close,
+            "High": close * 1.02,
+            "Low": close * 0.98,
+            "Close": close,
+            "Volume": 1_000_000,
+        },
+        index=dates,
+    )
+    benchmark_data = price_data.copy()
+    benchmark_data["Close"] = benchmark_close
+    return StockData(
+        symbol=symbol,
+        price_data=price_data,
+        benchmark_data=benchmark_data,
     )
 
 
@@ -222,6 +252,20 @@ class TestScanOrchestratorScoring:
 
         # Falls back to weighted_average = (80 + 60) / 2 = 70
         assert result["composite_score"] == 70.0
+
+    def test_rs_line_leadership_metrics_are_promoted_to_result(self):
+        stock_data = _make_rs_leadership_stock_data()
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        result = orch.scan_stock_multi("TEST", ["alpha"], composite_method="weighted_average")
+
+        assert result["rs_line_new_high"] is True
+        assert result["rs_line_new_high_before_price"] is True
+        assert result["rs_line_blue_dot_recent"] is True
+        assert result["rs_line_new_high_date"] == "2026-01-06"
 
 
 class TestScanOrchestratorRating:
@@ -613,6 +657,33 @@ class TestScanOrchestratorErrorPaths:
 
 
 class TestScanOrchestratorDataFlow:
+    def test_merged_requirements_request_benchmark_for_row_rs_fields(self):
+        stock_data = _make_stock_data("TEST", n_days=260)
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        requirements = orch.get_merged_requirements(["alpha"])
+
+        assert requirements.needs_benchmark is True
+
+    def test_pre_merged_requirements_are_upgraded_for_row_rs_fields(self):
+        stock_data = _make_stock_data("TEST", n_days=260)
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        orch.scan_stock_multi(
+            "TEST",
+            ["alpha"],
+            composite_method="weighted_average",
+            pre_merged_requirements=DataRequirements(needs_benchmark=False),
+        )
+
+        assert provider.last_requirements.needs_benchmark is True
+
     def test_pre_fetched_data_skips_provider(self):
         """When pre_fetched_data is passed, provider.prepare_data is not called."""
         stock_data = _make_stock_data("TEST", n_days=200)

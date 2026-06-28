@@ -24,6 +24,8 @@ const defaultFilters = () => ({
   seVolumeVs50d: { min: null, max: null },
   seSetupReady: null,
   seRsLineNewHigh: null,
+  seRsLineBlueDot: null,
+  rsLineBlueDotRecent: null,
   rsRating: { min: null, max: null },
   rs1m: { min: null, max: null },
   rs3m: { min: null, max: null },
@@ -97,6 +99,11 @@ describe('FilterPanel', () => {
     it('renders RS Hi checkbox', () => {
       renderWithProviders(<FilterPanel {...makeProps()} />);
       expect(screen.getByText('RS Hi')).toBeInTheDocument();
+    });
+
+    it('renders RS Blue Dot checkbox', () => {
+      renderWithProviders(<FilterPanel {...makeProps()} />);
+      expect(screen.getByText('RS Blue Dot')).toBeInTheDocument();
     });
   });
 
@@ -183,6 +190,23 @@ describe('FilterPanel', () => {
       );
     });
 
+    it('sets rsLineBlueDotRecent=true when Yes is clicked', async () => {
+      const onFilterChange = vi.fn();
+      renderWithProviders(
+        <FilterPanel {...makeProps({ onFilterChange })} />
+      );
+
+      const user = userEvent.setup();
+      const bdLabel = screen.getByText('RS Blue Dot');
+      const bdContainer = bdLabel.closest('[class*="MuiGrid-item"]');
+      const yesBtn = within(bdContainer).getByText('Yes');
+
+      await user.click(yesBtn);
+      expect(onFilterChange).toHaveBeenCalledWith(
+        expect.objectContaining({ rsLineBlueDotRecent: true })
+      );
+    });
+
     it('resets seSetupReady to null when Yes is toggled off', async () => {
       const onFilterChange = vi.fn();
       const filters = { ...defaultFilters(), seSetupReady: true };
@@ -257,6 +281,14 @@ describe('FilterPanel', () => {
         <FilterPanel {...makeProps({ filters })} />
       );
       expect(screen.getByText('RS New Hi: No')).toBeInTheDocument();
+    });
+
+    it('shows "RS Blue Dot: Yes" chip when rsLineBlueDotRecent=true', () => {
+      const filters = { ...defaultFilters(), rsLineBlueDotRecent: true };
+      renderWithProviders(
+        <FilterPanel {...makeProps({ filters })} />
+      );
+      expect(screen.getByText('RS Blue Dot: Yes')).toBeInTheDocument();
     });
 
     it('removes filter when chip delete is clicked', async () => {

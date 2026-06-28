@@ -1,6 +1,19 @@
 """Scan and scan result models"""
 import logging
-from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime, JSON, Index, ForeignKey, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    false,
+    text,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from ..database import Base
@@ -154,6 +167,18 @@ class ScanResult(Base):
     rs_sparkline_data = Column(JSON)  # Array of 30 normalized RS ratio values
     rs_trend = Column(Integer, index=True)  # -1=declining, 0=flat, 1=improving
 
+    # RS-line leadership signals
+    rs_line_new_high = Column(
+        Boolean, nullable=False, default=False, server_default=false(), index=True
+    )
+    rs_line_new_high_before_price = Column(
+        Boolean, nullable=False, default=False, server_default=false(), index=True
+    )
+    rs_line_blue_dot_recent = Column(
+        Boolean, nullable=False, default=False, server_default=false(), index=True
+    )
+    rs_line_new_high_date = Column(String(10), nullable=True, index=True)
+
     # Price Sparkline data (30-day normalized price trend)
     price_sparkline_data = Column(JSON)  # Array of 30 normalized price values
     price_change_1d = Column(Float, index=True)  # 1-day percentage change
@@ -219,6 +244,11 @@ class ScanResult(Base):
         Index("idx_scan_gics_sector", "scan_id", "gics_sector"),
         # RS Sparkline trend index
         Index("idx_scan_rs_trend", "scan_id", "rs_trend"),
+        # RS-line leadership indexes
+        Index("idx_scan_rs_line_new_high", "scan_id", "rs_line_new_high"),
+        Index("idx_scan_rs_line_new_high_before_price", "scan_id", "rs_line_new_high_before_price"),
+        Index("idx_scan_rs_line_blue_dot_recent", "scan_id", "rs_line_blue_dot_recent"),
+        Index("idx_scan_rs_line_new_high_date", "scan_id", "rs_line_new_high_date"),
         # Price Sparkline indexes
         Index("idx_scan_price_trend", "scan_id", "price_trend"),
         Index("idx_scan_price_change_1d", "scan_id", "price_change_1d"),

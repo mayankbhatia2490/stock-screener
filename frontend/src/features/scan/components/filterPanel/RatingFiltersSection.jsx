@@ -165,7 +165,7 @@ function RatingFiltersSection({
         </Grid>
         <Grid item xs={6} sm={3} md={1}>
           <CompactCheckbox
-            label="Blue Dot"
+            label="SE Blue Dot"
             value={filters.seRsLineBlueDot}
             onChange={(value) => updateFilter('seRsLineBlueDot', value)}
           />
