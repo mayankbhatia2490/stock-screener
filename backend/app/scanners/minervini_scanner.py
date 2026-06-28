@@ -25,6 +25,7 @@ from .criteria.adr_calculator import ADRCalculator
 from .criteria.rs_sparkline import RSSparklineCalculator
 from .criteria.price_sparkline import PriceSparklineCalculator
 from .criteria.beta_calculator import BetaCalculator
+from ..services.signal_engine import score_buy_signal, calculate_stop_loss
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +388,33 @@ class MinerviniScanner(BaseStockScreener):
                 except Exception as e:
                     logger.warning(f"VCP detection failed for {symbol}: {e}")
 
+            # Signal engine scoring (0-125 buy signal score)
+            signal_result = None
+            try:
+                current_price_val = float(prices.iloc[-1]) if len(prices) > 0 else 0.0
+                phase_info = {
+                    "phase": stage_result.get("stage", 0),
+                    "sma_50": float(ma_50),
+                    "sma_200": float(ma_200),
+                    "slope_50": float((ma_50 - prices.iloc[-20:].mean()) / prices.iloc[-20:].mean()) if len(prices) >= 20 else 0.0,
+                    "slope_200": float((ma_200 - prices.iloc[-60:].mean()) / prices.iloc[-60:].mean()) if len(prices) >= 60 else 0.0,
+                    "distance_from_50sma": float((current_price_val - ma_50) / ma_50 * 100) if ma_50 > 0 else 0.0,
+                    "distance_from_200sma": float((current_price_val - ma_200) / ma_200 * 100) if ma_200 > 0 else 0.0,
+                }
+                price_df = stock_data.price_data if stock_data.price_data is not None and not stock_data.price_data.empty else pd.DataFrame({"Close": prices[::-1], "High": prices[::-1], "Low": prices[::-1], "Volume": volumes[::-1]})
+                bmark = stock_data.benchmark_data
+                rs_series = (price_df["Close"] / bmark["Close"]) if (bmark is not None and not bmark.empty and "Close" in bmark.columns) else pd.Series([], dtype=float)
+                signal_result = score_buy_signal(
+                    ticker=symbol,
+                    price_data=price_df,
+                    current_price=current_price_val,
+                    phase_info=phase_info,
+                    rs_series=rs_series,
+                    vcp_data=vcp_result,
+                )
+            except Exception as e:
+                logger.debug(f"Signal engine skipped for {symbol}: {e}")
+
             # Calculate Minervini score
             score_result = self._calculate_minervini_score(
                 rs_result,
@@ -450,6 +478,11 @@ class MinerviniScanner(BaseStockScreener):
                 # Pocket Pivot / Power Trend
                 "pocket_pivot": pocket_pivot,
                 "power_trend": power_trend,
+                # Signal engine output
+                "signal_score": signal_result["score"] if signal_result else None,
+                "stop_loss": signal_result["stop_loss"] if signal_result else None,
+                "buy_signal": signal_result["is_buy"] if signal_result else None,
+                "breakout_type": signal_result["details"].get("breakout", {}).get("breakout_type") if signal_result and signal_result.get("details") else None,
                 # Beta and Beta-Adjusted RS metrics
                 "beta": beta_metrics.get("beta"),
                 "beta_adj_rs": beta_metrics.get("beta_adj_rs"),

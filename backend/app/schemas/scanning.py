@@ -229,6 +229,12 @@ class ScanResultItem(BaseModel):
     composite_reason: Optional[str] = None
     ipo_bonus: Optional[float] = None
 
+    # Signal engine fields (Weinstein/Minervini buy signal scoring)
+    signal_score: Optional[float] = None      # 0-125 composite buy signal score
+    stop_loss: Optional[float] = None         # Calculated stop-loss price
+    buy_signal: Optional[bool] = None         # True if signal_score >= 70
+    breakout_type: Optional[str] = None       # e.g. "VCP Breakout", "Base Breakout"
+
     @field_validator("price_sparkline_data", "rs_sparkline_data", mode="before")
     @classmethod
     def _validate_sparkline(cls, value: Any) -> Optional[List[float]]:
@@ -307,6 +313,11 @@ class ScanResultItem(BaseModel):
             passes_template=ef.get("passes_template"),
             pocket_pivot=ef.get("pocket_pivot"),
             power_trend=ef.get("power_trend"),
+            # Signal engine fields
+            signal_score=ef.get("signal_score"),
+            stop_loss=ef.get("stop_loss"),
+            buy_signal=ef.get("buy_signal"),
+            breakout_type=ef.get("breakout_type"),
             # Growth fields
             adr_percent=ef.get("adr_percent"),
             eps_growth_qq=ef.get("eps_growth_qq"),
