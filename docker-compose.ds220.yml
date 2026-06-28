@@ -15,7 +15,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          memory: 768m
 
   celery-userscans:
     deploy:
@@ -33,7 +33,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1g
+          memory: 768m
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-stockscanner}
       POSTGRES_USER: ${POSTGRES_USER:-stockscanner}
