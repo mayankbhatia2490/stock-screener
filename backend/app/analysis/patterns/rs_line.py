@@ -57,6 +57,7 @@ class RsLineLeadershipSeries:
     rs_new_high: pd.Series
     price_new_high: pd.Series
     blue_dot: pd.Series
+    blue_dot_by_stock_date: pd.Series
     latest_is_aligned: bool = True
 
     @classmethod
@@ -69,6 +70,7 @@ class RsLineLeadershipSeries:
             rs_new_high=empty_bool,
             price_new_high=empty_bool,
             blue_dot=empty_bool,
+            blue_dot_by_stock_date=empty_bool,
             latest_is_aligned=False,
         )
 
@@ -91,7 +93,9 @@ class RsLineLeadershipSeries:
         return RsLineLeadershipSnapshot(
             rs_line_new_high=bool(self.rs_new_high.iloc[-1]),
             rs_line_new_high_before_price=bool(self.blue_dot.iloc[-1]),
-            rs_line_blue_dot_recent=bool(self.blue_dot.tail(recent_days).any()),
+            rs_line_blue_dot_recent=bool(
+                self.blue_dot_by_stock_date.tail(recent_days).any()
+            ),
             rs_line_new_high_date=latest_new_high_date,
         )
 
@@ -174,12 +178,16 @@ def rs_line_leadership_series(
         .fillna(False)
         .astype(bool)
     )
+    blue_dot = rs_new_high & (~price_new_high)
+    blue_dot_by_stock_date = pd.Series(False, index=price.index, dtype=bool)
+    blue_dot_by_stock_date.loc[blue_dot.index] = blue_dot
     return RsLineLeadershipSeries(
         rs=frame["rs"],
         price=price.reindex(frame.index),
         rs_new_high=rs_new_high,
         price_new_high=price_new_high,
-        blue_dot=rs_new_high & (~price_new_high),
+        blue_dot=blue_dot,
+        blue_dot_by_stock_date=blue_dot_by_stock_date,
         latest_is_aligned=latest_is_aligned,
     )
 

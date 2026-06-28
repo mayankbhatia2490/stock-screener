@@ -146,6 +146,33 @@ def test_rs_line_leadership_snapshot_empty_when_latest_benchmark_bar_is_missing(
     assert snapshot == RsLineLeadershipSnapshot.empty()
 
 
+def test_rs_line_blue_dot_recent_counts_missing_benchmark_sessions_as_false():
+    dates = pd.date_range("2026-01-01", periods=7, freq="D")
+    stock = pd.Series([100, 99, 98, 97, 96, 95, 94], index=dates)
+    benchmark = pd.Series([100, 90, 100, None, 100, 100, 100], index=dates)
+
+    leadership = rs_line_leadership_series(stock, benchmark, lookback=7)
+    snapshot = leadership.to_snapshot(recent_days=5)
+
+    assert list(leadership.blue_dot.index) == [
+        dates[0],
+        dates[1],
+        dates[2],
+        dates[4],
+        dates[5],
+        dates[6],
+    ]
+    assert bool(leadership.blue_dot.loc[dates[1]]) is True
+    assert leadership.blue_dot_by_stock_date.tail(5).tolist() == [
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert snapshot.rs_line_blue_dot_recent is False
+
+
 def test_rs_line_leadership_snapshot_omits_non_date_index_label():
     stock = pd.Series([10, 11, 12, 11], index=pd.RangeIndex(4))
     benchmark = pd.Series([10, 10, 9, 7], index=pd.RangeIndex(4))
