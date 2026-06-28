@@ -59,8 +59,6 @@ def json_safe(value: Any, *, stringify_keys: bool = True) -> Any:
         }
     if isinstance(value, (list, tuple, set)):
         return [json_safe(item, stringify_keys=stringify_keys) for item in value]
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
     try:
         import pandas as pd
 
@@ -68,6 +66,8 @@ def json_safe(value: Any, *, stringify_keys: bool = True) -> Any:
             return None
     except (ImportError, TypeError, ValueError):
         pass
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return value
 
 

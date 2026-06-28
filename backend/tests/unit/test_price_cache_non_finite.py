@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 from datetime import date
 
 import pandas as pd
@@ -109,3 +110,41 @@ def test_incremental_merge_uses_cleaned_price_frame_for_redis_db_and_return():
     assert result["Close"].tolist() == [100.0, 101.0]
     assert captured["redis"]["Close"].tolist() == [100.0, 101.0]
     assert captured["db"]["Close"].tolist() == [101.0]
+
+
+def test_get_many_falls_back_to_db_when_redis_payload_normalizes_away():
+    class FakePipeline:
+        def get(self, _key):
+            return self
+
+        def execute(self):
+            poisoned = _price_frame([float("nan")], [date(2026, 6, 24)])
+            return [pickle.dumps(poisoned), None]
+
+    class FakeRedis:
+        def pipeline(self):
+            return FakePipeline()
+
+    service = PriceCacheService(redis_client=FakeRedis(), session_factory=lambda: None)
+    db_frame = _price_frame([100.0, 101.0], [date(2026, 6, 23), date(2026, 6, 24)])
+    fallback_calls = []
+
+    service._get_expected_data_date = lambda: date(2026, 6, 24)  # type: ignore[assignment]
+    service._get_many_from_database = lambda symbols, period: {  # type: ignore[assignment]
+        symbol: (db_frame, date(2026, 6, 24)) for symbol in symbols
+    }
+    service._active_market_by_symbol = lambda symbols: {symbol: "US" for symbol in symbols}  # type: ignore[assignment]
+    service._store_recent_in_redis = lambda symbol, data, market=None: None  # type: ignore[assignment]
+
+    original_resolve = service._resolve_bulk_fallback
+
+    def record_fallback(symbols, **kwargs):
+        fallback_calls.append(list(symbols))
+        return original_resolve(symbols, **kwargs)
+
+    service._resolve_bulk_fallback = record_fallback  # type: ignore[assignment]
+
+    result = service.get_many(["SPY"], period="2y")
+
+    assert fallback_calls == [["SPY"]]
+    assert result["SPY"] is db_frame

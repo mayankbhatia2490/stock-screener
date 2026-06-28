@@ -26,3 +26,9 @@ def test_json_safe_and_convert_numpy_types_share_numpy_and_date_conversion():
         "date": "2026-06-24",
         "nested": {"value": None},
     }
+
+
+def test_json_safe_converts_pandas_nat_to_null_before_date_formatting():
+    pd = pytest.importorskip("pandas")
+
+    assert json_safe({"date": pd.NaT}) == {"date": None}

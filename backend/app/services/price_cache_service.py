@@ -1879,6 +1879,7 @@ class PriceCacheService:
                             df = normalize_price_frame(df)
                             if df is None:
                                 cached_data[symbol] = None
+                                redis_misses.append(symbol)
                                 continue
 
                             # Check if Redis data is sufficient for requested period
