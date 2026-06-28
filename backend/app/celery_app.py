@@ -51,6 +51,7 @@ celery_app = Celery(
         'app.tasks.runtime_bootstrap_tasks',  # Local-default first-run bootstrap orchestration
         'app.tasks.static_export_tasks',  # Scheduled static-data bundle export
         'app.interfaces.tasks.feature_store_tasks',  # Daily feature snapshot
+        'app.tasks.signal_tracker',  # Nightly open signal outcome tracking
     ]
 )
 celery_app.loader.override_backends = {
@@ -520,6 +521,10 @@ if settings.cache_warmup_enabled:
                 minute=0,
                 day_of_week=0,  # Sunday
             ),
+        },
+        'track-open-signals': {
+            'task': 'app.tasks.signal_tracker.track_open_signals',
+            'schedule': crontab(hour=23, minute=0),
         },
     }
 
