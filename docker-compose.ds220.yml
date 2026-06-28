@@ -1,56 +1,10 @@
 services:
-  backend:
-    deploy:
-      resources:
-        limits:
-          memory: 1.5g
-
-  celery-general:
-    deploy:
-      resources:
-        limits:
-          memory: 512m
-
-  celery-datafetch:
-    deploy:
-      resources:
-        limits:
-          memory: 768m
-
-  celery-userscans:
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-
-  celery-beat:
-    deploy:
-      resources:
-        limits:
-          memory: 128m
-
   postgres:
-    deploy:
-      resources:
-        limits:
-          memory: 768m
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-stockscanner}
       POSTGRES_USER: ${POSTGRES_USER:-stockscanner}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stockscanner}
-      POSTGRES_SHARED_BUFFERS: 256MB
-      POSTGRES_EFFECTIVE_CACHE_SIZE: 512MB
-      POSTGRES_WORK_MEM: 16MB
-      POSTGRES_MAX_CONNECTIONS: "50"
-
-  redis:
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-
-  frontend:
-    deploy:
-      resources:
-        limits:
-          memory: 256m
+      POSTGRES_SHARED_BUFFERS: 1GB
+      POSTGRES_EFFECTIVE_CACHE_SIZE: 2GB
+      POSTGRES_WORK_MEM: 64MB
+      POSTGRES_MAX_CONNECTIONS: "100"
