@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
+import pandas as pd
+
 from app.analysis.patterns.rs_line import (
     DEFAULT_BLUE_DOT_RECENT_DAYS,
     DEFAULT_LOOKBACK,
@@ -20,14 +24,16 @@ def _calculate_price_change_1d(close_chrono) -> float | None:
         return None
     previous = close_chrono.iloc[-2]
     current = close_chrono.iloc[-1]
-    if previous is None or previous == 0:
+    if pd.isna(previous) or pd.isna(current):
         return None
     try:
-        if previous != previous or current != current:
-            return None
-    except Exception:
-        pass
-    return round(float(((current - previous) / previous) * 100), 2)
+        previous_float = float(previous)
+        current_float = float(current)
+    except (TypeError, ValueError):
+        return None
+    if previous_float == 0 or not math.isfinite(previous_float) or not math.isfinite(current_float):
+        return None
+    return round(((current_float - previous_float) / previous_float) * 100, 2)
 
 
 def partial_history_metrics(stock_data: StockData) -> dict[str, object]:

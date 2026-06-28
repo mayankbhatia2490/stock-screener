@@ -159,15 +159,21 @@ def rs_line_leadership_series(
     if lookback < 1:
         raise ValueError("lookback must be >= 1")
 
+    price = stock_close.astype(float)
     rs = _aligned_ratio(stock_close, benchmark_close)
-    frame = pd.DataFrame({"rs": rs, "price": stock_close.astype(float)}).dropna()
+    frame = pd.DataFrame({"rs": rs}).dropna()
     if frame.empty:
         return RsLineLeadershipSeries.empty()
     rs_new_high = rolling_at_new_high(frame["rs"], window=lookback)
-    price_new_high = rolling_at_new_high(frame["price"], window=lookback)
+    price_new_high = (
+        rolling_at_new_high(price, window=lookback)
+        .reindex(frame.index)
+        .fillna(False)
+        .astype(bool)
+    )
     return RsLineLeadershipSeries(
         rs=frame["rs"],
-        price=frame["price"],
+        price=price.reindex(frame.index),
         rs_new_high=rs_new_high,
         price_new_high=price_new_high,
         blue_dot=rs_new_high & (~price_new_high),

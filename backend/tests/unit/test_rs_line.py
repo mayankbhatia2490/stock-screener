@@ -92,6 +92,19 @@ def test_rs_line_leadership_snapshot_distinguishes_price_new_high():
     assert snapshot.rs_line_new_high_date == "2026-01-06"
 
 
+def test_rs_line_leadership_price_high_uses_full_price_window_when_benchmark_has_gap():
+    dates = pd.date_range("2026-01-01", periods=5, freq="D")
+    stock = pd.Series([100, 120, 105, 106, 110], index=dates)
+    benchmark = pd.Series([100, None, 100, 90, 80], index=dates, dtype=float)
+
+    leadership = rs_line_leadership_series(stock, benchmark, lookback=5)
+
+    assert list(leadership.rs.index) == [dates[0], dates[2], dates[3], dates[4]]
+    assert bool(leadership.rs_new_high.iloc[-1]) is True
+    assert bool(leadership.price_new_high.iloc[-1]) is False
+    assert bool(leadership.blue_dot.iloc[-1]) is True
+
+
 def test_rs_line_leadership_snapshot_keeps_recent_blue_dot_after_current_flag_fades():
     dates = pd.date_range("2026-01-01", periods=8, freq="D")
     stock = pd.Series([10, 11, 12, 13, 12.5, 12.3, 12.2, 12.1], index=dates)

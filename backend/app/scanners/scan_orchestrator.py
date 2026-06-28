@@ -185,6 +185,21 @@ def _required_bars_for_screener(name: str) -> int:
     return _SCREENER_MIN_BARS.get(name, _DEFAULT_SCREENER_MIN_BARS)
 
 
+def _requirements_with_rs_line_fields(
+    requirements: DataRequirements,
+) -> DataRequirements:
+    """Row-level RS leadership fields need benchmark data for every scan row."""
+    if requirements.needs_benchmark:
+        return requirements
+    return DataRequirements(
+        price_period=requirements.price_period,
+        needs_fundamentals=requirements.needs_fundamentals,
+        needs_quarterly_growth=requirements.needs_quarterly_growth,
+        needs_benchmark=True,
+        needs_earnings_history=requirements.needs_earnings_history,
+    )
+
+
 def _compute_ipo_bonus(ipo_score: float | None, history_bars: int) -> float:
     if (
         ipo_score is None
@@ -252,10 +267,12 @@ class ScanOrchestrator:
             return DataRequirements()
 
         screeners = self._registry.get_multiple(screener_names)
-        return DataRequirements.merge_all([
-            screener.get_data_requirements(criteria)
-            for screener in screeners.values()
-        ])
+        return _requirements_with_rs_line_fields(
+            DataRequirements.merge_all([
+                screener.get_data_requirements(criteria)
+                for screener in screeners.values()
+            ])
+        )
 
     def scan_stock_multi(
         self,
@@ -316,13 +333,15 @@ class ScanOrchestrator:
             else:
                 # Merge requirements and fetch data (legacy path)
                 if pre_merged_requirements:
-                    requirements = pre_merged_requirements
+                    requirements = _requirements_with_rs_line_fields(pre_merged_requirements)
                     logger.debug(f"Using pre-merged requirements for {symbol}")
                 else:
-                    requirements = DataRequirements.merge_all([
-                        screener.get_data_requirements(criteria)
-                        for screener in screeners.values()
-                    ])
+                    requirements = _requirements_with_rs_line_fields(
+                        DataRequirements.merge_all([
+                            screener.get_data_requirements(criteria)
+                            for screener in screeners.values()
+                        ])
+                    )
                     logger.info(f"Merged data requirements for {symbol}: {requirements}")
 
                 # Fetch data ONCE

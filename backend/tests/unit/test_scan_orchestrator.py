@@ -34,9 +34,11 @@ class FakeDataProvider(StockDataProvider):
     def __init__(self, stock_data_map: dict[str, StockData]):
         self._map = stock_data_map
         self.prepare_data_called = False
+        self.last_requirements = None
 
     def prepare_data(self, symbol: str, requirements: object) -> StockData:
         self.prepare_data_called = True
+        self.last_requirements = requirements
         return self._map[symbol]
 
     def prepare_data_bulk(
@@ -655,6 +657,33 @@ class TestScanOrchestratorErrorPaths:
 
 
 class TestScanOrchestratorDataFlow:
+    def test_merged_requirements_request_benchmark_for_row_rs_fields(self):
+        stock_data = _make_stock_data("TEST", n_days=260)
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        requirements = orch.get_merged_requirements(["alpha"])
+
+        assert requirements.needs_benchmark is True
+
+    def test_pre_merged_requirements_are_upgraded_for_row_rs_fields(self):
+        stock_data = _make_stock_data("TEST", n_days=260)
+        provider = FakeDataProvider({"TEST": stock_data})
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        orch.scan_stock_multi(
+            "TEST",
+            ["alpha"],
+            composite_method="weighted_average",
+            pre_merged_requirements=DataRequirements(needs_benchmark=False),
+        )
+
+        assert provider.last_requirements.needs_benchmark is True
+
     def test_pre_fetched_data_skips_provider(self):
         """When pre_fetched_data is passed, provider.prepare_data is not called."""
         stock_data = _make_stock_data("TEST", n_days=200)

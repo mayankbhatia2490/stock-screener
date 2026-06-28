@@ -521,6 +521,7 @@ const VirtualTableRow = memo(function VirtualTableRow({
          prevProps.row.data_status === nextProps.row.data_status &&
          prevProps.row.is_scannable === nextProps.row.is_scannable &&
          prevProps.row.composite_reason === nextProps.row.composite_reason &&
+         prevProps.row.se_rs_line_blue_dot === nextProps.row.se_rs_line_blue_dot &&
          prevProps.row.rs_line_blue_dot_recent === nextProps.row.rs_line_blue_dot_recent &&
          prevProps.row.rs_line_new_high_date === nextProps.row.rs_line_new_high_date &&
          (prevProps.row.market_themes || []).join('|') === (nextProps.row.market_themes || []).join('|') &&
