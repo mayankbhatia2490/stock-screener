@@ -30,6 +30,34 @@ from ..services.signal_engine import score_buy_signal, calculate_stop_loss
 logger = logging.getLogger(__name__)
 
 
+def _calc_rr(entry_price: float, signal_result: dict) -> float | None:
+    """Risk:reward ratio — (price_target - entry) / (entry - stop_loss)."""
+    try:
+        stop = signal_result.get("stop_loss")
+        if not stop or stop >= entry_price or entry_price <= 0:
+            return None
+        risk = entry_price - stop
+        # Use 2:1 minimum target; actual target from signal if available
+        target = signal_result.get("details", {}).get("target_price") or (entry_price + risk * 2)
+        reward = target - entry_price
+        return round(reward / risk, 2) if risk > 0 else None
+    except Exception:
+        return None
+
+
+def _calc_severity(score: float | None) -> str | None:
+    """Map signal score to severity label."""
+    if score is None:
+        return None
+    if score >= 90:
+        return "critical"
+    if score >= 75:
+        return "high"
+    if score >= 60:
+        return "medium"
+    return "watch"
+
+
 @register_screener
 class MinerviniScanner(BaseStockScreener):
     """
@@ -483,6 +511,8 @@ class MinerviniScanner(BaseStockScreener):
                 "stop_loss": signal_result["stop_loss"] if signal_result else None,
                 "buy_signal": signal_result["is_buy"] if signal_result else None,
                 "breakout_type": signal_result["details"].get("breakout", {}).get("breakout_type") if signal_result and signal_result.get("details") else None,
+                "risk_reward_ratio": _calc_rr(current_price_val, signal_result) if signal_result else None,
+                "signal_severity": _calc_severity(signal_result["score"] if signal_result else None),
                 # Beta and Beta-Adjusted RS metrics
                 "beta": beta_metrics.get("beta"),
                 "beta_adj_rs": beta_metrics.get("beta_adj_rs"),

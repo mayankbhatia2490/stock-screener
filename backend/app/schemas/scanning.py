@@ -234,6 +234,8 @@ class ScanResultItem(BaseModel):
     stop_loss: Optional[float] = None         # Calculated stop-loss price
     buy_signal: Optional[bool] = None         # True if signal_score >= 70
     breakout_type: Optional[str] = None       # e.g. "VCP Breakout", "Base Breakout"
+    risk_reward_ratio: Optional[float] = None # R:R ratio (reward / risk), e.g. 2.5 = 2.5:1
+    signal_severity: Optional[str] = None    # "critical" | "high" | "medium" | "watch"
 
     @field_validator("price_sparkline_data", "rs_sparkline_data", mode="before")
     @classmethod
@@ -318,6 +320,8 @@ class ScanResultItem(BaseModel):
             stop_loss=ef.get("stop_loss"),
             buy_signal=ef.get("buy_signal"),
             breakout_type=ef.get("breakout_type"),
+            risk_reward_ratio=ef.get("risk_reward_ratio"),
+            signal_severity=ef.get("signal_severity"),
             # Growth fields
             adr_percent=ef.get("adr_percent"),
             eps_growth_qq=ef.get("eps_growth_qq"),

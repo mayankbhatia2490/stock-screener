@@ -52,6 +52,7 @@ celery_app = Celery(
         'app.tasks.static_export_tasks',  # Scheduled static-data bundle export
         'app.interfaces.tasks.feature_store_tasks',  # Daily feature snapshot
         'app.tasks.signal_tracker',  # Nightly open signal outcome tracking
+        'app.tasks.notification_tasks',  # Morning digest — Slack + email
     ]
 )
 celery_app.loader.override_backends = {
@@ -525,6 +526,12 @@ if settings.cache_warmup_enabled:
         'track-open-signals': {
             'task': 'app.tasks.signal_tracker.track_open_signals',
             'schedule': crontab(hour=23, minute=0),
+        },
+        # Morning digest — 06:30 ET Monday–Friday
+        'morning-digest-us': {
+            'task': 'app.tasks.notification_tasks.send_morning_digest',
+            'schedule': crontab(hour=6, minute=30, day_of_week='1-5'),
+            'kwargs': {'market': 'us'},
         },
     }
 
