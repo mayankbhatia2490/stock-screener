@@ -5,7 +5,7 @@ import logging
 from datetime import date
 
 from ..celery_app import celery_app
-from ..infra.db.session import get_db_session
+from ..database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -61,30 +61,20 @@ def send_morning_digest(self, market: str = "us") -> dict:
 
 def _fetch_digest_data(market: str) -> tuple[list, dict | None, dict | None]:
     """Fetch top signals, regime, and breadth from DB."""
-    from ..services.daily_snapshot_service import build_daily_snapshot
-    from ..services.market_regime_service import get_market_regime
+    from ..services.market_regime import get_market_regime
 
-    with get_db_session() as db:
+    db = SessionLocal()
+    try:
         regime = None
         try:
-            regime = get_market_regime(db, market=market)
+            regime = get_market_regime(db)
         except Exception:
             pass
 
-        breadth = None
-        signals: list = []
-
-        try:
-            snapshot = build_daily_snapshot(db, market=market)
-            if snapshot:
-                rows = snapshot.get("top_candidates", {}).get("rows", [])
-                signals = [dict(r) for r in rows[:20]]
-                breadth = snapshot.get("market_health_exposure")
-        except Exception as exc:
-            logger.warning("Snapshot fetch failed, falling back to scan results: %s", exc)
-            signals = _fallback_scan_results(db, market)
-
-    return signals, regime, breadth
+        signals = _fallback_scan_results(db, market)
+        return signals, regime, None
+    finally:
+        db.close()
 
 
 def _fallback_scan_results(db, market: str) -> list:
