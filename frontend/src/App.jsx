@@ -284,7 +284,7 @@ const getDesignTokens = (mode) => ({
 });
 
 function App() {
-  const [mode, setMode] = useState('dark');
+  const [mode, setMode] = useState('light');
 
   const colorMode = useMemo(
     () => ({
