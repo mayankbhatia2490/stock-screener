@@ -180,8 +180,10 @@ def test_import_daily_price_bundle_script_verifies_manifest(monkeypatch, tmp_pat
                 "schema_version": DailyPriceBundleService.DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
                 "market": "CN",
                 "as_of_date": "2026-05-08",
+                "source_revision": "daily_prices_cn:20260508120000",
                 "bundle_asset_name": bundle_path.name,
                 "bar_period": DailyPriceBundleService.DAILY_PRICE_BAR_PERIOD,
+                "symbol_count": 2,
                 "sha256": hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
             }
         ),
@@ -220,6 +222,10 @@ def test_import_daily_price_bundle_script_verifies_manifest(monkeypatch, tmp_pat
 
     assert import_daily_script.main() == 0
     assert captured["input_path"] == bundle_path
+    assert captured["expected_metadata"].market == "CN"
+    assert captured["expected_metadata"].as_of_date.isoformat() == "2026-05-08"
+    assert captured["expected_metadata"].source_revision == "daily_prices_cn:20260508120000"
+    assert captured["expected_metadata"].symbol_count == 2
 
 
 def test_import_daily_price_bundle_manifest_rejects_checksum_mismatch(tmp_path):

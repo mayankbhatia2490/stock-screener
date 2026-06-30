@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import requests
+
+
+class _ChecksumMismatchError(Exception):
+    def __init__(self, *, actual: str, expected: str) -> None:
+        super().__init__(f"Bundle checksum mismatch: {actual} != {expected}")
+        self.actual = actual
+        self.expected = expected
 
 
 class GitHubReleaseSyncService:
@@ -58,6 +66,7 @@ class GitHubReleaseSyncService:
         *,
         github_token: str | None = None,
         request_timeout_seconds: int,
+        expected_sha256: str | None = None,
     ) -> str:
         response = self._session.get(
             url,
@@ -72,19 +81,39 @@ class GitHubReleaseSyncService:
             )
 
         digest = hashlib.sha256()
+        temp_file = tempfile.NamedTemporaryFile(
+            "wb",
+            delete=False,
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+        )
+        temp_path = Path(temp_file.name)
         iter_content = getattr(response, "iter_content", None)
         chunks = (
             iter_content(chunk_size=1024 * 1024)
             if callable(iter_content)
             else (bytes(getattr(response, "content", b"")),)
         )
-        with output_path.open("wb") as handle:
-            for chunk in chunks:
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                digest.update(chunk)
-        return digest.hexdigest()
+        try:
+            with temp_file as handle:
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            expected = str(expected_sha256 or "").strip()
+            if expected and actual_sha256 != expected:
+                raise _ChecksumMismatchError(
+                    actual=actual_sha256,
+                    expected=expected,
+                )
+            temp_path.replace(output_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return actual_sha256
 
     @staticmethod
     def _resolve_stale_validation(
@@ -323,15 +352,25 @@ class GitHubReleaseSyncService:
         output_root = Path(output_dir) if output_dir is not None else Path.cwd()
         output_root.mkdir(parents=True, exist_ok=True)
         bundle_path = output_root / str(bundle_asset_name)
+        expected_sha = str(manifest.get("sha256") or "").strip()
         try:
             digest = self._download_to_path(
                 bundle_url,
                 bundle_path,
                 github_token=github_token,
                 request_timeout_seconds=request_timeout_seconds,
+                expected_sha256=expected_sha,
+            )
+        except _ChecksumMismatchError as exc:
+            return self._result(
+                "checksum_mismatch",
+                manifest=manifest,
+                bundle_asset_name=bundle_asset_name,
+                source_revision=source_revision,
+                reason=str(exc),
+                stale_reason=stale_reason,
             )
         except requests.RequestException as exc:
-            bundle_path.unlink(missing_ok=True)
             return self._result(
                 "network_error",
                 manifest=manifest,
@@ -339,18 +378,6 @@ class GitHubReleaseSyncService:
                 source_revision=source_revision,
                 stale_reason=stale_reason,
                 error=str(exc),
-            )
-
-        expected_sha = str(manifest.get("sha256") or "").strip()
-        if expected_sha and digest != expected_sha:
-            bundle_path.unlink(missing_ok=True)
-            return self._result(
-                "checksum_mismatch",
-                manifest=manifest,
-                bundle_asset_name=bundle_asset_name,
-                source_revision=source_revision,
-                reason=f"Bundle checksum mismatch: {digest} != {expected_sha}",
-                stale_reason=stale_reason,
             )
 
         return self._result(

@@ -165,9 +165,9 @@ def read_daily_price_bundle_metadata(path: Path) -> dict[str, Any]:
 def iter_daily_price_bundle_rows(
     path: Path,
     *,
-    metadata: dict[str, Any] | None = None,
+    metadata_out: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    resolved_metadata = metadata if metadata is not None else {}
+    resolved_metadata = metadata_out if metadata_out is not None else {}
     with open_bundle_text(path) as handle:
         reader = StreamingJsonReader(handle)
         reader.expect("{")

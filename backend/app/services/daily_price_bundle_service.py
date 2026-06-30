@@ -8,6 +8,8 @@ import json
 import math
 import shutil
 import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,123 @@ from .github_release_sync_service import GitHubReleaseSyncService
 from .market_calendar_service import MarketCalendarService
 from .price_row_normalization import stock_price_row_from_ohlcv
 from .stock_price_persistence import persist_stock_price_mappings
+
+
+@dataclass(frozen=True)
+class DailyPriceBundleMetadata:
+    """Typed metadata contract shared by bundle manifests and streamed payloads."""
+
+    schema_version: str
+    market: str
+    as_of_date: date
+    source_revision: str
+    bar_period: str
+    symbol_count: int
+
+    @classmethod
+    def from_bundle_payload(
+        cls,
+        payload: dict[str, Any],
+        *,
+        expected_schema_version: str,
+        expected_bar_period: str,
+        normalize_market: Callable[[str], str],
+    ) -> "DailyPriceBundleMetadata":
+        schema_version = str(payload.get("schema_version") or "")
+        if schema_version != expected_schema_version:
+            raise ValueError(
+                "Unsupported daily price bundle schema version: "
+                f"{payload.get('schema_version')!r}"
+            )
+
+        market = normalize_market(str(payload.get("market") or ""))
+        as_of_date = cls._required_date(payload, "as_of_date", source="bundle")
+        bar_period = cls._required_text(payload, "bar_period", source="bundle")
+        if bar_period != expected_bar_period:
+            raise ValueError(
+                f"Unsupported daily price bundle bar_period {bar_period!r}; "
+                f"expected {expected_bar_period!r}"
+            )
+        return cls(
+            schema_version=schema_version,
+            market=market,
+            as_of_date=as_of_date,
+            source_revision=cls._required_text(
+                payload,
+                "source_revision",
+                source="bundle",
+            ),
+            bar_period=bar_period,
+            symbol_count=cls._required_int(payload, "symbol_count", source="bundle"),
+        )
+
+    @classmethod
+    def expected_from_manifest(
+        cls,
+        manifest: dict[str, Any],
+        *,
+        bundle_schema_version: str,
+        expected_bar_period: str,
+        normalize_market: Callable[[str], str],
+    ) -> "DailyPriceBundleMetadata":
+        bar_period = cls._required_text(manifest, "bar_period", source="manifest")
+        if bar_period != expected_bar_period:
+            raise ValueError(
+                f"Daily price manifest bar_period must be {expected_bar_period!r}"
+            )
+        return cls(
+            schema_version=bundle_schema_version,
+            market=normalize_market(
+                cls._required_text(manifest, "market", source="manifest")
+            ),
+            as_of_date=cls._required_date(manifest, "as_of_date", source="manifest"),
+            source_revision=cls._required_text(
+                manifest,
+                "source_revision",
+                source="manifest",
+            ),
+            bar_period=bar_period,
+            symbol_count=cls._required_int(manifest, "symbol_count", source="manifest"),
+        )
+
+    def assert_matches_manifest(self, expected: "DailyPriceBundleMetadata | None") -> None:
+        if expected is None:
+            return
+        comparisons = (
+            ("schema_version", self.schema_version, expected.schema_version),
+            ("market", self.market, expected.market),
+            ("as_of_date", self.as_of_date.isoformat(), expected.as_of_date.isoformat()),
+            ("source_revision", self.source_revision, expected.source_revision),
+            ("bar_period", self.bar_period, expected.bar_period),
+            ("symbol_count", self.symbol_count, expected.symbol_count),
+        )
+        for key, actual, manifest_value in comparisons:
+            if actual != manifest_value:
+                raise ValueError(
+                    f"Daily price bundle {key} {actual!r} "
+                    f"does not match manifest {manifest_value!r}"
+                )
+
+    @staticmethod
+    def _required_text(payload: dict[str, Any], key: str, *, source: str) -> str:
+        value = payload.get(key)
+        if value in (None, ""):
+            raise ValueError(f"Daily price {source} is missing {key}")
+        return str(value)
+
+    @classmethod
+    def _required_date(cls, payload: dict[str, Any], key: str, *, source: str) -> date:
+        return date.fromisoformat(cls._required_text(payload, key, source=source))
+
+    @classmethod
+    def _required_int(cls, payload: dict[str, Any], key: str, *, source: str) -> int:
+        raw_value = cls._required_text(payload, key, source=source)
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"Daily price {source} {key} must be an integer"
+            ) from exc
 
 
 class DailyPriceBundleService:
@@ -89,8 +208,8 @@ class DailyPriceBundleService:
         return read_daily_price_bundle_metadata(path)
 
     @staticmethod
-    def _iter_bundle_rows(path: Path, *, metadata: dict[str, Any] | None = None):
-        return iter_daily_price_bundle_rows(path, metadata=metadata)
+    def _iter_bundle_rows(path: Path, *, metadata_out: dict[str, Any] | None = None):
+        return iter_daily_price_bundle_rows(path, metadata_out=metadata_out)
 
     @staticmethod
     def _parse_as_of_date(value: str | None) -> date:
@@ -120,51 +239,29 @@ class DailyPriceBundleService:
             )
         return False, None
 
-    def _validate_bundle_metadata(self, payload: dict[str, Any]) -> tuple[str, date, str]:
-        if payload.get("schema_version") != self.DAILY_PRICE_BUNDLE_SCHEMA_VERSION:
-            raise ValueError(
-                "Unsupported daily price bundle schema version: "
-                f"{payload.get('schema_version')!r}"
-            )
-
-        market = self.normalize_market(str(payload.get("market") or ""))
-        as_of_date = self._parse_as_of_date(str(payload.get("as_of_date") or ""))
-        bar_period = str(payload.get("bar_period") or "")
-        if bar_period != self.DAILY_PRICE_BAR_PERIOD:
-            raise ValueError(
-                f"Unsupported daily price bundle bar_period {bar_period!r}; "
-                f"expected {self.DAILY_PRICE_BAR_PERIOD!r}"
-            )
-        return market, as_of_date, bar_period
-
-    @staticmethod
-    def _metadata_compare_value(payload: dict[str, Any], key: str) -> Any:
-        value = payload.get(key)
-        if key == "symbol_count" and value not in (None, ""):
-            return int(value)
-        return str(value or "")
-
-    def _validate_bundle_matches_expected_metadata(
-        self,
+    @classmethod
+    def bundle_metadata_from_payload(
+        cls,
         payload: dict[str, Any],
-        expected_metadata: dict[str, Any] | None,
-    ) -> None:
-        if expected_metadata is None:
-            return
-        for key in (
-            "schema_version",
-            "market",
-            "as_of_date",
-            "source_revision",
-            "bar_period",
-            "symbol_count",
-        ):
-            actual = self._metadata_compare_value(payload, key)
-            expected = self._metadata_compare_value(expected_metadata, key)
-            if actual != expected:
-                raise ValueError(
-                    f"Daily price bundle {key} {actual!r} does not match manifest {expected!r}"
-                )
+    ) -> DailyPriceBundleMetadata:
+        return DailyPriceBundleMetadata.from_bundle_payload(
+            payload,
+            expected_schema_version=cls.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+            expected_bar_period=cls.DAILY_PRICE_BAR_PERIOD,
+            normalize_market=cls.normalize_market,
+        )
+
+    @classmethod
+    def expected_bundle_metadata_from_manifest(
+        cls,
+        manifest: dict[str, Any],
+    ) -> DailyPriceBundleMetadata:
+        return DailyPriceBundleMetadata.expected_from_manifest(
+            manifest,
+            bundle_schema_version=cls.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+            expected_bar_period=cls.DAILY_PRICE_BAR_PERIOD,
+            normalize_market=cls.normalize_market,
+        )
 
     @staticmethod
     def _bundle_price_mapping(price: dict[str, Any]) -> dict[str, Any]:
@@ -460,10 +557,9 @@ class DailyPriceBundleService:
         *,
         input_path: Path,
         warm_redis_symbols: int | None = None,
-        bundle_metadata: dict[str, Any] | None = None,
+        expected_metadata: DailyPriceBundleMetadata | None = None,
     ) -> dict[str, Any]:
         _ = warm_redis_symbols
-        expected_metadata = bundle_metadata
         payload: dict[str, Any] = {}
         batch_rows: dict[str, list[dict[str, Any]]] = {}
         imported_symbols = 0
@@ -476,7 +572,7 @@ class DailyPriceBundleService:
             batch_rows.clear()
 
         try:
-            for row in self._iter_bundle_rows(input_path, metadata=payload):
+            for row in self._iter_bundle_rows(input_path, metadata_out=payload):
                 symbol = str(row.get("symbol") or "").strip().upper()
                 prices = row.get("prices") or []
                 if prices and not isinstance(prices, list):
@@ -491,16 +587,16 @@ class DailyPriceBundleService:
                 if len(batch_rows) >= self.DAILY_PRICE_IMPORT_CHUNK_SIZE:
                     flush_batch()
             flush_batch()
-            market, as_of_date, bar_period = self._validate_bundle_metadata(payload)
-            self._validate_bundle_matches_expected_metadata(payload, expected_metadata)
+            bundle_metadata = self.bundle_metadata_from_payload(payload)
+            bundle_metadata.assert_matches_manifest(expected_metadata)
 
             sync_state = self._upsert_import_state(
                 db,
-                market=market,
-                source_revision=str(payload.get("source_revision") or ""),
-                as_of_date=as_of_date.isoformat(),
-                symbol_count=int(payload.get("symbol_count") or imported_symbols),
-                bar_period=bar_period,
+                market=bundle_metadata.market,
+                source_revision=bundle_metadata.source_revision,
+                as_of_date=bundle_metadata.as_of_date.isoformat(),
+                symbol_count=bundle_metadata.symbol_count,
+                bar_period=bundle_metadata.bar_period,
                 commit=False,
             )
             db.commit()
@@ -513,24 +609,14 @@ class DailyPriceBundleService:
         redis_warmed_symbols = 0
 
         return {
-            "market": market,
-            "as_of_date": as_of_date.isoformat(),
+            "market": bundle_metadata.market,
+            "as_of_date": bundle_metadata.as_of_date.isoformat(),
             "source_revision": sync_state["source_revision"],
-            "bar_period": bar_period,
-            "symbol_count": int(payload.get("symbol_count") or imported_symbols),
+            "bar_period": bundle_metadata.bar_period,
+            "symbol_count": bundle_metadata.symbol_count,
             "imported_symbols": imported_symbols,
             "imported_rows": imported_rows,
             "redis_warmed_symbols": redis_warmed_symbols,
-        }
-
-    def _bundle_metadata_from_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "schema_version": self.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
-            "market": manifest.get("market"),
-            "as_of_date": manifest.get("as_of_date"),
-            "source_revision": manifest.get("source_revision"),
-            "bar_period": manifest.get("bar_period"),
-            "symbol_count": manifest.get("symbol_count"),
         }
 
     def sync_from_github(
@@ -619,8 +705,8 @@ class DailyPriceBundleService:
                 db,
                 input_path=Path(str(bundle_path)),
                 warm_redis_symbols=warm_redis_symbols,
-                bundle_metadata=(
-                    self._bundle_metadata_from_manifest(manifest)
+                expected_metadata=(
+                    self.expected_bundle_metadata_from_manifest(manifest)
                     if isinstance(manifest, dict)
                     else None
                 ),

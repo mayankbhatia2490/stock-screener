@@ -97,13 +97,17 @@ def main() -> int:
     prepare_runtime()
     service = get_daily_price_bundle_service()
     input_path = Path(args.input)
+    expected_metadata = None
     if args.manifest:
-        verify_daily_price_bundle_manifest(
+        manifest = verify_daily_price_bundle_manifest(
             input_path=input_path,
             manifest_path=Path(args.manifest),
             expected_market=args.expected_market,
             expected_as_of_date=args.expected_as_of_date,
             expected_bundle_asset_name=args.expected_bundle_asset_name,
+        )
+        expected_metadata = DailyPriceBundleService.expected_bundle_metadata_from_manifest(
+            manifest
         )
 
     with SessionLocal() as db:
@@ -111,6 +115,7 @@ def main() -> int:
             db,
             input_path=input_path,
             warm_redis_symbols=args.warm_redis_symbols,
+            expected_metadata=expected_metadata,
         )
 
     print("Daily price bundle import complete:")
