@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 from app.database import SessionLocal
 from app.scripts._runtime import prepare_runtime
 from app.services.daily_price_bundle_service import DailyPriceBundleService
+from app.utils.file_hashing import sha256_file
 from app.wiring.bootstrap import get_daily_price_bundle_service
 
 
@@ -50,7 +50,7 @@ def verify_daily_price_bundle_manifest(
     expected_sha256 = str(manifest.get("sha256") or "").strip()
     if not expected_sha256:
         raise ValueError("Daily price manifest is missing sha256")
-    actual_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    actual_sha256 = sha256_file(input_path)
     if actual_sha256 != expected_sha256:
         raise ValueError(
             f"Daily price bundle checksum mismatch for {input_path.name}: "

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import math
 import shutil
@@ -21,6 +20,7 @@ from ..domain.markets import market_registry
 from ..models.app_settings import AppSetting
 from ..models.stock import StockPrice
 from ..models.stock_universe import StockUniverse
+from ..utils.file_hashing import sha256_file
 from .daily_price_bundle_reader import (
     iter_daily_price_bundle_rows,
     read_daily_price_bundle_metadata,
@@ -512,7 +512,7 @@ class DailyPriceBundleService:
         }
         self._write_bundle_payload(output_path, bundle_payload)
 
-        sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        sha256 = sha256_file(output_path)
         manifest = {
             "schema_version": self.DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
             "market": bundle_market,

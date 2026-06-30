@@ -184,7 +184,7 @@ def test_import_daily_price_bundle_script_verifies_manifest(monkeypatch, tmp_pat
                 "bundle_asset_name": bundle_path.name,
                 "bar_period": DailyPriceBundleService.DAILY_PRICE_BAR_PERIOD,
                 "symbol_count": 2,
-                "sha256": hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
+                "sha256": hashlib.sha256(b"bundle").hexdigest(),
             }
         ),
         encoding="utf-8",
@@ -254,6 +254,40 @@ def test_import_daily_price_bundle_manifest_rejects_checksum_mismatch(tmp_path):
             expected_as_of_date="2026-05-08",
             expected_bundle_asset_name=bundle_path.name,
         )
+
+
+def test_import_daily_price_bundle_manifest_hashes_in_chunks(monkeypatch, tmp_path):
+    bundle_path = tmp_path / "daily-price-cn-20260508-shard-1-of-2.json.gz"
+    manifest_path = tmp_path / "daily-price-cn-20260508-shard-1-of-2.manifest.json"
+    bundle_path.write_bytes(b"bundle")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": DailyPriceBundleService.DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
+                "market": "CN",
+                "as_of_date": "2026-05-08",
+                "bundle_asset_name": bundle_path.name,
+                "bar_period": DailyPriceBundleService.DAILY_PRICE_BAR_PERIOD,
+                "sha256": hashlib.sha256(b"bundle").hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("read_bytes used")),
+    )
+
+    manifest = import_daily_script.verify_daily_price_bundle_manifest(
+        input_path=bundle_path,
+        manifest_path=manifest_path,
+        expected_market="CN",
+        expected_as_of_date="2026-05-08",
+        expected_bundle_asset_name=bundle_path.name,
+    )
+
+    assert manifest["market"] == "CN"
 
 
 def test_cn_daily_price_shard_selection_is_sorted_and_one_based():
