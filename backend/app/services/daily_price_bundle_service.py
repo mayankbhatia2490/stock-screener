@@ -163,8 +163,10 @@ class DailyPriceBundleService:
         self,
         *,
         market_calendar: MarketCalendarService | None = None,
+        price_cache: Any | None = None,
     ) -> None:
         self.market_calendar = market_calendar or MarketCalendarService()
+        self.price_cache = price_cache
 
     @classmethod
     def normalize_market(cls, market: str) -> str:
