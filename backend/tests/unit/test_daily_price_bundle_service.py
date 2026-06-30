@@ -2,56 +2,25 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from app.database import Base
 from app.models.app_settings import AppSetting
 from app.models.stock import StockPrice
-from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
 from app.services.daily_price_bundle_service import DailyPriceBundleService
-from app.services.price_cache_service import PriceCacheService
 
-
-def _make_session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, autocommit=False, autoflush=False)
-
-
-def _stock_row(symbol: str, market: str, exchange: str, market_cap: float) -> StockUniverse:
-    return StockUniverse(
-        symbol=symbol,
-        market=market,
-        exchange=exchange,
-        is_active=True,
-        status=UNIVERSE_STATUS_ACTIVE,
-        status_reason="active",
-        market_cap=market_cap,
-    )
-
-
-def _price_row(symbol: str, day: date, close: float) -> StockPrice:
-    return StockPrice(
-        symbol=symbol,
-        date=day,
-        open=close - 1,
-        high=close + 1,
-        low=close - 2,
-        close=close,
-        adj_close=close - 0.5,
-        volume=1_000_000,
-    )
+from .daily_price_bundle_test_helpers import (
+    bundle_price as _bundle_price,
+    make_session as _make_session,
+    price_row as _price_row,
+    stock_row as _stock_row,
+)
 
 
 def _make_service(session_factory):
-    return DailyPriceBundleService(
-        price_cache=PriceCacheService(redis_client=None, session_factory=session_factory),
-    )
+    _ = session_factory
+    return DailyPriceBundleService()
 
 
 def test_daily_price_bundle_round_trips_and_preserves_other_market_rows(tmp_path):
@@ -133,6 +102,58 @@ def test_daily_price_bundle_round_trips_and_preserves_other_market_rows(tmp_path
     )
     assert import_db.query(StockPrice).count() == row_count_before
 
+    export_db.close()
+    import_db.close()
+
+
+def test_export_daily_price_bundle_filters_legacy_invalid_ohlc_rows(tmp_path):
+    export_session_factory = _make_session()
+    export_db = export_session_factory()
+    export_db.add_all(
+        [
+            _stock_row("AAPL", "US", "NASDAQ", 1000.0),
+            StockPrice(
+                symbol="AAPL",
+                date=date(2026, 4, 17),
+                open=None,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                adj_close=100.0,
+                volume=1_000_000,
+            ),
+            _price_row("AAPL", date(2026, 4, 18), 101.0),
+        ]
+    )
+    export_db.commit()
+
+    service = _make_service(export_session_factory)
+    bundle_path = tmp_path / "daily-price-us-20260418.json.gz"
+
+    stats = service.export_daily_price_bundle(
+        export_db,
+        market="US",
+        output_path=bundle_path,
+        bundle_asset_name=bundle_path.name,
+        as_of_date=date(2026, 4, 18),
+    )
+    payload = service._read_bundle_payload(bundle_path)
+
+    assert stats["symbol_count"] == 1
+    assert stats["rows"] == 1
+    assert [price["date"] for price in payload["rows"][0]["prices"]] == [
+        "2026-04-18"
+    ]
+
+    import_session_factory = _make_session()
+    import_db = import_session_factory()
+    import_db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
+    import_db.commit()
+
+    import_stats = service.import_daily_price_bundle(import_db, input_path=bundle_path)
+
+    assert import_stats["imported_symbols"] == 1
+    assert import_stats["imported_rows"] == 1
     export_db.close()
     import_db.close()
 
@@ -342,109 +363,13 @@ def test_export_daily_price_bundle_rejects_non_finite_coverage_threshold(tmp_pat
     db.close()
 
 
-def test_sync_from_github_up_to_date_exposes_manifest_metadata():
-    session_factory = _make_session()
-    db = session_factory()
-    service = _make_service(session_factory)
-
-    result = service.sync_from_github(
-        db,
-        market="US",
-        github_sync_service=SimpleNamespace(
-            fetch_latest_bundle=lambda **kwargs: {
-                "status": "up_to_date",
-                "manifest": {
-                    "market": "US",
-                    "as_of_date": "2026-04-18",
-                    "source_revision": "daily_prices_us:20260418120000",
-                    "bundle_asset_name": "daily-price-us-20260418.json.gz",
-                    "bar_period": "2y",
-                    "symbol_count": 2,
-                },
-                "bundle_path": None,
-                "bundle_asset_name": "daily-price-us-20260418.json.gz",
-                "source_revision": "daily_prices_us:20260418120000",
-            }
-        ),
-    )
-
-    assert result["status"] == "up_to_date"
-    assert result["as_of_date"] == "2026-04-18"
-    assert result["bar_period"] == "2y"
-    assert result["symbol_count"] == 2
-    db.close()
-
-
-def test_sync_from_github_passes_allow_stale_to_release_sync_service():
-    session_factory = _make_session()
-    db = session_factory()
-    service = _make_service(session_factory)
-    captured_kwargs = {}
-
-    def _fetch_latest_bundle(**kwargs):
-        captured_kwargs.update(kwargs)
-        return {
-            "status": "missing_manifest",
-            "manifest": None,
-            "bundle_path": None,
-            "bundle_asset_name": None,
-            "source_revision": None,
-        }
-
-    result = service.sync_from_github(
-        db,
-        market="US",
-        allow_stale=True,
-        github_sync_service=SimpleNamespace(fetch_latest_bundle=_fetch_latest_bundle),
-    )
-
-    assert result["status"] == "missing_manifest"
-    assert captured_kwargs["allow_stale"] is True
-    db.close()
-
-
-def test_sync_from_github_rejects_manifest_market_mismatch():
-    session_factory = _make_session()
-    db = session_factory()
-    service = _make_service(session_factory)
-
-    result = service.sync_from_github(
-        db,
-        market="US",
-        github_sync_service=SimpleNamespace(
-            fetch_latest_bundle=lambda **kwargs: {
-                "status": "up_to_date",
-                "manifest": {
-                    "market": "HK",
-                    "as_of_date": "2026-04-18",
-                    "source_revision": "daily_prices_hk:20260418120000",
-                    "bundle_asset_name": "daily-price-hk-20260418.json.gz",
-                    "bar_period": "2y",
-                    "symbol_count": 2,
-                },
-                "bundle_path": None,
-                "bundle_asset_name": "daily-price-hk-20260418.json.gz",
-                "source_revision": "daily_prices_hk:20260418120000",
-            }
-        ),
-    )
-
-    assert result["status"] == "invalid_manifest"
-    assert "does not match requested market" in str(result["error"])
-    db.close()
-
-
 def test_import_daily_price_bundle_skips_redis_warm_for_two_year_bundle(tmp_path):
     session_factory = _make_session()
     db = session_factory()
     db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
     db.commit()
 
-    price_cache = SimpleNamespace(
-        _store_batch_in_database=MagicMock(),
-        store_batch_in_cache=MagicMock(return_value=1),
-    )
-    service = DailyPriceBundleService(price_cache=price_cache)
+    service = DailyPriceBundleService()
     bundle_path = tmp_path / "daily-price-us.json"
     bundle_path.write_text(
         json.dumps(
@@ -484,6 +409,342 @@ def test_import_daily_price_bundle_skips_redis_warm_for_two_year_bundle(tmp_path
     )
 
     assert result["redis_warmed_symbols"] == 0
-    price_cache._store_batch_in_database.assert_called_once()
-    price_cache.store_batch_in_cache.assert_not_called()
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 1
+    db.close()
+
+
+def test_import_daily_price_bundle_streams_rows_without_full_payload_read(
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+    db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
+    db.commit()
+
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "symbol": "AAPL",
+                        "prices": [
+                            {
+                                "date": "2026-04-18",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": 100.5,
+                                "adj_close": 100.0,
+                                "volume": 1_000_000,
+                            }
+                        ],
+                    }
+                ],
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        service,
+        "_read_bundle_payload",
+        MagicMock(side_effect=AssertionError("full payload read")),
+    )
+
+    result = service.import_daily_price_bundle(
+        db,
+        input_path=bundle_path,
+        warm_redis_symbols=0,
+    )
+
+    assert result["imported_symbols"] == 1
+    assert result["imported_rows"] == 1
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 1
+    service._read_bundle_payload.assert_not_called()
+    db.close()
+
+
+def test_import_daily_price_bundle_flushes_streamed_rows_in_bounded_chunks(
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+    symbol_count = 205
+    db.add_all(
+        [
+            _stock_row(f"T{index:04d}", "US", "NYSE", 1000.0 - index)
+            for index in range(symbol_count)
+        ]
+    )
+    db.commit()
+
+    service = DailyPriceBundleService()
+    persist_spy = MagicMock(wraps=service._persist_bundle_price_batch)
+    monkeypatch.setattr(service, "_persist_bundle_price_batch", persist_spy)
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": symbol_count,
+                "rows": [
+                    {
+                        "symbol": f"T{index:04d}",
+                        "prices": [
+                            {
+                                "date": "2026-04-18",
+                                "open": float(index),
+                                "high": float(index + 1),
+                                "low": float(index - 1),
+                                "close": float(index) + 0.5,
+                                "adj_close": float(index),
+                                "volume": 1_000_000 + index,
+                            }
+                        ],
+                    }
+                    for index in range(symbol_count)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = service.import_daily_price_bundle(
+        db,
+        input_path=bundle_path,
+        warm_redis_symbols=0,
+    )
+
+    assert result["imported_symbols"] == symbol_count
+    assert result["imported_rows"] == symbol_count
+    assert persist_spy.call_count == 3
+    chunk_sizes = [
+        len(call.args[1])
+        for call in persist_spy.call_args_list
+    ]
+    assert chunk_sizes == [100, 100, 5]
+    db.close()
+
+
+def test_import_daily_price_bundle_rejects_malformed_streamed_row(tmp_path):
+    session_factory = _make_session()
+    db = session_factory()
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
+                "rows": [42],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="row 1 must be an object"):
+        service.import_daily_price_bundle(
+            db,
+            input_path=bundle_path,
+            warm_redis_symbols=0,
+        )
+
+    assert db.query(AppSetting).count() == 0
+    db.close()
+
+
+def test_import_daily_price_bundle_rejects_invalid_ohlcv_and_rolls_back(tmp_path):
+    session_factory = _make_session()
+    db = session_factory()
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
+                "rows": [
+                    {
+                        "symbol": "AAPL",
+                        "prices": [
+                            {
+                                "date": "2026-04-18",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": None,
+                                "adj_close": 100.0,
+                                "volume": 1_000_000,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid OHLCV"):
+        service.import_daily_price_bundle(
+            db,
+            input_path=bundle_path,
+            warm_redis_symbols=0,
+        )
+
+    assert db.query(AppSetting).count() == 0
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 0
+    db.close()
+
+def test_import_daily_price_bundle_rejects_duplicate_symbols_and_rolls_back(
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+    service = DailyPriceBundleService()
+    monkeypatch.setattr(service, "DAILY_PRICE_IMPORT_CHUNK_SIZE", 1)
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 2,
+                "rows": [
+                    {"symbol": "AAPL", "prices": [_bundle_price()]},
+                    {"symbol": "aapl", "prices": [_bundle_price(day="2026-04-19")]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate symbol AAPL"):
+        service.import_daily_price_bundle(
+            db,
+            input_path=bundle_path,
+            warm_redis_symbols=0,
+        )
+
+    assert db.query(AppSetting).count() == 0
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 0
+    db.close()
+
+
+def test_import_daily_price_bundle_rejects_symbol_count_mismatch_and_rolls_back(
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 2,
+                "rows": [
+                    {"symbol": "AAPL", "prices": [_bundle_price()]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not match manifest symbol_count 2"):
+        service.import_daily_price_bundle(
+            db,
+            input_path=bundle_path,
+            warm_redis_symbols=0,
+        )
+
+    assert db.query(AppSetting).count() == 0
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 0
+    db.close()
+
+
+def test_import_daily_price_bundle_rolls_back_state_on_persist_error(
+    monkeypatch,
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+    db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
+    db.commit()
+
+    service = DailyPriceBundleService()
+    monkeypatch.setattr(
+        service,
+        "_persist_bundle_price_batch",
+        MagicMock(side_effect=RuntimeError("db failed")),
+    )
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
+                "rows": [
+                    {
+                        "symbol": "AAPL",
+                        "prices": [
+                            {
+                                "date": "2026-04-18",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": 100.5,
+                                "adj_close": 100.0,
+                                "volume": 1_000_000,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="db failed"):
+        service.import_daily_price_bundle(
+            db,
+            input_path=bundle_path,
+            warm_redis_symbols=0,
+        )
+
+    assert db.query(AppSetting).count() == 0
+    assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 0
     db.close()

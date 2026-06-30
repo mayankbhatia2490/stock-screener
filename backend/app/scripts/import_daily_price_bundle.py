@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 from app.database import SessionLocal
 from app.scripts._runtime import prepare_runtime
-from app.services.daily_price_bundle_service import DailyPriceBundleService
+from app.services.daily_price_bundle_contract import (
+    DAILY_PRICE_BAR_PERIOD,
+    DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
+    expected_bundle_metadata_from_manifest,
+)
+from app.utils.file_hashing import sha256_file
 from app.wiring.bootstrap import get_daily_price_bundle_service
 
 
@@ -22,8 +26,7 @@ def verify_daily_price_bundle_manifest(
     expected_bundle_asset_name: str | None = None,
 ) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    expected_schema = DailyPriceBundleService.DAILY_PRICE_MANIFEST_SCHEMA_VERSION
-    if manifest.get("schema_version") != expected_schema:
+    if manifest.get("schema_version") != DAILY_PRICE_MANIFEST_SCHEMA_VERSION:
         raise ValueError(
             "Unsupported daily price manifest schema version: "
             f"{manifest.get('schema_version')!r}"
@@ -32,7 +35,7 @@ def verify_daily_price_bundle_manifest(
     bundle_asset_name = expected_bundle_asset_name or input_path.name
     expected_values = {
         "bundle_asset_name": bundle_asset_name,
-        "bar_period": DailyPriceBundleService.DAILY_PRICE_BAR_PERIOD,
+        "bar_period": DAILY_PRICE_BAR_PERIOD,
     }
     if expected_market is not None:
         expected_values["market"] = expected_market.upper()
@@ -50,7 +53,7 @@ def verify_daily_price_bundle_manifest(
     expected_sha256 = str(manifest.get("sha256") or "").strip()
     if not expected_sha256:
         raise ValueError("Daily price manifest is missing sha256")
-    actual_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    actual_sha256 = sha256_file(input_path)
     if actual_sha256 != expected_sha256:
         raise ValueError(
             f"Daily price bundle checksum mismatch for {input_path.name}: "
@@ -97,20 +100,23 @@ def main() -> int:
     prepare_runtime()
     service = get_daily_price_bundle_service()
     input_path = Path(args.input)
+    expected_metadata = None
     if args.manifest:
-        verify_daily_price_bundle_manifest(
+        manifest = verify_daily_price_bundle_manifest(
             input_path=input_path,
             manifest_path=Path(args.manifest),
             expected_market=args.expected_market,
             expected_as_of_date=args.expected_as_of_date,
             expected_bundle_asset_name=args.expected_bundle_asset_name,
         )
+        expected_metadata = expected_bundle_metadata_from_manifest(manifest)
 
     with SessionLocal() as db:
         stats = service.import_daily_price_bundle(
             db,
             input_path=input_path,
             warm_redis_symbols=args.warm_redis_symbols,
+            expected_metadata=expected_metadata,
         )
 
     print("Daily price bundle import complete:")

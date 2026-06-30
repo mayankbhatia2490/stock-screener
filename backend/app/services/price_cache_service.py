@@ -41,6 +41,7 @@ from .price_row_normalization import (
     normalize_price_frame,
     stock_price_row_from_ohlcv,
 )
+from .stock_price_persistence import persist_stock_price_mappings
 from .redis_pool import get_redis_client, get_bulk_redis_client, is_redis_enabled
 
 logger = logging.getLogger(__name__)
@@ -1638,40 +1639,7 @@ class PriceCacheService:
         db = self._session_factory()
 
         try:
-            symbols = list(batch_data.keys())
-
-            symbol_dates: Dict[str, set] = {}
-            latest_dates: Dict[str, date] = {}
-            for symbol, data in batch_data.items():
-                if data is None or data.empty:
-                    continue
-                normalized = set()
-                latest = None
-                for raw_date in data.reset_index()["Date"]:
-                    row_date = raw_date
-                    if isinstance(row_date, pd.Timestamp):
-                        row_date = row_date.date()
-                    elif isinstance(row_date, datetime):
-                        row_date = row_date.date()
-                    normalized.add(row_date)
-                    latest = row_date if latest is None or row_date > latest else latest
-                if normalized:
-                    symbol_dates[symbol] = normalized
-                    latest_dates[symbol] = latest
-
-            existing_pairs: Dict[tuple[str, date], int] = {}
-            for chunk_start in range(0, len(symbols), 100):
-                chunk_symbols = symbols[chunk_start:chunk_start + 100]
-                rows = db.query(StockPrice.id, StockPrice.symbol, StockPrice.date).filter(
-                    StockPrice.symbol.in_(chunk_symbols)
-                ).all()
-                for record_id, record_symbol, record_date in rows:
-                    target_dates = symbol_dates.get(record_symbol)
-                    if target_dates and record_date in target_dates:
-                        existing_pairs[(record_symbol, record_date)] = record_id
-
-            rows_to_insert = []
-            rows_to_update = []
+            price_rows_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
             for symbol, data in batch_data.items():
                 if data is None or data.empty:
                     continue
@@ -1694,35 +1662,21 @@ class PriceCacheService:
                         )
                         if price_dict is None:
                             continue
-                        existing_id = existing_pairs.get((symbol, row_date))
-                        if existing_id is None:
-                            rows_to_insert.append(price_dict)
-                        elif row_date == latest_dates.get(symbol):
-                            price_dict["id"] = existing_id
-                            rows_to_update.append(price_dict)
-                    except Exception as e:
+                        price_rows_by_symbol.setdefault(symbol, []).append(price_dict)
+                    except (KeyError, TypeError, ValueError, OverflowError) as e:
                         logger.warning(f"Error preparing row for {symbol}: {e}")
 
-            # Bulk insert in conservative chunks to keep statement size bounded.
-            if rows_to_insert:
-                chunk_size = 100
-                for i in range(0, len(rows_to_insert), chunk_size):
-                    chunk = rows_to_insert[i:i + chunk_size]
-                    db.bulk_insert_mappings(StockPrice, chunk)
-            if rows_to_update:
-                chunk_size = 100
-                for i in range(0, len(rows_to_update), chunk_size):
-                    chunk = rows_to_update[i:i + chunk_size]
-                    db.bulk_update_mappings(StockPrice, chunk)
-
-            if rows_to_insert or rows_to_update:
+            result = persist_stock_price_mappings(db, price_rows_by_symbol, chunk_size=100)
+            inserted = result["inserted"]
+            updated = result["updated"]
+            if inserted or updated:
                 db.commit()
                 logger.info(
                     "Batch persisted %d price rows for %d symbols (%d inserts, %d latest-day updates)",
-                    len(rows_to_insert) + len(rows_to_update),
+                    inserted + updated,
                     len(batch_data),
-                    len(rows_to_insert),
-                    len(rows_to_update),
+                    inserted,
+                    updated,
                 )
             else:
                 logger.debug(f"No new rows to persist for batch of {len(batch_data)} symbols")

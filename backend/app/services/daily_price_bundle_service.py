@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import math
 import shutil
@@ -12,63 +11,66 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..domain.markets import market_registry
 from ..models.app_settings import AppSetting
 from ..models.stock import StockPrice
 from ..models.stock_universe import StockUniverse
+from ..utils.file_hashing import sha256_file
+from .daily_price_bundle_contract import (
+    DAILY_PRICE_BAR_PERIOD as _DAILY_PRICE_BAR_PERIOD,
+    DAILY_PRICE_BUNDLE_SCHEMA_VERSION as _DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+    DAILY_PRICE_MANIFEST_SCHEMA_VERSION as _DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
+    DAILY_PRICE_RELEASE_TAG as _DAILY_PRICE_RELEASE_TAG,
+    DAILY_PRICE_SUPPORTED_MARKETS as _DAILY_PRICE_SUPPORTED_MARKETS,
+    REQUIRED_DAILY_PRICE_MANIFEST_KEYS,
+    DailyPriceBundleMetadata,
+    bundle_metadata_from_payload,
+    daily_price_sync_state_key,
+    expected_bundle_metadata_from_manifest,
+    latest_daily_price_manifest_name,
+    normalize_daily_price_market,
+)
+from .daily_price_bundle_reader import (
+    iter_daily_price_bundle_rows,
+    read_daily_price_bundle_metadata,
+)
 from .github_release_sync_service import GitHubReleaseSyncService
 from .market_calendar_service import MarketCalendarService
+from .price_row_normalization import stock_price_row_from_ohlcv
+from .stock_price_persistence import persist_stock_price_mappings
 
 
 class DailyPriceBundleService:
     """Export, import, and sync durable market-scoped daily price bundles."""
 
-    DAILY_PRICE_BUNDLE_SCHEMA_VERSION = "daily-price-bundle-v1"
-    DAILY_PRICE_MANIFEST_SCHEMA_VERSION = "daily-price-manifest-v1"
-    DAILY_PRICE_RELEASE_TAG = "daily-price-data"
-    DAILY_PRICE_BAR_PERIOD = "2y"
-    DAILY_PRICE_SUPPORTED_MARKETS: tuple[str, ...] = market_registry.supported_market_codes()
+    DAILY_PRICE_BUNDLE_SCHEMA_VERSION = _DAILY_PRICE_BUNDLE_SCHEMA_VERSION
+    DAILY_PRICE_MANIFEST_SCHEMA_VERSION = _DAILY_PRICE_MANIFEST_SCHEMA_VERSION
+    DAILY_PRICE_RELEASE_TAG = _DAILY_PRICE_RELEASE_TAG
+    DAILY_PRICE_BAR_PERIOD = _DAILY_PRICE_BAR_PERIOD
+    DAILY_PRICE_SUPPORTED_MARKETS: tuple[str, ...] = _DAILY_PRICE_SUPPORTED_MARKETS
+    DAILY_PRICE_IMPORT_CHUNK_SIZE = 100
     SYNC_STATE_CATEGORY = "github_sync"
 
     def __init__(
         self,
         *,
-        price_cache=None,
         market_calendar: MarketCalendarService | None = None,
     ) -> None:
-        if price_cache is None:
-            from app.database import SessionLocal
-            from app.services.redis_pool import get_redis_client
-            from app.services.price_cache_service import PriceCacheService
-
-            price_cache = PriceCacheService(
-                redis_client=get_redis_client(),
-                session_factory=SessionLocal,
-            )
-        self.price_cache = price_cache
         self.market_calendar = market_calendar or MarketCalendarService()
 
     @classmethod
     def normalize_market(cls, market: str) -> str:
-        normalized = str(market or "").strip().upper()
-        if normalized not in cls.DAILY_PRICE_SUPPORTED_MARKETS:
-            raise ValueError(
-                f"Unsupported daily price bundle market {market!r}. "
-                f"Expected one of {sorted(cls.DAILY_PRICE_SUPPORTED_MARKETS)}."
-            )
-        return normalized
+        return normalize_daily_price_market(market)
 
     @classmethod
     def latest_manifest_name_for_market(cls, market: str) -> str:
-        return f"daily-price-latest-{cls.normalize_market(market).lower()}.json"
+        return latest_daily_price_manifest_name(market)
 
     @classmethod
     def sync_state_key(cls, market: str) -> str:
-        return f"github_sync.daily_prices.{cls.normalize_market(market).lower()}"
+        return daily_price_sync_state_key(market)
 
     @staticmethod
     def _write_bundle_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -88,6 +90,14 @@ class DailyPriceBundleService:
             with gzip.open(path, "rt", encoding="utf-8") as handle:
                 return json.load(handle)
         return json.loads(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _read_bundle_metadata(path: Path) -> dict[str, Any]:
+        return read_daily_price_bundle_metadata(path)
+
+    @staticmethod
+    def _iter_bundle_rows(path: Path, *, metadata_out: dict[str, Any] | None = None):
+        return iter_daily_price_bundle_rows(path, metadata_out=metadata_out)
 
     @staticmethod
     def _parse_as_of_date(value: str | None) -> date:
@@ -117,20 +127,30 @@ class DailyPriceBundleService:
             )
         return False, None
 
-    def _build_batch_dataframe(self, prices: list[dict[str, Any]]) -> pd.DataFrame:
-        frame = pd.DataFrame(
-            {
-                "Date": pd.to_datetime([row["date"] for row in prices]),
-                "Open": [row.get("open") for row in prices],
-                "High": [row.get("high") for row in prices],
-                "Low": [row.get("low") for row in prices],
-                "Close": [row.get("close") for row in prices],
-                "Adj Close": [row.get("adj_close") for row in prices],
-                "Volume": [row.get("volume") for row in prices],
-            }
-        )
-        frame.set_index("Date", inplace=True)
-        return frame
+    @classmethod
+    def bundle_metadata_from_payload(
+        cls,
+        payload: dict[str, Any],
+    ) -> DailyPriceBundleMetadata:
+        return bundle_metadata_from_payload(payload)
+
+    @classmethod
+    def expected_bundle_metadata_from_manifest(
+        cls,
+        manifest: dict[str, Any],
+    ) -> DailyPriceBundleMetadata:
+        return expected_bundle_metadata_from_manifest(manifest)
+
+    @staticmethod
+    def _bundle_price_mapping(price: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "Open": price.get("open"),
+            "High": price.get("high"),
+            "Low": price.get("low"),
+            "Close": price.get("close"),
+            "Adj Close": price.get("adj_close"),
+            "Volume": price.get("volume"),
+        }
 
     def get_import_state(self, db: Session, market: str) -> dict[str, Any] | None:
         setting = (
@@ -154,6 +174,7 @@ class DailyPriceBundleService:
         as_of_date: str,
         symbol_count: int,
         bar_period: str,
+        commit: bool = True,
     ) -> dict[str, Any]:
         payload = {
             "market": self.normalize_market(market),
@@ -180,8 +201,53 @@ class DailyPriceBundleService:
             setting.value = json.dumps(payload, sort_keys=True)
             setting.category = self.SYNC_STATE_CATEGORY
             setting.description = "Latest imported GitHub daily price bundle metadata"
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         return payload
+
+    def _persist_bundle_price_batch(
+        self,
+        db: Session,
+        batch_rows: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, int]:
+        if not batch_rows:
+            return {"inserted": 0, "updated": 0}
+
+        price_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+
+        for symbol, prices in batch_rows.items():
+            normalized_rows: list[dict[str, Any]] = []
+            for price_index, price in enumerate(prices, start=1):
+                if not isinstance(price, dict):
+                    raise ValueError(
+                        f"Daily price bundle prices for {symbol} must contain objects "
+                        f"(row {price_index})"
+                    )
+                row_date = date.fromisoformat(str(price.get("date") or ""))
+                price_row = stock_price_row_from_ohlcv(
+                    symbol=symbol,
+                    row_date=row_date,
+                    row=self._bundle_price_mapping(price),
+                )
+                if price_row is None:
+                    raise ValueError(
+                        f"Daily price bundle prices for {symbol} contain invalid OHLCV "
+                        f"(row {price_index})"
+                    )
+                normalized_rows.append(price_row)
+            if normalized_rows:
+                price_rows_by_symbol[symbol] = normalized_rows
+
+        if not price_rows_by_symbol:
+            return {"inserted": 0, "updated": 0}
+
+        return persist_stock_price_mappings(
+            db,
+            price_rows_by_symbol,
+            chunk_size=self.DAILY_PRICE_IMPORT_CHUNK_SIZE,
+        )
 
     def export_daily_price_bundle(
         self,
@@ -240,15 +306,29 @@ class DailyPriceBundleService:
 
         rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for row in price_rows:
+            normalized_row = stock_price_row_from_ohlcv(
+                symbol=row.symbol,
+                row_date=row.date,
+                row={
+                    "Open": row.open,
+                    "High": row.high,
+                    "Low": row.low,
+                    "Close": row.close,
+                    "Adj Close": row.adj_close,
+                    "Volume": row.volume,
+                },
+            )
+            if normalized_row is None:
+                continue
             rows_by_symbol.setdefault(row.symbol, []).append(
                 {
-                    "date": row.date.isoformat(),
-                    "open": row.open,
-                    "high": row.high,
-                    "low": row.low,
-                    "close": row.close,
-                    "adj_close": row.adj_close,
-                    "volume": row.volume,
+                    "date": normalized_row["date"].isoformat(),
+                    "open": normalized_row["open"],
+                    "high": normalized_row["high"],
+                    "low": normalized_row["low"],
+                    "close": normalized_row["close"],
+                    "adj_close": normalized_row["adj_close"],
+                    "volume": normalized_row["volume"],
                 }
             )
         latest_by_symbol = {
@@ -327,7 +407,7 @@ class DailyPriceBundleService:
         }
         self._write_bundle_payload(output_path, bundle_payload)
 
-        sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
+        sha256 = sha256_file(output_path)
         manifest = {
             "schema_version": self.DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
             "market": bundle_market,
@@ -372,85 +452,76 @@ class DailyPriceBundleService:
         *,
         input_path: Path,
         warm_redis_symbols: int | None = None,
+        expected_metadata: DailyPriceBundleMetadata | None = None,
     ) -> dict[str, Any]:
-        payload = self._read_bundle_payload(input_path)
-        if payload.get("schema_version") != self.DAILY_PRICE_BUNDLE_SCHEMA_VERSION:
-            raise ValueError(
-                "Unsupported daily price bundle schema version: "
-                f"{payload.get('schema_version')!r}"
-            )
-
-        market = self.normalize_market(str(payload.get("market") or ""))
-        as_of_date = self._parse_as_of_date(str(payload.get("as_of_date") or ""))
-        bar_period = str(payload.get("bar_period") or "")
-        if bar_period != self.DAILY_PRICE_BAR_PERIOD:
-            raise ValueError(
-                f"Unsupported daily price bundle bar_period {bar_period!r}; "
-                f"expected {self.DAILY_PRICE_BAR_PERIOD!r}"
-            )
-
-        bundle_rows = payload.get("rows") or []
-        batch_data: dict[str, pd.DataFrame] = {}
+        _ = warm_redis_symbols
+        payload: dict[str, Any] = {}
+        batch_rows: dict[str, list[dict[str, Any]]] = {}
+        seen_symbols: set[str] = set()
+        imported_symbols = 0
         imported_rows = 0
-        for row in bundle_rows:
-            symbol = str(row.get("symbol") or "").strip().upper()
-            prices = row.get("prices") or []
-            if not symbol or not prices:
-                continue
-            batch_data[symbol] = self._build_batch_dataframe(prices)
-            imported_rows += len(prices)
 
-        if batch_data:
-            for chunk_start in range(0, len(batch_data), 100):
-                chunk_symbols = list(batch_data.keys())[chunk_start:chunk_start + 100]
-                self.price_cache._store_batch_in_database(  # noqa: SLF001 - intentional import path reuse
-                    {symbol: batch_data[symbol] for symbol in chunk_symbols}
-                )
+        def flush_batch() -> None:
+            if not batch_rows:
+                return
+            self._persist_bundle_price_batch(db, dict(batch_rows))
+            batch_rows.clear()
 
-        redis_target = (
-            settings.github_daily_price_redis_warm_symbols
-            if warm_redis_symbols is None
-            else warm_redis_symbols
-        )
-        redis_warmed_symbols = 0
-        # Bundles currently ship 2y bars. Avoid overwriting the standard 5y
-        # Redis cache entries with truncated history during import.
-        if redis_target and batch_data and bar_period == "5y":
-            warm_symbols = [
-                row.symbol
-                for row in (
-                    db.query(StockUniverse)
-                    .filter(
-                        StockUniverse.market == market,
-                        StockUniverse.symbol.in_(list(batch_data)),
+        try:
+            for row in self._iter_bundle_rows(input_path, metadata_out=payload):
+                symbol = str(row.get("symbol") or "").strip().upper()
+                prices = row.get("prices")
+                if not symbol:
+                    raise ValueError("Daily price bundle row is missing symbol")
+                if not isinstance(prices, list):
+                    raise ValueError(
+                        f"Daily price bundle prices for {symbol or '<unknown>'} must be a list"
                     )
-                    .order_by(StockUniverse.market_cap.desc().nullslast())
-                    .limit(int(redis_target))
-                    .all()
-                )
-            ]
-            if warm_symbols:
-                redis_warmed_symbols = self.price_cache.store_batch_in_cache(
-                    {symbol: batch_data[symbol] for symbol in warm_symbols},
-                    also_store_db=False,
+                if not prices:
+                    raise ValueError(f"Daily price bundle prices for {symbol} must not be empty")
+                if symbol in seen_symbols:
+                    raise ValueError(f"Daily price bundle contains duplicate symbol {symbol}")
+                seen_symbols.add(symbol)
+                batch_rows[symbol] = prices
+                imported_symbols += 1
+                imported_rows += len(prices)
+                if len(batch_rows) >= self.DAILY_PRICE_IMPORT_CHUNK_SIZE:
+                    flush_batch()
+            flush_batch()
+            bundle_metadata = self.bundle_metadata_from_payload(payload)
+            bundle_metadata.assert_matches_manifest(expected_metadata)
+            if imported_symbols != bundle_metadata.symbol_count:
+                raise ValueError(
+                    "Daily price bundle imported symbol count "
+                    f"{imported_symbols} does not match manifest symbol_count "
+                    f"{bundle_metadata.symbol_count}"
                 )
 
-        sync_state = self._upsert_import_state(
-            db,
-            market=market,
-            source_revision=str(payload.get("source_revision") or ""),
-            as_of_date=as_of_date.isoformat(),
-            symbol_count=int(payload.get("symbol_count") or len(batch_data)),
-            bar_period=bar_period,
-        )
+            sync_state = self._upsert_import_state(
+                db,
+                market=bundle_metadata.market,
+                source_revision=bundle_metadata.source_revision,
+                as_of_date=bundle_metadata.as_of_date.isoformat(),
+                symbol_count=bundle_metadata.symbol_count,
+                bar_period=bundle_metadata.bar_period,
+                commit=False,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        # Bundles currently ship 2y bars. Avoid overwriting the standard 5y Redis
+        # cache entries with truncated history during import.
+        redis_warmed_symbols = 0
 
         return {
-            "market": market,
-            "as_of_date": as_of_date.isoformat(),
+            "market": bundle_metadata.market,
+            "as_of_date": bundle_metadata.as_of_date.isoformat(),
             "source_revision": sync_state["source_revision"],
-            "bar_period": bar_period,
-            "symbol_count": int(payload.get("symbol_count") or len(batch_data)),
-            "imported_symbols": len(batch_data),
+            "bar_period": bundle_metadata.bar_period,
+            "symbol_count": bundle_metadata.symbol_count,
+            "imported_symbols": imported_symbols,
             "imported_rows": imported_rows,
             "redis_warmed_symbols": redis_warmed_symbols,
         }
@@ -484,15 +555,7 @@ class DailyPriceBundleService:
             source_mode=settings.market_data_source_mode,
             current_revision=import_state.get("source_revision"),
             expected_manifest_schema=self.DAILY_PRICE_MANIFEST_SCHEMA_VERSION,
-            required_manifest_keys=(
-                "market",
-                "as_of_date",
-                "source_revision",
-                "bundle_asset_name",
-                "sha256",
-                "bar_period",
-                "symbol_count",
-            ),
+            required_manifest_keys=REQUIRED_DAILY_PRICE_MANIFEST_KEYS,
             stale_validator=self._validate_manifest_freshness,
             allow_stale=allow_stale,
             github_token=settings.github_data_token,
@@ -541,6 +604,11 @@ class DailyPriceBundleService:
                 db,
                 input_path=Path(str(bundle_path)),
                 warm_redis_symbols=warm_redis_symbols,
+                expected_metadata=(
+                    self.expected_bundle_metadata_from_manifest(manifest)
+                    if isinstance(manifest, dict)
+                    else None
+                ),
             )
         finally:
             if bundle_path:

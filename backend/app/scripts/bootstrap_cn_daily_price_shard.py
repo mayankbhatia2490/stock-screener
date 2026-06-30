@@ -14,7 +14,7 @@ from app.models.stock_universe import StockUniverse
 from app.scripts._runtime import prepare_runtime, repo_root
 from app.services.bulk_data_fetcher import BulkDataFetcher
 from app.services.price_history_coverage import classify_price_history
-from app.wiring.bootstrap import get_daily_price_bundle_service
+from app.wiring.bootstrap import get_daily_price_bundle_service, get_price_cache
 
 
 DEFAULT_BATCH_SIZE = 100
@@ -144,6 +144,7 @@ def bootstrap_cn_daily_price_shard(
     *,
     db: Any,
     service: Any,
+    price_cache: Any,
     fetcher: BulkDataFetcher,
     shard_index: int,
     shard_count: int,
@@ -202,7 +203,7 @@ def bootstrap_cn_daily_price_shard(
             else:
                 failed_symbols += 1
         if batch_to_store:
-            service.price_cache.store_batch_in_cache(batch_to_store, also_store_db=True)
+            price_cache.store_batch_in_cache(batch_to_store, also_store_db=True)
         export_stats, bundle_path, manifest_path = _export_shard_checkpoint(
             db=db,
             service=service,
@@ -285,6 +286,7 @@ def main() -> int:
 
     prepare_runtime()
     service = get_daily_price_bundle_service()
+    price_cache = get_price_cache()
     as_of_date = (
         date.fromisoformat(args.as_of_date)
         if args.as_of_date
@@ -301,6 +303,7 @@ def main() -> int:
         bootstrap_cn_daily_price_shard(
             db=db,
             service=service,
+            price_cache=price_cache,
             fetcher=BulkDataFetcher(),
             shard_index=args.shard_index,
             shard_count=args.shard_count,
