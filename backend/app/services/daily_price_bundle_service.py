@@ -306,15 +306,29 @@ class DailyPriceBundleService:
 
         rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for row in price_rows:
+            normalized_row = stock_price_row_from_ohlcv(
+                symbol=row.symbol,
+                row_date=row.date,
+                row={
+                    "Open": row.open,
+                    "High": row.high,
+                    "Low": row.low,
+                    "Close": row.close,
+                    "Adj Close": row.adj_close,
+                    "Volume": row.volume,
+                },
+            )
+            if normalized_row is None:
+                continue
             rows_by_symbol.setdefault(row.symbol, []).append(
                 {
-                    "date": row.date.isoformat(),
-                    "open": row.open,
-                    "high": row.high,
-                    "low": row.low,
-                    "close": row.close,
-                    "adj_close": row.adj_close,
-                    "volume": row.volume,
+                    "date": normalized_row["date"].isoformat(),
+                    "open": normalized_row["open"],
+                    "high": normalized_row["high"],
+                    "low": normalized_row["low"],
+                    "close": normalized_row["close"],
+                    "adj_close": normalized_row["adj_close"],
+                    "volume": normalized_row["volume"],
                 }
             )
         latest_by_symbol = {

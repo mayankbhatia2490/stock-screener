@@ -106,6 +106,58 @@ def test_daily_price_bundle_round_trips_and_preserves_other_market_rows(tmp_path
     import_db.close()
 
 
+def test_export_daily_price_bundle_filters_legacy_invalid_ohlc_rows(tmp_path):
+    export_session_factory = _make_session()
+    export_db = export_session_factory()
+    export_db.add_all(
+        [
+            _stock_row("AAPL", "US", "NASDAQ", 1000.0),
+            StockPrice(
+                symbol="AAPL",
+                date=date(2026, 4, 17),
+                open=None,
+                high=101.0,
+                low=99.0,
+                close=100.0,
+                adj_close=100.0,
+                volume=1_000_000,
+            ),
+            _price_row("AAPL", date(2026, 4, 18), 101.0),
+        ]
+    )
+    export_db.commit()
+
+    service = _make_service(export_session_factory)
+    bundle_path = tmp_path / "daily-price-us-20260418.json.gz"
+
+    stats = service.export_daily_price_bundle(
+        export_db,
+        market="US",
+        output_path=bundle_path,
+        bundle_asset_name=bundle_path.name,
+        as_of_date=date(2026, 4, 18),
+    )
+    payload = service._read_bundle_payload(bundle_path)
+
+    assert stats["symbol_count"] == 1
+    assert stats["rows"] == 1
+    assert [price["date"] for price in payload["rows"][0]["prices"]] == [
+        "2026-04-18"
+    ]
+
+    import_session_factory = _make_session()
+    import_db = import_session_factory()
+    import_db.add(_stock_row("AAPL", "US", "NASDAQ", 1000.0))
+    import_db.commit()
+
+    import_stats = service.import_daily_price_bundle(import_db, input_path=bundle_path)
+
+    assert import_stats["imported_symbols"] == 1
+    assert import_stats["imported_rows"] == 1
+    export_db.close()
+    import_db.close()
+
+
 def test_export_daily_price_bundle_can_filter_to_shard_symbols(tmp_path):
     session_factory = _make_session()
     db = session_factory()
