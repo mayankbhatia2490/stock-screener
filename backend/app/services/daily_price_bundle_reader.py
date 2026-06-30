@@ -82,6 +82,9 @@ class StreamingJsonReader:
                     raise
                 self._read_more()
                 continue
+            if end == len(self._buffer) and not self._eof:
+                self._read_more()
+                continue
             self._pos = end
             self._compact()
             return value
@@ -159,7 +162,12 @@ def read_daily_price_bundle_metadata(path: Path) -> dict[str, Any]:
             return metadata
 
 
-def iter_daily_price_bundle_rows(path: Path) -> Iterator[dict[str, Any]]:
+def iter_daily_price_bundle_rows(
+    path: Path,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
+    resolved_metadata = metadata if metadata is not None else {}
     with open_bundle_text(path) as handle:
         reader = StreamingJsonReader(handle)
         reader.expect("{")
@@ -181,7 +189,7 @@ def iter_daily_price_bundle_rows(path: Path) -> Iterator[dict[str, Any]]:
                     continue
                 reader.expect("}")
                 return
-            reader.skip_value()
+            resolved_metadata[key] = reader.decode_value()
             if reader.consume_if(","):
                 continue
             reader.expect("}")

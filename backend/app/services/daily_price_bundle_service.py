@@ -26,6 +26,7 @@ from .daily_price_bundle_reader import (
 from .github_release_sync_service import GitHubReleaseSyncService
 from .market_calendar_service import MarketCalendarService
 from .price_row_normalization import stock_price_row_from_ohlcv
+from .stock_price_persistence import persist_stock_price_mappings
 
 
 class DailyPriceBundleService:
@@ -88,8 +89,8 @@ class DailyPriceBundleService:
         return read_daily_price_bundle_metadata(path)
 
     @staticmethod
-    def _iter_bundle_rows(path: Path):
-        return iter_daily_price_bundle_rows(path)
+    def _iter_bundle_rows(path: Path, *, metadata: dict[str, Any] | None = None):
+        return iter_daily_price_bundle_rows(path, metadata=metadata)
 
     @staticmethod
     def _parse_as_of_date(value: str | None) -> date:
@@ -118,6 +119,52 @@ class DailyPriceBundleService:
                 f"Daily price bundle is older than the configured max age of {max_age_days} day(s)",
             )
         return False, None
+
+    def _validate_bundle_metadata(self, payload: dict[str, Any]) -> tuple[str, date, str]:
+        if payload.get("schema_version") != self.DAILY_PRICE_BUNDLE_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported daily price bundle schema version: "
+                f"{payload.get('schema_version')!r}"
+            )
+
+        market = self.normalize_market(str(payload.get("market") or ""))
+        as_of_date = self._parse_as_of_date(str(payload.get("as_of_date") or ""))
+        bar_period = str(payload.get("bar_period") or "")
+        if bar_period != self.DAILY_PRICE_BAR_PERIOD:
+            raise ValueError(
+                f"Unsupported daily price bundle bar_period {bar_period!r}; "
+                f"expected {self.DAILY_PRICE_BAR_PERIOD!r}"
+            )
+        return market, as_of_date, bar_period
+
+    @staticmethod
+    def _metadata_compare_value(payload: dict[str, Any], key: str) -> Any:
+        value = payload.get(key)
+        if key == "symbol_count" and value not in (None, ""):
+            return int(value)
+        return str(value or "")
+
+    def _validate_bundle_matches_expected_metadata(
+        self,
+        payload: dict[str, Any],
+        expected_metadata: dict[str, Any] | None,
+    ) -> None:
+        if expected_metadata is None:
+            return
+        for key in (
+            "schema_version",
+            "market",
+            "as_of_date",
+            "source_revision",
+            "bar_period",
+            "symbol_count",
+        ):
+            actual = self._metadata_compare_value(payload, key)
+            expected = self._metadata_compare_value(expected_metadata, key)
+            if actual != expected:
+                raise ValueError(
+                    f"Daily price bundle {key} {actual!r} does not match manifest {expected!r}"
+                )
 
     @staticmethod
     def _bundle_price_mapping(price: dict[str, Any]) -> dict[str, Any]:
@@ -193,9 +240,7 @@ class DailyPriceBundleService:
         if not batch_rows:
             return {"inserted": 0, "updated": 0}
 
-        normalized_by_symbol: dict[str, list[dict[str, Any]]] = {}
-        symbol_dates: dict[str, set[date]] = {}
-        latest_dates: dict[str, date] = {}
+        price_rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
 
         for symbol, prices in batch_rows.items():
             normalized_rows: list[dict[str, Any]] = []
@@ -214,60 +259,17 @@ class DailyPriceBundleService:
                 if price_row is None:
                     continue
                 normalized_rows.append(price_row)
-                symbol_dates.setdefault(symbol, set()).add(row_date)
-                latest = latest_dates.get(symbol)
-                latest_dates[symbol] = row_date if latest is None or row_date > latest else latest
             if normalized_rows:
-                normalized_by_symbol[symbol] = normalized_rows
+                price_rows_by_symbol[symbol] = normalized_rows
 
-        if not normalized_by_symbol:
+        if not price_rows_by_symbol:
             return {"inserted": 0, "updated": 0}
 
-        symbols = list(normalized_by_symbol)
-        all_dates = [row_date for dates in symbol_dates.values() for row_date in dates]
-        min_date = min(all_dates)
-        max_date = max(all_dates)
-        existing_pairs: dict[tuple[str, date], int] = {}
-        for chunk_start in range(0, len(symbols), self.DAILY_PRICE_IMPORT_CHUNK_SIZE):
-            chunk_symbols = symbols[chunk_start:chunk_start + self.DAILY_PRICE_IMPORT_CHUNK_SIZE]
-            rows = (
-                db.query(StockPrice.id, StockPrice.symbol, StockPrice.date)
-                .filter(
-                    StockPrice.symbol.in_(chunk_symbols),
-                    StockPrice.date >= min_date,
-                    StockPrice.date <= max_date,
-                )
-                .all()
-            )
-            for record_id, record_symbol, record_date in rows:
-                target_dates = symbol_dates.get(record_symbol)
-                if target_dates and record_date in target_dates:
-                    existing_pairs[(record_symbol, record_date)] = record_id
-
-        rows_to_insert: list[dict[str, Any]] = []
-        rows_to_update: list[dict[str, Any]] = []
-        for symbol, price_rows in normalized_by_symbol.items():
-            for price_row in price_rows:
-                row_date = price_row["date"]
-                existing_id = existing_pairs.get((symbol, row_date))
-                if existing_id is None:
-                    rows_to_insert.append(price_row)
-                elif row_date == latest_dates.get(symbol):
-                    price_row["id"] = existing_id
-                    rows_to_update.append(price_row)
-
-        for chunk_start in range(0, len(rows_to_insert), self.DAILY_PRICE_IMPORT_CHUNK_SIZE):
-            db.bulk_insert_mappings(
-                StockPrice,
-                rows_to_insert[chunk_start:chunk_start + self.DAILY_PRICE_IMPORT_CHUNK_SIZE],
-            )
-        for chunk_start in range(0, len(rows_to_update), self.DAILY_PRICE_IMPORT_CHUNK_SIZE):
-            db.bulk_update_mappings(
-                StockPrice,
-                rows_to_update[chunk_start:chunk_start + self.DAILY_PRICE_IMPORT_CHUNK_SIZE],
-            )
-        db.flush()
-        return {"inserted": len(rows_to_insert), "updated": len(rows_to_update)}
+        return persist_stock_price_mappings(
+            db,
+            price_rows_by_symbol,
+            chunk_size=self.DAILY_PRICE_IMPORT_CHUNK_SIZE,
+        )
 
     def export_daily_price_bundle(
         self,
@@ -461,22 +463,8 @@ class DailyPriceBundleService:
         bundle_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _ = warm_redis_symbols
-        payload = bundle_metadata or self._read_bundle_metadata(input_path)
-        if payload.get("schema_version") != self.DAILY_PRICE_BUNDLE_SCHEMA_VERSION:
-            raise ValueError(
-                "Unsupported daily price bundle schema version: "
-                f"{payload.get('schema_version')!r}"
-            )
-
-        market = self.normalize_market(str(payload.get("market") or ""))
-        as_of_date = self._parse_as_of_date(str(payload.get("as_of_date") or ""))
-        bar_period = str(payload.get("bar_period") or "")
-        if bar_period != self.DAILY_PRICE_BAR_PERIOD:
-            raise ValueError(
-                f"Unsupported daily price bundle bar_period {bar_period!r}; "
-                f"expected {self.DAILY_PRICE_BAR_PERIOD!r}"
-            )
-
+        expected_metadata = bundle_metadata
+        payload: dict[str, Any] = {}
         batch_rows: dict[str, list[dict[str, Any]]] = {}
         imported_symbols = 0
         imported_rows = 0
@@ -488,7 +476,7 @@ class DailyPriceBundleService:
             batch_rows.clear()
 
         try:
-            for row in self._iter_bundle_rows(input_path):
+            for row in self._iter_bundle_rows(input_path, metadata=payload):
                 symbol = str(row.get("symbol") or "").strip().upper()
                 prices = row.get("prices") or []
                 if prices and not isinstance(prices, list):
@@ -503,6 +491,8 @@ class DailyPriceBundleService:
                 if len(batch_rows) >= self.DAILY_PRICE_IMPORT_CHUNK_SIZE:
                     flush_batch()
             flush_batch()
+            market, as_of_date, bar_period = self._validate_bundle_metadata(payload)
+            self._validate_bundle_matches_expected_metadata(payload, expected_metadata)
 
             sync_state = self._upsert_import_state(
                 db,

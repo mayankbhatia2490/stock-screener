@@ -13,6 +13,10 @@ from app.database import Base
 from app.models.app_settings import AppSetting
 from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
+from app.services.daily_price_bundle_reader import (
+    StreamingJsonReader,
+    read_daily_price_bundle_metadata,
+)
 from app.services.daily_price_bundle_service import DailyPriceBundleService
 
 
@@ -432,6 +436,32 @@ def test_sync_from_github_rejects_manifest_market_mismatch():
     db.close()
 
 
+def test_daily_price_bundle_metadata_reads_scalar_across_small_chunks(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(StreamingJsonReader, "_CHUNK_SIZE", 3)
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "schema_version": DailyPriceBundleService.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": DailyPriceBundleService.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 123456,
+                "rows": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metadata = read_daily_price_bundle_metadata(bundle_path)
+
+    assert metadata["symbol_count"] == 123456
+
+
 def test_import_daily_price_bundle_skips_redis_warm_for_two_year_bundle(tmp_path):
     session_factory = _make_session()
     db = session_factory()
@@ -732,7 +762,13 @@ def test_sync_from_github_import_uses_manifest_metadata_without_payload_prescan(
                             }
                         ],
                     }
-                ]
+                ],
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "US",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_us:20260418120000",
+                "symbol_count": 1,
             }
         ),
         encoding="utf-8",
@@ -764,4 +800,71 @@ def test_sync_from_github_import_uses_manifest_metadata_without_payload_prescan(
     assert result["imported_symbols"] == 1
     assert db.query(StockPrice).filter(StockPrice.symbol == "AAPL").count() == 1
     service._read_bundle_metadata.assert_not_called()
+    db.close()
+
+
+def test_sync_from_github_rejects_bundle_metadata_mismatch_and_rolls_back(
+    tmp_path,
+):
+    session_factory = _make_session()
+    db = session_factory()
+
+    service = DailyPriceBundleService()
+    bundle_path = tmp_path / "daily-price-us.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    {
+                        "symbol": "AAPL",
+                        "prices": [
+                            {
+                                "date": "2026-04-18",
+                                "open": 100.0,
+                                "high": 101.0,
+                                "low": 99.0,
+                                "close": 100.5,
+                                "adj_close": 100.0,
+                                "volume": 1_000_000,
+                            }
+                        ],
+                    }
+                ],
+                "schema_version": service.DAILY_PRICE_BUNDLE_SCHEMA_VERSION,
+                "market": "HK",
+                "as_of_date": "2026-04-18",
+                "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+                "source_revision": "daily_prices_hk:20260418120000",
+                "symbol_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = {
+        "market": "US",
+        "as_of_date": "2026-04-18",
+        "source_revision": "daily_prices_us:20260418120000",
+        "bundle_asset_name": bundle_path.name,
+        "bar_period": service.DAILY_PRICE_BAR_PERIOD,
+        "symbol_count": 1,
+    }
+
+    with pytest.raises(ValueError, match="bundle market 'HK' does not match manifest 'US'"):
+        service.sync_from_github(
+            db,
+            market="US",
+            github_sync_service=SimpleNamespace(
+                fetch_latest_bundle=lambda **kwargs: {
+                    "status": "success",
+                    "manifest": manifest,
+                    "bundle_path": str(bundle_path),
+                    "bundle_asset_name": bundle_path.name,
+                    "source_revision": manifest["source_revision"],
+                }
+            ),
+        )
+
+    assert db.query(StockPrice).count() == 0
+    assert db.query(AppSetting).count() == 0
+    assert not bundle_path.exists()
     db.close()
