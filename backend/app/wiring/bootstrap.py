@@ -398,10 +398,8 @@ class RuntimeServices:
                 if self._daily_price_bundle_service is None:
                     from app.services.daily_price_bundle_service import DailyPriceBundleService
 
-                    cache_bundle = self.cache_bundle()
                     self._daily_price_bundle_service = DailyPriceBundleService(
                         market_calendar=self.market_calendar_service(),
-                        price_cache=cache_bundle.price,
                     )
         return self._daily_price_bundle_service
 

@@ -337,12 +337,10 @@ def test_cn_daily_price_shard_bootstrap_fetches_missing_symbols_and_exports_shar
                 "rows": 1,
             }
 
-        price_cache = SimpleNamespace(
-            store_batch_in_cache=lambda batch, also_store_db=True: captured["stored"].append(
-                (batch, also_store_db)
-            )
-            or len(batch)
-        )
+    class FakePriceCache:
+        def store_batch_in_cache(self, batch, also_store_db=True):
+            captured["stored"].append((batch, also_store_db))
+            return len(batch)
 
     def fake_classify_price_history(db, *, symbols, as_of_date):
         assert symbols == ["000001.SZ", "600000.SS"]
@@ -369,6 +367,7 @@ def test_cn_daily_price_shard_bootstrap_fetches_missing_symbols_and_exports_shar
     stats = cn_shard_script.bootstrap_cn_daily_price_shard(
         db=FakeDb(),
         service=FakeService(),
+        price_cache=FakePriceCache(),
         fetcher=FakeFetcher(),
         shard_index=1,
         shard_count=2,
