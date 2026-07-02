@@ -141,10 +141,9 @@ def deactivate_stale_price_symbols(result: dict | None = None, *, market: str) -
     try:
         calendar = get_market_calendar_service()
         last_trading_day = calendar.last_completed_trading_day(market_code)
-        # 10 trading days ≈ 2 calendar weeks of grace
-        grace_days = 14
+        # 3 calendar days grace — catches symbols missing this week's data
         from datetime import timedelta
-        cutoff = last_trading_day - timedelta(days=grace_days)
+        cutoff = last_trading_day - timedelta(days=3)
 
         db = SessionLocal()
         try:
