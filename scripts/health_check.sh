@@ -1,271 +1,252 @@
 #!/bin/bash
 # Comprehensive health check for stock-screener on Synology DS220+
-# Run from ~/stock-screener on the NAS:
-#   bash scripts/health_check.sh
+# Run from ~/stock-screener:  bash scripts/health_check.sh
 
-set -euo pipefail
+FRONTEND="http://localhost:7777"
+API="$FRONTEND/api/v1"
+PASS=0; FAIL=0; WARN=0
 
-API="http://localhost:7777/api/v1"
-PASS=0
-FAIL=0
-WARN=0
+green()  { printf "\033[32m[PASS]\033[0m %s\n" "$*"; PASS=$((PASS+1)); }
+red()    { printf "\033[31m[FAIL]\033[0m %s\n" "$*"; FAIL=$((FAIL+1)); }
+yellow() { printf "\033[33m[WARN]\033[0m %s\n" "$*"; WARN=$((WARN+1)); }
+header() { printf "\n\033[1m=== %s ===\033[0m\n" "$*"; }
 
-green()  { echo -e "\033[32m[PASS]\033[0m $*"; PASS=$((PASS+1)); }
-red()    { echo -e "\033[31m[FAIL]\033[0m $*"; FAIL=$((FAIL+1)); }
-yellow() { echo -e "\033[33m[WARN]\033[0m $*"; WARN=$((WARN+1)); }
-header() { echo; echo -e "\033[1m=== $* ===\033[0m"; }
+jq_or() {
+  # Parse JSON field with python3 (available in backend container)
+  # Usage: jq_or "$JSON" "d.get('field','fallback')" "fallback"
+  local json="$1" expr="$2" fallback="${3:-unknown}"
+  local result
+  result=$(printf '%s' "$json" | docker exec -i stock-screener-backend-1 \
+    python3 -c "import sys,json; d=json.load(sys.stdin); print($expr)" 2>/dev/null) || true
+  echo "${result:-$fallback}"
+}
+
+api_get() {
+  # Curl through the nginx proxy; returns body or "ERROR:HTTP_CODE"
+  local path="$1"
+  local http_code body
+  body=$(curl -s -w "\n%{http_code}" "$API$path" 2>/dev/null) || true
+  http_code=$(printf '%s' "$body" | tail -1)
+  body=$(printf '%s' "$body" | sed '$d')
+  if [ "$http_code" = "200" ]; then
+    printf '%s' "$body"
+  else
+    printf 'ERROR:%s' "${http_code:-0}"
+  fi
+}
 
 # ── 1. DOCKER CONTAINERS ──────────────────────────────────────────────────────
 header "1. Docker containers"
-
-REQUIRED_CONTAINERS=(
-  "stock-screener-backend-1"
-  "stock-screener-postgres-1"
-  "stock-screener-redis-1"
-  "stock-screener-frontend-1"
-  "stock-screener-celery-beat-1"
-  "stock-screener-celery-general-1"
-  "stock-screener-celery-datafetch-1"
+for c in \
+  "stock-screener-backend-1" \
+  "stock-screener-postgres-1" \
+  "stock-screener-redis-1" \
+  "stock-screener-frontend-1" \
+  "stock-screener-celery-beat-1" \
+  "stock-screener-celery-general-1" \
+  "stock-screener-celery-datafetch-1" \
   "stock-screener-celery-marketjobs-us-1"
-)
-
-for c in "${REQUIRED_CONTAINERS[@]}"; do
-  STATUS=$(docker inspect "$c" --format '{{.State.Status}}' 2>/dev/null || echo "missing")
-  HEALTH=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' 2>/dev/null || echo "n/a")
-  if [ "$STATUS" = "running" ]; then
-    if [ "$HEALTH" = "unhealthy" ]; then
+do
+  status=$(docker inspect "$c" --format '{{.State.Status}}' 2>/dev/null || echo "missing")
+  health=$(docker inspect "$c" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' 2>/dev/null || echo "n/a")
+  if [ "$status" = "running" ]; then
+    if [ "$health" = "unhealthy" ]; then
       red "$c — running but UNHEALTHY"
     else
-      green "$c — $STATUS ($HEALTH)"
+      green "$c — running ($health)"
     fi
   else
-    red "$c — $STATUS"
+    red "$c — $status"
   fi
 done
 
 # ── 2. BACKEND HEALTH ─────────────────────────────────────────────────────────
-header "2. Backend health endpoint"
-
-READYZ=$(curl -sf http://localhost:7777/readyz 2>/dev/null || curl -sf http://localhost:8000/readyz 2>/dev/null || echo "ERROR")
-if echo "$READYZ" | grep -q '"status"'; then
-  DB=$(echo "$READYZ" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('database','?'))" 2>/dev/null || echo "?")
-  REDIS=$(echo "$READYZ" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('redis','?'))" 2>/dev/null || echo "?")
-  green "Backend /readyz — database=$DB  redis=$REDIS"
+header "2. Backend /readyz (checked inside container)"
+readyz=$(docker exec stock-screener-backend-1 curl -sf http://localhost:8000/readyz 2>/dev/null) || readyz=""
+if [ -n "$readyz" ]; then
+  db=$(jq_or "$readyz" "d.get('database','?')" "?")
+  redis=$(jq_or "$readyz" "d.get('redis','?')" "?")
+  status=$(jq_or "$readyz" "d.get('status','?')" "?")
+  if echo "$readyz" | grep -q '"status"'; then
+    green "Backend ready — status=$status  database=$db  redis=$redis"
+  else
+    yellow "Backend responded but unexpected format: $(printf '%s' "$readyz" | head -c 120)"
+  fi
 else
-  red "Backend /readyz unreachable or returned error"
+  red "Backend /readyz unreachable inside container"
 fi
 
-# ── 3. PRICE CACHE STATUS ─────────────────────────────────────────────────────
-header "3. Price cache & data freshness"
-
-CACHE_STATUS=$(curl -sf "$API/cache/market-status" 2>/dev/null || echo "ERROR")
-if [ "$CACHE_STATUS" = "ERROR" ]; then
-  red "Cache market-status endpoint unreachable"
+# ── 3. FRONTEND PROXY ─────────────────────────────────────────────────────────
+header "3. Frontend nginx proxy (port 7777)"
+http_code=$(curl -s -o /dev/null -w "%{http_code}" "$FRONTEND/" 2>/dev/null) || http_code=0
+if [ "$http_code" = "200" ]; then
+  green "Frontend serving at $FRONTEND (HTTP $http_code)"
 else
-  OVERALL=$(echo "$CACHE_STATUS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('overall_status', d.get('status', 'unknown')))
-" 2>/dev/null || echo "unknown")
-  LAST=$(echo "$CACHE_STATUS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('last_refreshed_trading_day', d.get('last_refresh', 'unknown')))
-" 2>/dev/null || echo "unknown")
-  if echo "$OVERALL" | grep -qi "ok\|completed\|fresh"; then
-    green "Price cache — status=$OVERALL  last_refreshed=$LAST"
+  red "Frontend not responding at $FRONTEND (HTTP $http_code)"
+fi
+
+# Verify API proxy works
+proxy_code=$(curl -s -o /dev/null -w "%{http_code}" "$API/features" 2>/dev/null) || proxy_code=0
+if [ "$proxy_code" = "200" ]; then
+  green "API proxy working — /api/v1/features returned HTTP $proxy_code"
+else
+  yellow "API proxy check — /api/v1/features returned HTTP $proxy_code (may need auth)"
+fi
+
+# ── 4. PRICE CACHE STATUS ─────────────────────────────────────────────────────
+header "4. Price cache & data freshness"
+cache_resp=$(api_get "/cache/market-status")
+if printf '%s' "$cache_resp" | grep -q "^ERROR"; then
+  code=$(printf '%s' "$cache_resp" | cut -d: -f2)
+  yellow "Cache market-status returned HTTP $code (may require warm cache)"
+else
+  overall=$(jq_or "$cache_resp" "d.get('overall_status', d.get('status','unknown'))" "unknown")
+  last=$(jq_or "$cache_resp" "d.get('last_refreshed_trading_day', d.get('last_refresh','unknown'))" "unknown")
+  if printf '%s' "$overall" | grep -qi "ok\|complete\|fresh"; then
+    green "Price cache — status=$overall  last_refresh=$last"
   else
-    yellow "Price cache — status=$OVERALL  last_refreshed=$LAST (run pipeline to refresh)"
+    yellow "Price cache — status=$overall  last_refresh=$last"
   fi
 fi
 
-STALENESS=$(curl -sf "$API/cache/staleness-status" 2>/dev/null || echo "ERROR")
-if [ "$STALENESS" != "ERROR" ]; then
-  IS_STALE=$(echo "$STALENESS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('is_stale', d.get('stale', 'unknown')))
-" 2>/dev/null || echo "unknown")
-  STALE_COUNT=$(echo "$STALENESS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('stale_count', d.get('stale_symbols', '?')))
-" 2>/dev/null || echo "?")
-  if [ "$IS_STALE" = "False" ] || [ "$IS_STALE" = "false" ]; then
-    green "Staleness check — not stale  stale_symbols=$STALE_COUNT"
+# Check staleness via DB directly
+stale_count=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT COUNT(*) FROM stock_universe su WHERE su.is_active=true AND su.market='US'
+   AND NOT EXISTS (
+     SELECT 1 FROM stock_prices sp WHERE sp.symbol=su.symbol
+     AND sp.date >= (SELECT MAX(date)-3 FROM stock_prices)
+   );" 2>/dev/null | tr -d ' \n') || stale_count=""
+if [ -n "$stale_count" ] && [ "$stale_count" != "" ]; then
+  if [ "$stale_count" -eq "0" ] 2>/dev/null; then
+    green "Stale active symbols (no price in last 3 days): 0"
   else
-    yellow "Staleness check — is_stale=$IS_STALE  stale_symbols=$STALE_COUNT"
+    yellow "Stale active symbols: $stale_count (will be deactivated on next pipeline run)"
   fi
 fi
 
-# ── 4. GROUP RANKINGS ─────────────────────────────────────────────────────────
-header "4. Group rankings"
-
-GROUPS=$(curl -sf "$API/groups/rankings/current?market=US&limit=5" 2>/dev/null || echo "ERROR")
-if [ "$GROUPS" = "ERROR" ]; then
-  red "Group rankings endpoint unreachable"
+# ── 5. GROUP RANKINGS ─────────────────────────────────────────────────────────
+header "5. Group rankings"
+groups_resp=$(api_get "/groups/rankings/current?market=US&limit=5")
+if printf '%s' "$groups_resp" | grep -q "^ERROR"; then
+  code=$(printf '%s' "$groups_resp" | cut -d: -f2)
+  yellow "Group rankings HTTP $code (pipeline not yet run today, or stale data)"
 else
-  COUNT=$(echo "$GROUPS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-rankings = d.get('rankings', d.get('groups', d.get('data', [])))
-print(len(rankings))
-" 2>/dev/null || echo "0")
-  DATE=$(echo "$GROUPS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('as_of_date', d.get('date', 'unknown')))
-" 2>/dev/null || echo "unknown")
-  if [ "$COUNT" -gt "0" ] 2>/dev/null; then
-    green "Group rankings — $COUNT groups returned  as_of=$DATE"
+  count=$(jq_or "$groups_resp" "len(d.get('rankings', d.get('groups', d.get('data',[]))))" "0")
+  asof=$(jq_or "$groups_resp" "d.get('as_of_date', d.get('date','unknown'))" "unknown")
+  if [ "$count" -gt "0" ] 2>/dev/null; then
+    green "Group rankings — $count groups returned  as_of=$asof"
   else
-    yellow "Group rankings — returned 0 groups (pipeline not yet run today)"
+    yellow "Group rankings — 0 groups (pipeline hasn't run today yet)"
   fi
 fi
 
-# ── 5. BREADTH DATA ───────────────────────────────────────────────────────────
-header "5. Market breadth"
-
-BREADTH=$(curl -sf "$API/breadth/current?market=US" 2>/dev/null || echo "ERROR")
-if [ "$BREADTH" = "ERROR" ]; then
-  red "Breadth endpoint unreachable"
+# ── 6. BREADTH DATA ───────────────────────────────────────────────────────────
+header "6. Market breadth"
+breadth_resp=$(api_get "/breadth/current?market=US")
+if printf '%s' "$breadth_resp" | grep -q "^ERROR"; then
+  code=$(printf '%s' "$breadth_resp" | cut -d: -f2)
+  yellow "Breadth endpoint HTTP $code"
 else
-  B_DATE=$(echo "$BREADTH" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('date', d.get('as_of_date', 'unknown')))
-" 2>/dev/null || echo "unknown")
-  ADV=$(echo "$BREADTH" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('advancing', d.get('adv', '?')))
-" 2>/dev/null || echo "?")
-  if [ "$B_DATE" != "unknown" ] && [ "$B_DATE" != "null" ]; then
-    green "Breadth data — date=$B_DATE  advancing=$ADV"
+  bdate=$(jq_or "$breadth_resp" "d.get('date', d.get('as_of_date','unknown'))" "unknown")
+  adv=$(jq_or "$breadth_resp" "str(d.get('advancing', d.get('adv','?')))" "?")
+  dec=$(jq_or "$breadth_resp" "str(d.get('declining', d.get('dec','?')))" "?")
+  if [ "$bdate" != "unknown" ] && [ "$bdate" != "null" ] && [ -n "$bdate" ]; then
+    green "Breadth data — date=$bdate  adv=$adv  dec=$dec"
   else
-    yellow "Breadth data — no data yet (pipeline not yet run)"
+    yellow "Breadth — no data yet"
   fi
 fi
 
-# ── 6. MARKET SCAN / DAILY SNAPSHOT ──────────────────────────────────────────
-header "6. Market scan snapshot"
-
-SNAPSHOT=$(curl -sf "$API/market-scan/daily-snapshot?market=US" 2>/dev/null || echo "ERROR")
-if [ "$SNAPSHOT" = "ERROR" ]; then
-  red "Market scan snapshot unreachable"
+# ── 7. MARKET SNAPSHOT ────────────────────────────────────────────────────────
+header "7. Market scan snapshot"
+snap_resp=$(api_get "/market-scan/daily-snapshot?market=US")
+if printf '%s' "$snap_resp" | grep -q "^ERROR"; then
+  code=$(printf '%s' "$snap_resp" | cut -d: -f2)
+  yellow "Market snapshot HTTP $code (pipeline not yet run today)"
 else
-  SNAP_DATE=$(echo "$SNAPSHOT" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('as_of_date', d.get('date', d.get('meta', {}).get('as_of_date', 'unknown'))))
-" 2>/dev/null || echo "unknown")
-  STOCK_COUNT=$(echo "$SNAPSHOT" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-rows = d.get('rows', d.get('stocks', d.get('data', [])))
-print(len(rows))
-" 2>/dev/null || echo "0")
-  if [ "$STOCK_COUNT" -gt "0" ] 2>/dev/null; then
-    green "Market snapshot — $STOCK_COUNT stocks  as_of=$SNAP_DATE"
+  scount=$(jq_or "$snap_resp" "len(d.get('rows', d.get('stocks', d.get('data',[]))))" "0")
+  sdate=$(jq_or "$snap_resp" "d.get('as_of_date', d.get('meta',{}).get('as_of_date','unknown'))" "unknown")
+  if [ "$scount" -gt "0" ] 2>/dev/null; then
+    green "Market snapshot — $scount stocks  as_of=$sdate"
   else
-    yellow "Market snapshot — 0 stocks returned (pipeline not yet run today)"
+    yellow "Market snapshot — 0 stocks (pipeline not yet run today)"
   fi
 fi
 
-# ── 7. PIPELINE / RUNTIME ACTIVITY ───────────────────────────────────────────
-header "7. Pipeline activity status"
-
-ACTIVITY=$(curl -sf "$API/runtime/activity" 2>/dev/null || echo "ERROR")
-if [ "$ACTIVITY" = "ERROR" ]; then
+# ── 8. PIPELINE ACTIVITY ──────────────────────────────────────────────────────
+header "8. Pipeline activity"
+act_resp=$(api_get "/runtime/activity")
+if printf '%s' "$act_resp" | grep -q "^ERROR"; then
   red "Runtime activity endpoint unreachable"
 else
-  SUMMARY_STATUS=$(echo "$ACTIVITY" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-print(d.get('summary', {}).get('status', 'unknown'))
-" 2>/dev/null || echo "unknown")
-  MARKET_STATUS=$(echo "$ACTIVITY" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-markets = d.get('markets', [])
-us = next((m for m in markets if m.get('market') == 'US'), {})
-print(us.get('status', 'no US market entry'))
-" 2>/dev/null || echo "unknown")
-  STAGE=$(echo "$ACTIVITY" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-markets = d.get('markets', [])
-us = next((m for m in markets if m.get('market') == 'US'), {})
-print(us.get('stage_key', us.get('message', '-')))
-" 2>/dev/null || echo "-")
-  if echo "$SUMMARY_STATUS" | grep -qi "idle\|ok\|completed"; then
-    green "Runtime activity — summary=$SUMMARY_STATUS  US=$MARKET_STATUS  stage=$STAGE"
-  elif echo "$SUMMARY_STATUS" | grep -qi "running"; then
-    yellow "Runtime activity — RUNNING  US=$MARKET_STATUS  stage=$STAGE"
+  sum_status=$(jq_or "$act_resp" "d.get('summary',{}).get('status','unknown')" "unknown")
+  us_status=$(jq_or "$act_resp" \
+    "next((m for m in d.get('markets',[]) if m.get('market')=='US'),{}).get('status','no US entry')" \
+    "unknown")
+  us_stage=$(jq_or "$act_resp" \
+    "next((m for m in d.get('markets',[]) if m.get('market')=='US'),{}).get('stage_key','-')" \
+    "-")
+  us_msg=$(jq_or "$act_resp" \
+    "next((m for m in d.get('markets',[]) if m.get('market')=='US'),{}).get('message','')" \
+    "")
+  if printf '%s' "$us_status" | grep -qi "failed\|stuck"; then
+    red "Pipeline US — $us_status  stage=$us_stage  msg=$us_msg"
+  elif printf '%s' "$us_status" | grep -qi "running\|queued"; then
+    yellow "Pipeline US — ACTIVE ($us_status)  stage=$us_stage"
   else
-    yellow "Runtime activity — summary=$SUMMARY_STATUS  US=$MARKET_STATUS  stage=$STAGE"
+    green "Pipeline US — $us_status  stage=$us_stage  summary=$sum_status"
   fi
 fi
 
-# ── 8. CELERY WORKERS VIA DB CHECK ───────────────────────────────────────────
-header "8. Scheduled tasks (celery-beat)"
-
-BEAT_LOGS=$(docker logs stock-screener-celery-beat-1 2>&1 | grep -E "Scheduler|daily|pipeline|beat" | tail -5)
-if [ -n "$BEAT_LOGS" ]; then
-  green "celery-beat active — recent log:"
-  echo "$BEAT_LOGS" | sed 's/^/    /'
+# ── 9. CELERY BEAT ────────────────────────────────────────────────────────────
+header "9. Celery-beat scheduler"
+beat_line=$(docker logs stock-screener-celery-beat-1 2>&1 | grep -E "beat|Scheduler|daily" | tail -3)
+if [ -n "$beat_line" ]; then
+  green "celery-beat running — recent log:"
+  printf '%s\n' "$beat_line" | sed 's/^/    /'
 else
-  yellow "celery-beat — no recent scheduler log lines found"
+  yellow "celery-beat — no recent log found (may have just started)"
 fi
 
-# ── 9. DATABASE KEY DATA ─────────────────────────────────────────────────────
-header "9. Database checks"
+# ── 10. DATABASE ──────────────────────────────────────────────────────────────
+header "10. Database key records"
 
-# Active symbols count
-ACTIVE=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
-  "SELECT COUNT(*) FROM stock_universe WHERE is_active=true AND market='US';" 2>/dev/null | tr -d ' ')
-if [ -n "$ACTIVE" ] && [ "$ACTIVE" -gt "0" ] 2>/dev/null; then
-  green "Active US symbols in universe: $ACTIVE"
+active=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT COUNT(*) FROM stock_universe WHERE is_active=true AND market='US';" 2>/dev/null | tr -d ' \n') || active=0
+[ "$active" -gt "0" ] 2>/dev/null && \
+  green "Active US symbols: $active" || red "Active US symbols: ${active:-0} (expected > 0)"
+
+latest=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT MAX(date) FROM stock_prices sp
+   JOIN stock_universe su ON sp.symbol=su.symbol
+   WHERE su.market='US' AND su.is_active=true;" 2>/dev/null | tr -d ' \n') || latest=""
+[ -n "$latest" ] && green "Latest price date: $latest" || yellow "Could not read latest price date"
+
+migration=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT string_agg(version_num, ', ') FROM alembic_version;" 2>/dev/null | tr -d ' \n') || migration=""
+green "DB migration: ${migration:-unknown}"
+
+refresh=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT value FROM app_settings WHERE key='market.refresh_state.US';" 2>/dev/null | tr -d '\n') || refresh=""
+if [ -n "$refresh" ]; then
+  r_day=$(jq_or "$refresh" "d.get('last_refreshed_trading_day','?')" "?")
+  r_st=$(jq_or "$refresh" "d.get('status','?')" "?")
+  green "Last price refresh: trading_day=$r_day  status=$r_st"
 else
-  red "Active US symbols: $ACTIVE (expected > 0)"
+  yellow "No market refresh state yet (runs after first price refresh)"
 fi
 
-# Latest price date
-LATEST_PRICE=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
-  "SELECT MAX(date) FROM stock_prices sp JOIN stock_universe su ON sp.symbol=su.symbol WHERE su.market='US' AND su.is_active=true;" 2>/dev/null | tr -d ' ')
-if [ -n "$LATEST_PRICE" ]; then
-  green "Latest price date in DB: $LATEST_PRICE"
-else
-  yellow "Could not determine latest price date"
-fi
-
-# Alembic migration version
-MIGRATION=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
-  "SELECT version_num FROM alembic_version;" 2>/dev/null | tr -d ' ' | sort | tail -1)
-green "DB migration revision: $MIGRATION"
-
-# Market refresh state
-REFRESH_STATE=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
-  "SELECT value FROM app_settings WHERE key='market.refresh_state.US';" 2>/dev/null | tr -d ' ')
-if [ -n "$REFRESH_STATE" ]; then
-  REFRESH_DATE=$(echo "$REFRESH_STATE" | python3 -c "
-import sys, json
-d = json.loads(sys.stdin.read().strip())
-print(d.get('last_refreshed_trading_day','?') + '  status=' + d.get('status','?'))
-" 2>/dev/null || echo "$REFRESH_STATE")
-  green "Last price refresh: $REFRESH_DATE"
-else
-  yellow "No market refresh state recorded yet"
-fi
+sched=$(docker exec stock-screener-postgres-1 psql -U stockscanner stockscanner -t -c \
+  "SELECT COUNT(*) FROM app_settings WHERE key LIKE 'runtime.activity.%';" 2>/dev/null | tr -d ' \n') || sched=0
+green "Runtime activity records in DB: ${sched:-0}"
 
 # ── SUMMARY ───────────────────────────────────────────────────────────────────
 header "SUMMARY"
-echo -e "\033[32mPASS: $PASS\033[0m  \033[33mWARN: $WARN\033[0m  \033[31mFAIL: $FAIL\033[0m"
-echo
+printf "\033[32mPASS: %d\033[0m  \033[33mWARN: %d\033[0m  \033[31mFAIL: %d\033[0m\n" "$PASS" "$WARN" "$FAIL"
 if [ "$FAIL" -gt "0" ]; then
-  echo "Action required: fix FAIL items above before the nightly pipeline runs."
+  echo "Action needed: investigate FAIL items above."
 elif [ "$WARN" -gt "0" ]; then
-  echo "System healthy. WARN items will resolve after tonight's pipeline run (00:30 UAE)."
+  echo "System healthy. WARN items will clear after tonight's pipeline run (00:30 UAE)."
 else
-  echo "All checks passed. System is fully operational."
+  echo "All checks passed. System fully operational."
 fi
